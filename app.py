@@ -1,11 +1,25 @@
 import threading
 import queue
 import config
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, redirect, session, url_for
+from functools import wraps
 from auth import check_api_connection
 from strategy import DeltaNeutralStrategy
 
 app = Flask(__name__)
+app.secret_key = 'delta-neutral-bot-secret-key-change-me'
+
+LOGIN_ID = 'admin'
+LOGIN_PASSWORD = 'admin123'
+
+
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get('logged_in'):
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated
 
 strategy_thread = None
 current_strategy = None
@@ -69,7 +83,24 @@ def run_strategy(params):
         log_queue.put("__STOPPED__")
 
 
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        if request.form['user_id'] == LOGIN_ID and request.form['password'] == LOGIN_PASSWORD:
+            session['logged_in'] = True
+            return redirect(url_for('index'))
+        return render_template('login.html', error='Invalid credentials')
+    return render_template('login.html', error=None)
+
+
+@app.route('/logout')
+def logout():
+    session.pop('logged_in', None)
+    return redirect(url_for('login'))
+
+
 @app.route('/')
+@login_required
 def index():
     return render_template('index.html',
         expiry_date=config.EXPIRY_DATE,
@@ -84,6 +115,7 @@ def index():
 
 
 @app.route('/start', methods=['POST'])
+@login_required
 def start():
     global strategy_thread, strategy_running
     if strategy_running:
@@ -96,6 +128,7 @@ def start():
 
 
 @app.route('/stop', methods=['POST'])
+@login_required
 def stop():
     global current_strategy, strategy_running
     if not strategy_running or not current_strategy:
@@ -106,6 +139,7 @@ def stop():
 
 
 @app.route('/stream')
+@login_required
 def stream():
     def generate():
         while True:
@@ -122,6 +156,7 @@ def stream():
 
 
 @app.route('/status')
+@login_required
 def status():
     s = current_strategy
     if not s or not strategy_running:
