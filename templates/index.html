@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Delta Neutral Bot</title>
+<style>
+  :root { --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a; --accent: #6c5ce7; --green: #00b894; --red: #e17055; --text: #dfe6e9; --muted: #636e72; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'SF Mono', 'Fira Code', monospace; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .container { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 1.3rem; margin-bottom: 24px; color: var(--accent); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .field input { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 6px; font-family: inherit; font-size: 0.9rem; }
+  .field input:focus { outline: none; border-color: var(--accent); }
+  .actions { display: flex; gap: 10px; margin-bottom: 20px; }
+  button { padding: 10px 24px; border: none; border-radius: 6px; font-family: inherit; font-size: 0.85rem; cursor: pointer; font-weight: 600; }
+  #startBtn { background: var(--green); color: #000; }
+  #stopBtn { background: var(--red); color: #fff; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 20px; }
+  .stat { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; text-align: center; }
+  .stat .val { font-size: 1.2rem; font-weight: 700; margin-top: 4px; }
+  .stat .lbl { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; }
+  .pnl-pos { color: var(--green); }
+  .pnl-neg { color: var(--red); }
+  #log { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; height: 420px; overflow-y: auto; font-size: 0.78rem; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+  #log .line { padding: 1px 0; }
+  #log .line.warn { color: #fdcb6e; }
+  #log .line.err { color: var(--red); }
+  #log .line.ok { color: var(--green); }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>⚡ Delta Neutral Options Bot</h1>
+
+  <div class="grid">
+    <div class="field"><label>Expiry Date (DD-MM-YYYY)</label><input id="expiry_date" value="{{ expiry_date }}"></div>
+    <div class="field"><label>Lot Size</label><input id="lot_size" type="number" value="{{ lot_size }}"></div>
+    <div class="field"><label>Target Delta</label><input id="target_delta" type="number" step="0.01" value="{{ target_delta }}"></div>
+    <div class="field"><label>Delta Tolerance</label><input id="delta_tolerance" type="number" step="0.01" value="{{ delta_tolerance }}"></div>
+    <div class="field"><label>Premium Threshold (%)</label><input id="premium_threshold" type="number" value="{{ premium_threshold }}"></div>
+    <div class="field"><label>Target PnL ($)</label><input id="target_pnl" type="number" value="{{ target_pnl }}"></div>
+    <div class="field"><label>Monitoring Interval (s)</label><input id="monitoring_interval" type="number" value="{{ monitoring_interval }}"></div>
+  </div>
+
+  <div class="actions">
+    <button id="startBtn" onclick="startBot()">▶ Start</button>
+    <button id="stopBtn" onclick="stopBot()" disabled>■ Stop</button>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="lbl">Total PnL</div><div class="val" id="s_total">—</div></div>
+    <div class="stat"><div class="lbl">Realized</div><div class="val" id="s_realized">—</div></div>
+    <div class="stat"><div class="lbl">Unrealized</div><div class="val" id="s_unrealized">—</div></div>
+    <div class="stat"><div class="lbl">Adjustments</div><div class="val" id="s_adj">—</div></div>
+  </div>
+
+  <div id="log"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fields = ['expiry_date','lot_size','target_delta','delta_tolerance','premium_threshold','target_pnl','monitoring_interval'];
+let evtSource = null, statusTimer = null;
+const isRunning = {{ running }};
+
+function setRunning(on) {
+  $('startBtn').disabled = on;
+  $('stopBtn').disabled = !on;
+  fields.forEach(f => $(f).disabled = on);
+}
+
+function appendLog(text) {
+  const el = document.createElement('div');
+  el.className = 'line' + (text.includes('✗') || text.includes('❌') ? ' err' : text.includes('⚠') ? ' warn' : text.includes('✓') ? ' ok' : '');
+  el.textContent = text;
+  $('log').appendChild(el);
+  $('log').scrollTop = $('log').scrollHeight;
+}
+
+function startBot() {
+  $('log').innerHTML = '';
+  const params = {};
+  fields.forEach(f => params[f] = $(f).value);
+  fetch('/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(params) })
+    .then(r => r.json()).then(d => {
+      if (d.error) { appendLog('❌ ' + d.error); return; }
+      setRunning(true);
+      listenLogs();
+      statusTimer = setInterval(pollStatus, 3000);
+    });
+}
+
+function stopBot() {
+  fetch('/stop', { method: 'POST' }).then(r => r.json()).then(d => appendLog('Stopping...'));
+}
+
+function listenLogs() {
+  if (evtSource) evtSource.close();
+  evtSource = new EventSource('/stream');
+  evtSource.onmessage = e => appendLog(e.data);
+  evtSource.addEventListener('stopped', () => {
+    evtSource.close();
+    clearInterval(statusTimer);
+    setRunning(false);
+    appendLog('— Strategy stopped —');
+  });
+}
+
+function pollStatus() {
+  fetch('/status').then(r => r.json()).then(d => {
+    if (!d.running) { clearInterval(statusTimer); setRunning(false); return; }
+    const cls = v => v >= 0 ? 'pnl-pos' : 'pnl-neg';
+    $('s_total').className = 'val ' + cls(d.total_pnl);
+    $('s_total').textContent = '$' + d.total_pnl.toFixed(2);
+    $('s_realized').textContent = '$' + d.realized_pnl.toFixed(2);
+    $('s_unrealized').textContent = '$' + d.unrealized_pnl.toFixed(2);
+    $('s_adj').textContent = d.adjustment_count;
+  });
+}
+
+if (isRunning) {
+  setRunning(true);
+  listenLogs();
+  statusTimer = setInterval(pollStatus, 3000);
+  appendLog('— Reconnected to running strategy —');
+}
+</script>
+</body>
+</html>
