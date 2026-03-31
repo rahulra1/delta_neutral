@@ -234,13 +234,20 @@ class DeltaNeutralStrategy:
         self.cumulative_realized_pnl += realized
         time.sleep(2)
 
-        print(f"  [2/3] Finding NEW {close_leg.upper()} with delta {abs(triggered_delta):.4f}...")
+        # Fetch live delta from REST API instead of relying on WS delta (may be 0)
+        triggered_pos = self.call_position if triggered_leg == 'call' else self.put_position
+        live_data = get_current_price(triggered_pos['product_id'])
+        if live_data and live_data.get('delta'):
+            triggered_delta = live_data['delta']
+
+        search_delta = abs(triggered_delta) if abs(triggered_delta) > DELTA_TOLERANCE else TARGET_DELTA
+        print(f"  [2/3] Finding NEW {close_leg.upper()} with delta {search_delta:.4f}...")
         option_chain = get_option_chain(EXPIRY_DATE)
 
         if triggered_leg == 'call':
-            _, new_opt = find_target_delta_options(option_chain, abs(triggered_delta), DELTA_TOLERANCE)
+            _, new_opt = find_target_delta_options(option_chain, search_delta, DELTA_TOLERANCE)
         else:
-            new_opt, _ = find_target_delta_options(option_chain, abs(triggered_delta), DELTA_TOLERANCE)
+            new_opt, _ = find_target_delta_options(option_chain, search_delta, DELTA_TOLERANCE)
 
         if not new_opt:
             print(f"  ✗ Could not find suitable {close_leg.upper()} option")
