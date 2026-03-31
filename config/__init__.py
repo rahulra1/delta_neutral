@@ -2,8 +2,8 @@ import os
 
 BASE_URL = 'https://api.india.delta.exchange'
 WS_URL = 'wss://socket.india.delta.exchange'
-API_KEY = os.environ.get('DELTA_API_KEY', 'XUWEGMr1URrzzme1o6jBrEzAkUuNH4')
-API_SECRET = os.environ.get('DELTA_API_SECRET', 'gNfRcBC2FEeMFlQhwcMI5re8F6ob5KQS70AjjvZw3GPCTfUprDX485NPVDqW')
+API_KEY = os.environ.get('DELTA_API_KEY', 'Arj3Ey4TePkxnRbSypkUO4akKXdm4j')
+API_SECRET = os.environ.get('DELTA_API_SECRET', '8xmmZ78jhvqaUmBBiohhwq95hCyQ0NUnAwQpCOHQELRag0SCbeyDDfipxM2A')
 
 EXPIRY_DATE = '01-04-2026'
 TARGET_DELTA = 0.20
