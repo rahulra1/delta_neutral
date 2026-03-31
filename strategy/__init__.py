@@ -30,16 +30,21 @@ class DeltaNeutralStrategy:
         self.put_actual_entry_price = 0
         self.running = True
         self.ws_manager = WebSocketManager(self)
-        self.last_check_time = time.time()
+        self.last_check_time_call = 0
+        self.last_check_time_put = 0
         self.check_interval = MONITORING_INTERVAL
 
     def on_price_update(self, symbol, mark_price, delta):
-        if time.time() - self.last_check_time < self.check_interval:
-            return
-        self.last_check_time = time.time()
+        now = time.time()
         if self.call_position and symbol == self.call_position['symbol']:
+            if now - self.last_check_time_call < self.check_interval:
+                return
+            self.last_check_time_call = now
             self.check_adjustment('call', mark_price, delta)
         elif self.put_position and symbol == self.put_position['symbol']:
+            if now - self.last_check_time_put < self.check_interval:
+                return
+            self.last_check_time_put = now
             self.check_adjustment('put', mark_price, delta)
 
     def _get_other_leg_price(self, leg):
@@ -163,6 +168,13 @@ class DeltaNeutralStrategy:
 
                 call_chg = (call_price - self.call_entry_price) / self.call_entry_price
                 put_chg = (put_price - self.put_entry_price) / self.put_entry_price
+
+                if call_chg >= PREMIUM_INCREASE_THRESHOLD:
+                    call_delta = call_ws['delta'] if call_ws else 0
+                    self.check_adjustment('call', call_price, call_delta)
+                if put_chg >= PREMIUM_INCREASE_THRESHOLD:
+                    put_delta = put_ws['delta'] if put_ws else 0
+                    self.check_adjustment('put', put_price, put_delta)
 
                 self.realized_pnl, self.unrealized_pnl, self.total_pnl, c_info, p_info = calculate_total_pnl(
                     positions, call_price, put_price,
