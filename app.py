@@ -1,6 +1,8 @@
 import threading
 import queue
-import config
+import uuid
+import config as default_config
+from types import SimpleNamespace
 from flask import Flask, render_template, request, jsonify, Response, redirect, session, url_for
 from functools import wraps
 from auth import check_api_connection
@@ -12,6 +14,9 @@ app.secret_key = 'delta-neutral-bot-secret-key-change-me'
 LOGIN_ID = 'admin'
 LOGIN_PASSWORD = 'admin123'
 
+# {sid: {thread, strategy, log_queue, running, params}}
+strategies = {}
+
 
 def login_required(f):
     @wraps(f)
@@ -21,14 +26,8 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
-strategy_thread = None
-current_strategy = None
-log_queue = queue.Queue()
-strategy_running = False
-
 
 class LogCapture:
-    """Redirect print output to both console and SSE queue."""
     def __init__(self, original, q):
         self.original = original
         self.q = q
@@ -42,11 +41,12 @@ class LogCapture:
         self.original.flush()
 
 
-def run_strategy(params):
-    global current_strategy, strategy_running
+def run_strategy(sid, params):
     import sys
+    import config
+    entry = strategies[sid]
     old_stdout = sys.stdout
-    sys.stdout = LogCapture(old_stdout, log_queue)
+    sys.stdout = LogCapture(old_stdout, entry['log_queue'])
     try:
         config.EXPIRY_DATE = params['expiry_date']
         config.TARGET_DELTA = float(params['target_delta'])
@@ -57,30 +57,31 @@ def run_strategy(params):
         config.MONITORING_INTERVAL = int(params['monitoring_interval'])
 
         if not check_api_connection():
-            log_queue.put("❌ Cannot proceed without proper API access")
-            strategy_running = False
+            entry['log_queue'].put("❌ Cannot proceed without proper API access")
+            entry['running'] = False
             return
 
-        current_strategy = DeltaNeutralStrategy()
-        strategy_running = True
+        s = DeltaNeutralStrategy()
+        entry['strategy'] = s
+        entry['running'] = True
 
-        if not current_strategy.initialize():
-            log_queue.put("✗ Strategy initialization failed")
-            current_strategy.ws_manager.stop()
-            strategy_running = False
+        if not s.initialize():
+            entry['log_queue'].put("✗ Strategy initialization failed")
+            s.ws_manager.stop()
+            entry['running'] = False
             return
 
-        current_strategy.monitor_and_adjust()
+        s.monitor_and_adjust()
     except Exception as e:
-        log_queue.put(f"✗ Error: {e}")
-        if current_strategy:
-            current_strategy.close_all_positions()
+        entry['log_queue'].put(f"✗ Error: {e}")
+        if entry.get('strategy'):
+            entry['strategy'].close_all_positions()
     finally:
-        if current_strategy:
-            current_strategy.ws_manager.stop()
+        if entry.get('strategy'):
+            entry['strategy'].ws_manager.stop()
         sys.stdout = old_stdout
-        strategy_running = False
-        log_queue.put("__STOPPED__")
+        entry['running'] = False
+        entry['log_queue'].put("__STOPPED__")
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -88,7 +89,7 @@ def login():
     if request.method == 'POST':
         if request.form['user_id'] == LOGIN_ID and request.form['password'] == LOGIN_PASSWORD:
             session['logged_in'] = True
-            return redirect(url_for('index'))
+            return redirect(url_for('dashboard'))
         return render_template('login.html', error='Invalid credentials')
     return render_template('login.html', error=None)
 
@@ -101,50 +102,94 @@ def logout():
 
 @app.route('/')
 @login_required
-def index():
+def dashboard():
+    strats = []
+    for sid, e in strategies.items():
+        strats.append(dict(
+            id=sid,
+            name=e['params'].get('expiry_date', '?'),
+            running=e['running'],
+            pnl=round(e['strategy'].total_pnl, 2) if e.get('strategy') else 0,
+        ))
+    return render_template('dashboard.html', strategies=strats)
+
+
+@app.route('/strategy/new')
+@login_required
+def new_strategy():
     return render_template('index.html',
-        expiry_date=config.EXPIRY_DATE,
-        target_delta=config.TARGET_DELTA,
-        delta_tolerance=config.DELTA_TOLERANCE,
-        lot_size=config.LOT_SIZE,
-        premium_threshold=int(config.PREMIUM_INCREASE_THRESHOLD * 100),
-        target_pnl=config.TARGET_PNL,
-        monitoring_interval=config.MONITORING_INTERVAL,
-        running='true' if strategy_running else 'false'
+        sid='',
+        expiry_date=default_config.EXPIRY_DATE,
+        target_delta=default_config.TARGET_DELTA,
+        delta_tolerance=default_config.DELTA_TOLERANCE,
+        lot_size=default_config.LOT_SIZE,
+        premium_threshold=int(default_config.PREMIUM_INCREASE_THRESHOLD * 100),
+        target_pnl=default_config.TARGET_PNL,
+        monitoring_interval=default_config.MONITORING_INTERVAL,
+        running='false'
+    )
+
+
+@app.route('/strategy/<sid>')
+@login_required
+def view_strategy(sid):
+    e = strategies.get(sid)
+    if not e:
+        return redirect(url_for('dashboard'))
+    p = e['params']
+    return render_template('index.html',
+        sid=sid,
+        expiry_date=p.get('expiry_date', default_config.EXPIRY_DATE),
+        target_delta=p.get('target_delta', default_config.TARGET_DELTA),
+        delta_tolerance=p.get('delta_tolerance', default_config.DELTA_TOLERANCE),
+        lot_size=p.get('lot_size', default_config.LOT_SIZE),
+        premium_threshold=p.get('premium_threshold', int(default_config.PREMIUM_INCREASE_THRESHOLD * 100)),
+        target_pnl=p.get('target_pnl', default_config.TARGET_PNL),
+        monitoring_interval=p.get('monitoring_interval', default_config.MONITORING_INTERVAL),
+        running='true' if e['running'] else 'false'
     )
 
 
 @app.route('/start', methods=['POST'])
 @login_required
 def start():
-    global strategy_thread, strategy_running
-    if strategy_running:
+    params = request.json
+    sid = params.pop('sid', '') or str(uuid.uuid4())[:8]
+
+    if sid in strategies and strategies[sid]['running']:
         return jsonify(error="Strategy already running"), 400
 
-    params = request.json
-    strategy_thread = threading.Thread(target=run_strategy, args=(params,), daemon=True)
-    strategy_thread.start()
-    return jsonify(status="started")
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'running': False, 'params': params}
+    strategies[sid] = entry
+    entry['thread'] = threading.Thread(target=run_strategy, args=(sid, params), daemon=True)
+    entry['thread'].start()
+    return jsonify(status="started", sid=sid)
 
 
 @app.route('/stop', methods=['POST'])
 @login_required
 def stop():
-    global current_strategy, strategy_running
-    if not strategy_running or not current_strategy:
+    sid = request.json.get('sid')
+    e = strategies.get(sid)
+    if not e or not e['running'] or not e.get('strategy'):
         return jsonify(error="No strategy running"), 400
-    current_strategy.running = False
-    current_strategy.close_all_positions()
+    e['strategy'].running = False
+    e['strategy'].close_all_positions()
     return jsonify(status="stopping")
 
 
-@app.route('/stream')
+@app.route('/stream/<sid>')
 @login_required
-def stream():
+def stream(sid):
+    e = strategies.get(sid)
+    if not e:
+        return Response("data: No strategy found\n\n", mimetype='text/event-stream')
+    q = e['log_queue']
+
     def generate():
         while True:
             try:
-                msg = log_queue.get(timeout=30)
+                msg = q.get(timeout=30)
                 if msg == "__STOPPED__":
                     yield f"event: stopped\ndata: done\n\n"
                     break
@@ -155,22 +200,44 @@ def stream():
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
-@app.route('/status')
+@app.route('/status/<sid>')
 @login_required
-def status():
-    s = current_strategy
-    if not s or not strategy_running:
+def status(sid):
+    e = strategies.get(sid)
+    if not e or not e['running'] or not e.get('strategy'):
         return jsonify(running=False)
+    s = e['strategy']
     return jsonify(
         running=True,
         adjustment_count=s.adjustment_count,
         total_pnl=round(s.total_pnl, 2),
         realized_pnl=round(s.realized_pnl, 2),
         unrealized_pnl=round(s.unrealized_pnl, 2),
-        call_symbol=s.call_position['symbol'] if s.call_position else None,
-        put_symbol=s.put_position['symbol'] if s.put_position else None,
-        call_entry=round(s.call_entry_price, 2),
-        put_entry=round(s.put_entry_price, 2),
+        call=_leg_info(s, 'call'),
+        put=_leg_info(s, 'put'),
+    )
+
+
+def _leg_info(s, leg):
+    pos = getattr(s, f'{leg}_position')
+    if not pos:
+        return None
+    entry = getattr(s, f'{leg}_actual_entry_price')
+    cv = getattr(s, f'{leg}_contract_value')
+    ws_data = s.ws_manager.get_latest_price(pos['symbol'])
+    mark = ws_data['mark_price'] if ws_data else entry
+    delta = ws_data.get('delta', 0) if ws_data else 0
+    import config
+    size = config.LOT_SIZE
+    payoff = (entry - mark) * size * cv
+    return dict(
+        symbol=pos['symbol'],
+        strike=pos.get('strike_price', ''),
+        entry=round(entry, 2),
+        mark=round(mark, 2),
+        delta=round(delta, 4),
+        size=size,
+        payoff=round(payoff, 2),
     )
 
 

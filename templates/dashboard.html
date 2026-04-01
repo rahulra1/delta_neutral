@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard — Delta Neutral Bot</title>
+<style>
+  :root { --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a; --accent: #6c5ce7; --green: #00b894; --red: #e17055; --text: #dfe6e9; --muted: #636e72; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'SF Mono', 'Fira Code', monospace; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .container { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
+  h1 { font-size: 1.3rem; color: var(--accent); }
+  .header a { color: var(--muted); font-size: 0.75rem; text-decoration: none; }
+  .create-btn { display: inline-block; padding: 12px 28px; background: var(--accent); color: #fff; border: none; border-radius: 8px; font-family: inherit; font-size: 0.9rem; font-weight: 600; text-decoration: none; margin-bottom: 24px; }
+  .create-btn:hover { opacity: 0.9; }
+  .strat-list { display: grid; gap: 12px; }
+  .strat-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; text-decoration: none; color: var(--text); cursor: pointer; }
+  .strat-card:hover { border-color: var(--accent); }
+  .strat-info { display: flex; flex-direction: column; gap: 4px; }
+  .strat-name { font-size: 0.9rem; font-weight: 600; }
+  .strat-id { font-size: 0.7rem; color: var(--muted); }
+  .strat-right { text-align: right; }
+  .strat-pnl { font-size: 1rem; font-weight: 700; }
+  .badge { font-size: 0.65rem; padding: 3px 8px; border-radius: 4px; text-transform: uppercase; font-weight: 600; }
+  .badge.running { background: var(--green); color: #000; }
+  .badge.stopped { background: var(--muted); color: #fff; }
+  .pnl-pos { color: var(--green); }
+  .pnl-neg { color: var(--red); }
+  .empty { color: var(--muted); font-size: 0.85rem; margin-top: 20px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>⚡ Delta Neutral Bot</h1>
+    <a href="/logout">Logout</a>
+  </div>
+
+  <a href="/strategy/new" class="create-btn">+ Create Strategy</a>
+
+  <div class="strat-list">
+    {% for s in strategies %}
+    <a href="/strategy/{{ s.id }}" class="strat-card">
+      <div class="strat-info">
+        <span class="strat-name">Expiry: {{ s.name }}</span>
+        <span class="strat-id">ID: {{ s.id }}</span>
+      </div>
+      <div class="strat-right">
+        <div class="strat-pnl {{ 'pnl-pos' if s.pnl >= 0 else 'pnl-neg' }}">${{ '%.2f' % s.pnl }}</div>
+        <span class="badge {{ 'running' if s.running else 'stopped' }}">{{ 'Running' if s.running else 'Stopped' }}</span>
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+
+  {% if not strategies %}
+  <div class="empty">No strategies yet. Click "Create Strategy" to get started.</div>
+  {% endif %}
+</div>
+</body>
+</html>

@@ -26,6 +26,11 @@
   .stat .lbl { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; }
   .pnl-pos { color: var(--green); }
   .pnl-neg { color: var(--red); }
+  .legs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
+  .leg { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+  .leg .leg-title { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+  .leg .leg-row { display: flex; justify-content: space-between; font-size: 0.8rem; padding: 2px 0; }
+  .leg .leg-row .leg-val { font-weight: 600; }
   #log { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; height: 420px; overflow-y: auto; font-size: 0.78rem; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
   #log .line { padding: 1px 0; }
   #log .line.warn { color: #fdcb6e; }
@@ -37,7 +42,7 @@
 <div class="container">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
     <h1>⚡ Delta Neutral Options Bot</h1>
-    <a href="/logout" style="color:var(--muted);font-size:0.75rem;text-decoration:none">Logout</a>
+    <div><a href="/" style="color:var(--accent);font-size:0.75rem;text-decoration:none;margin-right:16px">← Dashboard</a><a href="/logout" style="color:var(--muted);font-size:0.75rem;text-decoration:none">Logout</a></div>
   </div>
 
   <div class="grid">
@@ -62,6 +67,29 @@
     <div class="stat"><div class="lbl">Adjustments</div><div class="val" id="s_adj">—</div></div>
   </div>
 
+  <div class="legs" id="legs" style="display:none">
+    <div class="leg" id="leg_call">
+      <div class="leg-title">📈 Short Call</div>
+      <div class="leg-row"><span>Symbol</span><span class="leg-val" id="c_sym">—</span></div>
+      <div class="leg-row"><span>Strike</span><span class="leg-val" id="c_strike">—</span></div>
+      <div class="leg-row"><span>Entry</span><span class="leg-val" id="c_entry">—</span></div>
+      <div class="leg-row"><span>Mark</span><span class="leg-val" id="c_mark">—</span></div>
+      <div class="leg-row"><span>Delta</span><span class="leg-val" id="c_delta">—</span></div>
+      <div class="leg-row"><span>Size</span><span class="leg-val" id="c_size">—</span></div>
+      <div class="leg-row"><span>Payoff</span><span class="leg-val" id="c_payoff">—</span></div>
+    </div>
+    <div class="leg" id="leg_put">
+      <div class="leg-title">📉 Short Put</div>
+      <div class="leg-row"><span>Symbol</span><span class="leg-val" id="p_sym">—</span></div>
+      <div class="leg-row"><span>Strike</span><span class="leg-val" id="p_strike">—</span></div>
+      <div class="leg-row"><span>Entry</span><span class="leg-val" id="p_entry">—</span></div>
+      <div class="leg-row"><span>Mark</span><span class="leg-val" id="p_mark">—</span></div>
+      <div class="leg-row"><span>Delta</span><span class="leg-val" id="p_delta">—</span></div>
+      <div class="leg-row"><span>Size</span><span class="leg-val" id="p_size">—</span></div>
+      <div class="leg-row"><span>Payoff</span><span class="leg-val" id="p_payoff">—</span></div>
+    </div>
+  </div>
+
   <div id="log"></div>
 </div>
 
@@ -69,6 +97,7 @@
 const $ = id => document.getElementById(id);
 const fields = ['expiry_date','lot_size','target_delta','delta_tolerance','premium_threshold','target_pnl','monitoring_interval'];
 let evtSource = null, statusTimer = null;
+let sid = '{{ sid }}';
 const isRunning = {{ running }};
 
 function setRunning(on) {
@@ -87,11 +116,13 @@ function appendLog(text) {
 
 function startBot() {
   $('log').innerHTML = '';
-  const params = {};
+  const params = {sid: sid};
   fields.forEach(f => params[f] = $(f).value);
   fetch('/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(params) })
     .then(r => r.json()).then(d => {
       if (d.error) { appendLog('❌ ' + d.error); return; }
+      sid = d.sid;
+      history.replaceState(null, '', '/strategy/' + sid);
       setRunning(true);
       listenLogs();
       statusTimer = setInterval(pollStatus, 3000);
@@ -99,12 +130,13 @@ function startBot() {
 }
 
 function stopBot() {
-  fetch('/stop', { method: 'POST' }).then(r => r.json()).then(d => appendLog('Stopping...'));
+  fetch('/stop', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({sid: sid}) })
+    .then(r => r.json()).then(d => appendLog('Stopping...'));
 }
 
 function listenLogs() {
   if (evtSource) evtSource.close();
-  evtSource = new EventSource('/stream');
+  evtSource = new EventSource('/stream/' + sid);
   evtSource.onmessage = e => appendLog(e.data);
   evtSource.addEventListener('stopped', () => {
     evtSource.close();
@@ -115,14 +147,30 @@ function listenLogs() {
 }
 
 function pollStatus() {
-  fetch('/status').then(r => r.json()).then(d => {
-    if (!d.running) { clearInterval(statusTimer); setRunning(false); return; }
+  fetch('/status/' + sid).then(r => r.json()).then(d => {
+    if (!d.running) { clearInterval(statusTimer); setRunning(false); $('legs').style.display='none'; return; }
     const cls = v => v >= 0 ? 'pnl-pos' : 'pnl-neg';
     $('s_total').className = 'val ' + cls(d.total_pnl);
     $('s_total').textContent = '$' + d.total_pnl.toFixed(2);
     $('s_realized').textContent = '$' + d.realized_pnl.toFixed(2);
     $('s_unrealized').textContent = '$' + d.unrealized_pnl.toFixed(2);
     $('s_adj').textContent = d.adjustment_count;
+
+    $('legs').style.display = 'grid';
+    function fillLeg(prefix, leg) {
+      if (!leg) return;
+      $(prefix+'_sym').textContent = leg.symbol;
+      $(prefix+'_strike').textContent = leg.strike;
+      $(prefix+'_entry').textContent = '$' + leg.entry.toFixed(2);
+      $(prefix+'_mark').textContent = '$' + leg.mark.toFixed(2);
+      $(prefix+'_delta').textContent = leg.delta.toFixed(4);
+      $(prefix+'_size').textContent = leg.size;
+      const po = $(prefix+'_payoff');
+      po.textContent = '$' + leg.payoff.toFixed(2);
+      po.style.color = leg.payoff >= 0 ? 'var(--green)' : 'var(--red)';
+    }
+    fillLeg('c', d.call);
+    fillLeg('p', d.put);
   });
 }
 
