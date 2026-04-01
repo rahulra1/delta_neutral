@@ -32,5 +32,73 @@
     "pnl": 0,
     "adjustments": 0,
     "status": "completed"
+  },
+  {
+    "sid": "9fb95ecc",
+    "started_at": "2026-04-01T22:37:31.490447",
+    "ended_at": "2026-04-01T22:37:31.796019",
+    "params": {
+      "expiry_date": "02-04-2026",
+      "lot_size": "1",
+      "target_delta": "0.2",
+      "delta_tolerance": "0.05",
+      "premium_threshold": "40",
+      "target_pnl": "25",
+      "monitoring_interval": "5"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "completed"
+  },
+  {
+    "sid": "9fb95ecc",
+    "started_at": "2026-04-01T22:39:47.103677",
+    "ended_at": "2026-04-01T22:39:47.640925",
+    "params": {
+      "expiry_date": "02-04-2026",
+      "lot_size": "1",
+      "target_delta": "0.2",
+      "delta_tolerance": "0.05",
+      "premium_threshold": "40",
+      "target_pnl": "25",
+      "monitoring_interval": "5"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "completed"
+  },
+  {
+    "sid": "9fb95ecc",
+    "started_at": "2026-04-01T22:40:24.735646",
+    "ended_at": "2026-04-01T22:43:26.000499",
+    "params": {
+      "expiry_date": "02-04-2026",
+      "lot_size": "1",
+      "target_delta": "0.2",
+      "delta_tolerance": "0.05",
+      "premium_threshold": "40",
+      "target_pnl": "25",
+      "monitoring_interval": "5"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "completed"
+  },
+  {
+    "sid": "67e44814",
+    "started_at": "2026-04-01T22:41:06.887179",
+    "ended_at": "2026-04-01T22:43:47.440513",
+    "params": {
+      "expiry_date": "03-04-2026",
+      "lot_size": "1",
+      "target_delta": "0.2",
+      "delta_tolerance": "0.05",
+      "premium_threshold": "40",
+      "target_pnl": "25.0",
+      "monitoring_interval": "5"
+    },
+    "pnl": -0.01,
+    "adjustments": 0,
+    "status": "completed"
   }
 ]

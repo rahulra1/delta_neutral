@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Profile — Delta Neutral Bot</title>
+<style>
+  :root { --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a; --accent: #6c5ce7; --green: #00b894; --red: #e17055; --text: #dfe6e9; --muted: #636e72; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'SF Mono', 'Fira Code', monospace; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .container { max-width: 600px; margin: 0 auto; padding: 24px 16px; }
+  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
+  h1 { font-size: 1.3rem; color: var(--accent); }
+  .header a { color: var(--accent); font-size: 0.75rem; text-decoration: none; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 28px; }
+  .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 18px; }
+  .field label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .field input { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 10px 12px; border-radius: 6px; font-family: inherit; font-size: 0.9rem; }
+  .field input:focus { outline: none; border-color: var(--accent); }
+  .field .hint { font-size: 0.65rem; color: var(--muted); margin-top: 2px; }
+  button { padding: 10px 28px; background: var(--accent); color: #fff; border: none; border-radius: 6px; font-family: inherit; font-size: 0.9rem; cursor: pointer; font-weight: 600; }
+  .success { color: var(--green); font-size: 0.8rem; margin-bottom: 16px; }
+  .status { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; font-size: 0.85rem; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .dot.on { background: var(--green); }
+  .dot.off { background: var(--red); }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>👤 Profile</h1>
+    <a href="/">← Dashboard</a>
+  </div>
+
+  <div class="card">
+    <div class="field">
+      <label>Username</label>
+      <input value="{{ username }}" disabled>
+    </div>
+
+    {% if success %}<div class="success">✓ {{ success }}</div>{% endif %}
+
+    <div class="status">
+      <span class="dot {{ 'on' if api_key else 'off' }}"></span>
+      <span>Broker {{ 'Connected' if api_key else 'Not Connected' }}</span>
+    </div>
+
+    <form method="POST" action="/profile">
+      <div class="field">
+        <label>API Key</label>
+        <input name="api_key" value="{{ api_key }}" placeholder="Enter your Delta Exchange API key" required>
+        <span class="hint">From Delta Exchange India → Account → API Keys</span>
+      </div>
+      <div class="field">
+        <label>API Secret</label>
+        <input name="api_secret" type="password" value="{{ api_secret }}" placeholder="Enter your Delta Exchange API secret" required>
+      </div>
+      <button type="submit">Save API Keys</button>
+    </form>
+  </div>
+</div>
+</body>
+</html>

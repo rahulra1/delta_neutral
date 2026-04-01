@@ -7,7 +7,7 @@ from functools import wraps
 from auth import check_api_connection
 from strategy import DeltaNeutralStrategy
 from trade_history import record_start, record_end, get_history
-from models import init_db, create_user, verify_user
+from models import init_db, create_user, verify_user, get_user, update_api_keys
 
 app = Flask(__name__)
 app.secret_key = 'delta-neutral-bot-secret-key-change-me'
@@ -52,6 +52,15 @@ def run_strategy(sid, params):
     old_stdout = sys.stdout
     sys.stdout = LogCapture(old_stdout, entry['log_queue'])
     try:
+        # Set per-user API keys
+        user = get_user(entry['user_id'])
+        if not user or not user.get('api_key') or not user.get('api_secret'):
+            entry['log_queue'].put("❌ API keys not configured. Go to Profile to add them.")
+            entry['running'] = False
+            return
+        config.API_KEY = user['api_key']
+        config.API_SECRET = user['api_secret']
+
         config.EXPIRY_DATE = params['expiry_date']
         config.TARGET_DELTA = float(params['target_delta'])
         config.DELTA_TOLERANCE = float(params['delta_tolerance'])
@@ -132,6 +141,18 @@ def logout():
     return redirect(url_for('login'))
 
 
+@app.route('/profile', methods=['GET', 'POST'])
+@login_required
+def profile():
+    user = get_user(current_user_id())
+    if request.method == 'POST':
+        api_key = request.form.get('api_key', '').strip()
+        api_secret = request.form.get('api_secret', '').strip()
+        update_api_keys(current_user_id(), api_key, api_secret)
+        return render_template('profile.html', username=user['username'], api_key=api_key, api_secret=api_secret, success='API keys saved successfully')
+    return render_template('profile.html', username=user['username'], api_key=user['api_key'] or '', api_secret=user['api_secret'] or '', success=None)
+
+
 # ── Strategy Routes (per-user isolated) ──
 
 @app.route('/')
@@ -192,6 +213,10 @@ def view_strategy(sid):
 @app.route('/start', methods=['POST'])
 @login_required
 def start():
+    user = get_user(current_user_id())
+    if not user.get('api_key') or not user.get('api_secret'):
+        return jsonify(error="API keys not configured. Go to Profile first."), 400
+
     params = request.json
     sid = params.pop('sid', '') or str(uuid.uuid4())[:8]
 

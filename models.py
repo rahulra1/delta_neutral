@@ -14,8 +14,16 @@ def init_db():
     conn.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL
+        password_hash TEXT NOT NULL,
+        api_key TEXT DEFAULT '',
+        api_secret TEXT DEFAULT ''
     )''')
+    # migrate: add columns if table already exists without them
+    cols = [r['name'] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+    if 'api_key' not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN api_key TEXT DEFAULT ''")
+    if 'api_secret' not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN api_secret TEXT DEFAULT ''")
     conn.commit()
     conn.close()
 
@@ -38,3 +46,15 @@ def verify_user(username, password):
     if row and bcrypt.checkpw(password.encode(), row['password_hash'].encode()):
         return dict(row)
     return None
+
+def get_user(user_id):
+    conn = get_db()
+    row = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def update_api_keys(user_id, api_key, api_secret):
+    conn = get_db()
+    conn.execute('UPDATE users SET api_key = ?, api_secret = ? WHERE id = ?', (api_key, api_secret, user_id))
+    conn.commit()
+    conn.close()
