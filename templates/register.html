@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Login — Delta Neutral Bot</title>
+<title>Register — Delta Neutral Bot</title>
 <style>
   :root { --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a; --accent: #6c5ce7; --red: #e17055; --text: #dfe6e9; --muted: #636e72; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -21,13 +21,14 @@
 </style>
 </head>
 <body>
-<form class="login-box" method="POST" action="/login">
-  <h1>⚡ Delta Neutral Bot</h1>
+<form class="login-box" method="POST" action="/register">
+  <h1>⚡ Create Account</h1>
   {% if error %}<div class="error">{{ error }}</div>{% endif %}
   <div class="field"><label>Username</label><input name="username" required autofocus></div>
   <div class="field"><label>Password</label><input name="password" type="password" required></div>
-  <button type="submit">Login</button>
-  <div class="link">Don't have an account? <a href="/register">Register</a></div>
+  <div class="field"><label>Confirm Password</label><input name="confirm_password" type="password" required></div>
+  <button type="submit">Register</button>
+  <div class="link">Already have an account? <a href="/login">Login</a></div>
 </form>
 </body>
 </html>

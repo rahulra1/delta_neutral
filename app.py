@@ -2,30 +2,33 @@ import threading
 import queue
 import uuid
 import config as default_config
-from types import SimpleNamespace
 from flask import Flask, render_template, request, jsonify, Response, redirect, session, url_for
 from functools import wraps
 from auth import check_api_connection
 from strategy import DeltaNeutralStrategy
 from trade_history import record_start, record_end, get_history
+from models import init_db, create_user, verify_user
 
 app = Flask(__name__)
 app.secret_key = 'delta-neutral-bot-secret-key-change-me'
 
-LOGIN_ID = 'admin'
-LOGIN_PASSWORD = 'admin123'
+init_db()
 
-# {sid: {thread, strategy, log_queue, running, params}}
+# {sid: {thread, strategy, log_queue, running, params, user_id}}
 strategies = {}
 
 
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get('logged_in'):
+        if not session.get('user_id'):
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated
+
+
+def current_user_id():
+    return session.get('user_id')
 
 
 class LogCapture:
@@ -88,11 +91,36 @@ def run_strategy(sid, params):
         entry['log_queue'].put("__STOPPED__")
 
 
+# ── Auth Routes ──
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '')
+        confirm = request.form.get('confirm_password', '')
+        if not username or not password:
+            return render_template('register.html', error='Username and password required')
+        if len(password) < 6:
+            return render_template('register.html', error='Password must be at least 6 characters')
+        if password != confirm:
+            return render_template('register.html', error='Passwords do not match')
+        if create_user(username, password):
+            user = verify_user(username, password)
+            session['user_id'] = user['id']
+            session['username'] = user['username']
+            return redirect(url_for('dashboard'))
+        return render_template('register.html', error='Username already taken')
+    return render_template('register.html', error=None)
+
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        if request.form['user_id'] == LOGIN_ID and request.form['password'] == LOGIN_PASSWORD:
-            session['logged_in'] = True
+        user = verify_user(request.form.get('username', ''), request.form.get('password', ''))
+        if user:
+            session['user_id'] = user['id']
+            session['username'] = user['username']
             return redirect(url_for('dashboard'))
         return render_template('login.html', error='Invalid credentials')
     return render_template('login.html', error=None)
@@ -100,22 +128,27 @@ def login():
 
 @app.route('/logout')
 def logout():
-    session.pop('logged_in', None)
+    session.clear()
     return redirect(url_for('login'))
 
+
+# ── Strategy Routes (per-user isolated) ──
 
 @app.route('/')
 @login_required
 def dashboard():
+    uid = current_user_id()
     strats = []
     for sid, e in strategies.items():
+        if e.get('user_id') != uid:
+            continue
         strats.append(dict(
             id=sid,
             name=e['params'].get('expiry_date', '?'),
             running=e['running'],
             pnl=round(e['strategy'].total_pnl, 2) if e.get('strategy') else 0,
         ))
-    return render_template('dashboard.html', strategies=strats)
+    return render_template('dashboard.html', strategies=strats, username=session.get('username'))
 
 
 @app.route('/strategy/new')
@@ -130,7 +163,8 @@ def new_strategy():
         premium_threshold=int(default_config.PREMIUM_INCREASE_THRESHOLD * 100),
         target_pnl=default_config.TARGET_PNL,
         monitoring_interval=default_config.MONITORING_INTERVAL,
-        running='false'
+        running='false',
+        username=session.get('username')
     )
 
 
@@ -138,7 +172,7 @@ def new_strategy():
 @login_required
 def view_strategy(sid):
     e = strategies.get(sid)
-    if not e:
+    if not e or e.get('user_id') != current_user_id():
         return redirect(url_for('dashboard'))
     p = e['params']
     return render_template('index.html',
@@ -150,7 +184,8 @@ def view_strategy(sid):
         premium_threshold=p.get('premium_threshold', int(default_config.PREMIUM_INCREASE_THRESHOLD * 100)),
         target_pnl=p.get('target_pnl', default_config.TARGET_PNL),
         monitoring_interval=p.get('monitoring_interval', default_config.MONITORING_INTERVAL),
-        running='true' if e['running'] else 'false'
+        running='true' if e['running'] else 'false',
+        username=session.get('username')
     )
 
 
@@ -163,7 +198,7 @@ def start():
     if sid in strategies and strategies[sid]['running']:
         return jsonify(error="Strategy already running"), 400
 
-    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'running': False, 'params': params}
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'running': False, 'params': params, 'user_id': current_user_id()}
     strategies[sid] = entry
     record_start(sid, params)
     entry['thread'] = threading.Thread(target=run_strategy, args=(sid, params), daemon=True)
@@ -176,7 +211,9 @@ def start():
 def stop():
     sid = request.json.get('sid')
     e = strategies.get(sid)
-    if not e or not e['running'] or not e.get('strategy'):
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error="Not found"), 404
+    if not e['running'] or not e.get('strategy'):
         return jsonify(error="No strategy running"), 400
     e['strategy'].running = False
     e['strategy'].close_all_positions()
@@ -187,8 +224,8 @@ def stop():
 @login_required
 def stream(sid):
     e = strategies.get(sid)
-    if not e:
-        return Response("data: No strategy found\n\n", mimetype='text/event-stream')
+    if not e or e.get('user_id') != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
     q = e['log_queue']
 
     def generate():
@@ -209,7 +246,9 @@ def stream(sid):
 @login_required
 def status(sid):
     e = strategies.get(sid)
-    if not e or not e['running'] or not e.get('strategy'):
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(running=False)
+    if not e['running'] or not e.get('strategy'):
         return jsonify(running=False)
     s = e['strategy']
     return jsonify(
@@ -249,13 +288,18 @@ def _leg_info(s, leg):
 @app.route('/performance')
 @login_required
 def performance():
-    return render_template('performance.html')
+    return render_template('performance.html', username=session.get('username'))
 
 
 @app.route('/api/history')
 @login_required
 def api_history():
-    return jsonify(get_history())
+    uid = current_user_id()
+    all_history = get_history()
+    # Filter to only show history for strategies owned by this user
+    user_sids = {sid for sid, e in strategies.items() if e.get('user_id') == uid}
+    user_history = [h for h in all_history if h.get('sid') in user_sids]
+    return jsonify(user_history)
 
 
 if __name__ == '__main__':
