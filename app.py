@@ -7,6 +7,7 @@ from flask import Flask, render_template, request, jsonify, Response, redirect, 
 from functools import wraps
 from auth import check_api_connection
 from strategy import DeltaNeutralStrategy
+from trade_history import record_start, record_end, get_history
 
 app = Flask(__name__)
 app.secret_key = 'delta-neutral-bot-secret-key-change-me'
@@ -77,6 +78,9 @@ def run_strategy(sid, params):
         if entry.get('strategy'):
             entry['strategy'].close_all_positions()
     finally:
+        pnl = entry['strategy'].cumulative_realized_pnl if entry.get('strategy') else 0
+        adj = entry['strategy'].adjustment_count if entry.get('strategy') else 0
+        record_end(sid, pnl, adj)
         if entry.get('strategy'):
             entry['strategy'].ws_manager.stop()
         sys.stdout = old_stdout
@@ -161,6 +165,7 @@ def start():
 
     entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'running': False, 'params': params}
     strategies[sid] = entry
+    record_start(sid, params)
     entry['thread'] = threading.Thread(target=run_strategy, args=(sid, params), daemon=True)
     entry['thread'].start()
     return jsonify(status="started", sid=sid)
@@ -239,6 +244,18 @@ def _leg_info(s, leg):
         size=size,
         payoff=round(payoff, 2),
     )
+
+
+@app.route('/performance')
+@login_required
+def performance():
+    return render_template('performance.html')
+
+
+@app.route('/api/history')
+@login_required
+def api_history():
+    return jsonify(get_history())
 
 
 if __name__ == '__main__':

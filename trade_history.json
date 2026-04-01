@@ -1,0 +1,36 @@
+[
+  {
+    "sid": "2f3a512b",
+    "started_at": "2026-04-01T12:58:26.410429",
+    "ended_at": "2026-04-01T12:58:26.682387",
+    "params": {
+      "expiry_date": "01-04-2026",
+      "lot_size": "1",
+      "target_delta": "0.2",
+      "delta_tolerance": "0.05",
+      "premium_threshold": "40",
+      "target_pnl": "25",
+      "monitoring_interval": "5"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "completed"
+  },
+  {
+    "sid": "aceea651",
+    "started_at": "2026-04-01T12:58:56.127094",
+    "ended_at": "2026-04-01T12:58:56.402331",
+    "params": {
+      "expiry_date": "01-04-2026",
+      "lot_size": "1",
+      "target_delta": "0.2",
+      "delta_tolerance": "0.05",
+      "premium_threshold": "40",
+      "target_pnl": "25.0",
+      "monitoring_interval": "5"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "completed"
+  }
+]
