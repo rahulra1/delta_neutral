@@ -75,7 +75,7 @@ def run_strategy(sid, params):
             entry['running'] = False
             return
 
-        s = DeltaNeutralStrategy()
+        s = DeltaNeutralStrategy(asset=params.get('asset', 'BTC'))
         entry['strategy'] = s
         entry['running'] = True
 
@@ -176,8 +176,10 @@ def dashboard():
 @app.route('/strategy/new')
 @login_required
 def new_strategy():
+    asset = request.args.get('asset', 'BTC')
     return render_template('index.html',
         sid='',
+        asset=asset,
         expiry_date=default_config.EXPIRY_DATE,
         target_delta=default_config.TARGET_DELTA,
         delta_tolerance=default_config.DELTA_TOLERANCE,
@@ -200,6 +202,7 @@ def view_strategy(sid):
     p = e['params']
     return render_template('index.html',
         sid=sid,
+        asset=p.get('asset', 'BTC'),
         expiry_date=p.get('expiry_date', default_config.EXPIRY_DATE),
         target_delta=p.get('target_delta', default_config.TARGET_DELTA),
         delta_tolerance=p.get('delta_tolerance', default_config.DELTA_TOLERANCE),

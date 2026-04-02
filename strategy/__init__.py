@@ -10,7 +10,8 @@ from websocket import WebSocketManager
 
 
 class DeltaNeutralStrategy:
-    def __init__(self):
+    def __init__(self, asset='BTC'):
+        self.asset = asset
         self.call_position = None
         self.put_position = None
         self.call_entry_price = 0
@@ -55,7 +56,7 @@ class DeltaNeutralStrategy:
         ws_data = self.ws_manager.get_latest_price(pos['symbol'])
         if ws_data:
             return ws_data['mark_price']
-        from_api = get_current_price(pos['product_id'])
+        from_api = get_current_price(pos['product_id'], self.asset)
         return from_api['mark_price'] if from_api else fallback_price
 
     def check_adjustment(self, leg, current_price, current_delta):
@@ -78,12 +79,12 @@ class DeltaNeutralStrategy:
         print("=" * 70)
         print("DELTA NEUTRAL OPTIONS STRATEGY (WebSocket Enabled)")
         print("=" * 70)
-        print(f"Expiry: {config.EXPIRY_DATE} | Delta: ±{config.TARGET_DELTA} | Lots: {config.LOT_SIZE}")
+        print(f"Asset: {self.asset} | Expiry: {config.EXPIRY_DATE} | Delta: ±{config.TARGET_DELTA} | Lots: {config.LOT_SIZE}")
         print(f"Threshold: {config.PREMIUM_INCREASE_THRESHOLD*100}% | Target PnL: ±${config.TARGET_PNL}")
         print("=" * 70)
 
         print("[1/4] Fetching option chain...")
-        option_chain = get_option_chain(config.EXPIRY_DATE)
+        option_chain = get_option_chain(config.EXPIRY_DATE, self.asset)
         if not option_chain:
             print("✗ Failed to fetch option chain")
             return False
@@ -155,8 +156,8 @@ class DeltaNeutralStrategy:
                 if call_ws and put_ws:
                     call_price, put_price, source = call_ws['mark_price'], put_ws['mark_price'], "WS"
                 else:
-                    cd = get_current_price(self.call_position['product_id'])
-                    pd = get_current_price(self.put_position['product_id'])
+                    cd = get_current_price(self.call_position['product_id'], self.asset)
+                    pd = get_current_price(self.put_position['product_id'], self.asset)
                     if not cd or not pd:
                         print(f"[{ts}] Warning: Could not fetch prices")
                         time.sleep(config.MONITORING_INTERVAL)
@@ -241,13 +242,13 @@ class DeltaNeutralStrategy:
 
         # Fetch live delta from REST API instead of relying on WS delta (may be 0)
         triggered_pos = self.call_position if triggered_leg == 'call' else self.put_position
-        live_data = get_current_price(triggered_pos['product_id'])
+        live_data = get_current_price(triggered_pos['product_id'], self.asset)
         if live_data and live_data.get('delta'):
             triggered_delta = live_data['delta']
 
         search_delta = abs(triggered_delta) if abs(triggered_delta) > config.DELTA_TOLERANCE else config.TARGET_DELTA
         print(f"  [2/3] Finding NEW {close_leg.upper()} with delta {search_delta:.4f}...")
-        option_chain = get_option_chain(config.EXPIRY_DATE)
+        option_chain = get_option_chain(config.EXPIRY_DATE, self.asset)
 
         if triggered_leg == 'call':
             _, new_opt = find_target_delta_options(option_chain, search_delta, config.DELTA_TOLERANCE)
@@ -297,7 +298,7 @@ class DeltaNeutralStrategy:
         ]:
             if not pos:
                 continue
-            data = get_current_price(pos['product_id'])
+            data = get_current_price(pos['product_id'], self.asset)
             entry, size = get_position_entry_price(pos['product_id'])
             if data and entry and size != 0:
                 pnl = (entry - data['mark_price']) * abs(size) * cv
