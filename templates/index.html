@@ -154,7 +154,9 @@ function pollStatus() {
     const cls = v => v >= 0 ? 'pnl-pos' : 'pnl-neg';
     $('s_total').className = 'val ' + cls(d.total_pnl);
     $('s_total').textContent = '$' + d.total_pnl.toFixed(2);
+    $('s_realized').className = 'val ' + cls(d.realized_pnl);
     $('s_realized').textContent = '$' + d.realized_pnl.toFixed(2);
+    $('s_unrealized').className = 'val ' + cls(d.unrealized_pnl);
     $('s_unrealized').textContent = '$' + d.unrealized_pnl.toFixed(2);
     $('s_adj').textContent = d.adjustment_count;
 

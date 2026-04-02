@@ -1,6 +1,5 @@
 import time
 from datetime import datetime
-import config
 from api import (
     get_option_chain, find_target_delta_options, get_product_details,
     place_order, get_current_price, get_positions,
@@ -10,8 +9,19 @@ from websocket import WebSocketManager
 
 
 class DeltaNeutralStrategy:
-    def __init__(self, asset='BTC'):
+    def __init__(self, asset='BTC', expiry_date='01-04-2026', target_delta=0.20,
+                 delta_tolerance=0.05, lot_size=100, premium_threshold=0.4,
+                 target_pnl=25, max_adjustments=5, monitoring_interval=5):
         self.asset = asset
+        self.expiry_date = expiry_date
+        self.target_delta = target_delta
+        self.delta_tolerance = delta_tolerance
+        self.lot_size = lot_size
+        self.premium_threshold = premium_threshold
+        self.target_pnl = target_pnl
+        self.max_adjustments = max_adjustments
+        self.monitoring_interval = monitoring_interval
+
         self.call_position = None
         self.put_position = None
         self.call_entry_price = 0
@@ -30,7 +40,7 @@ class DeltaNeutralStrategy:
         self.ws_manager = WebSocketManager(self)
         self.last_check_time_call = 0
         self.last_check_time_put = 0
-        self.check_interval = config.MONITORING_INTERVAL
+        self.check_interval = self.monitoring_interval
 
     def on_price_update(self, symbol, mark_price, delta):
         now = time.time()
@@ -63,7 +73,7 @@ class DeltaNeutralStrategy:
         ts = datetime.now().strftime("%H:%M:%S")
         entry = self.call_entry_price if leg == 'call' else self.put_entry_price
         change = (current_price - entry) / entry
-        if change < config.PREMIUM_INCREASE_THRESHOLD:
+        if change < self.premium_threshold:
             return
         other_price = self._get_other_leg_price(leg)
         print(f"[{ts}] ⚠ ALERT: {leg.upper()} premium increased by {change:.2%}!")
@@ -79,18 +89,18 @@ class DeltaNeutralStrategy:
         print("=" * 70)
         print("DELTA NEUTRAL OPTIONS STRATEGY (WebSocket Enabled)")
         print("=" * 70)
-        print(f"Asset: {self.asset} | Expiry: {config.EXPIRY_DATE} | Delta: ±{config.TARGET_DELTA} | Lots: {config.LOT_SIZE}")
-        print(f"Threshold: {config.PREMIUM_INCREASE_THRESHOLD*100}% | Target PnL: ±${config.TARGET_PNL}")
+        print(f"Asset: {self.asset} | Expiry: {self.expiry_date} | Delta: ±{self.target_delta} | Lots: {self.lot_size}")
+        print(f"Threshold: {self.premium_threshold*100}% | Target PnL: ±${self.target_pnl}")
         print("=" * 70)
 
         print("[1/4] Fetching option chain...")
-        option_chain = get_option_chain(config.EXPIRY_DATE, self.asset)
+        option_chain = get_option_chain(self.expiry_date, self.asset)
         if not option_chain:
             print("✗ Failed to fetch option chain")
             return False
 
-        print(f"[2/4] Finding options with ~{config.TARGET_DELTA} delta...")
-        call_option, put_option = find_target_delta_options(option_chain, config.TARGET_DELTA, config.DELTA_TOLERANCE)
+        print(f"[2/4] Finding options with ~{self.target_delta} delta...")
+        call_option, put_option = find_target_delta_options(option_chain, self.target_delta, self.delta_tolerance)
         if not call_option or not put_option:
             print("✗ Could not find suitable options with target delta")
             return False
@@ -105,15 +115,15 @@ class DeltaNeutralStrategy:
                 setattr(self, f'{attr}_contract_value', details['contract_value'])
                 print(f"✓ {attr.title()} contract value: {details['contract_value']} {details['contract_unit_currency']}")
 
-        call_prem = call_option['mark_price'] * config.LOT_SIZE * self.call_contract_value
-        put_prem = put_option['mark_price'] * config.LOT_SIZE * self.put_contract_value
+        call_prem = call_option['mark_price'] * self.lot_size * self.call_contract_value
+        put_prem = put_option['mark_price'] * self.lot_size * self.put_contract_value
         print(f"Expected Premium: Call=${call_prem:.2f} + Put=${put_prem:.2f} = ${call_prem+put_prem:.2f}")
 
         print("[4/4] Placing initial orders...")
-        call_order = place_order(call_option['product_id'], call_option['symbol'], config.LOT_SIZE, 'sell')
+        call_order = place_order(call_option['product_id'], call_option['symbol'], self.lot_size, 'sell')
         if not call_order:
             return False
-        put_order = place_order(put_option['product_id'], put_option['symbol'], config.LOT_SIZE, 'sell')
+        put_order = place_order(put_option['product_id'], put_option['symbol'], self.lot_size, 'sell')
         if not put_order:
             return False
 
@@ -142,7 +152,7 @@ class DeltaNeutralStrategy:
         return True
 
     def monitor_and_adjust(self):
-        print(f"[MONITORING] Active — updates every {config.MONITORING_INTERVAL}s. Ctrl+C to stop.")
+        print(f"[MONITORING] Active — updates every {self.monitoring_interval}s. Ctrl+C to stop.")
         iteration = 0
         try:
             while self.running:
@@ -160,17 +170,17 @@ class DeltaNeutralStrategy:
                     pd = get_current_price(self.put_position['product_id'], self.asset)
                     if not cd or not pd:
                         print(f"[{ts}] Warning: Could not fetch prices")
-                        time.sleep(config.MONITORING_INTERVAL)
+                        time.sleep(self.monitoring_interval)
                         continue
                     call_price, put_price, source = cd['mark_price'], pd['mark_price'], "REST"
 
                 call_chg = (call_price - self.call_entry_price) / self.call_entry_price
                 put_chg = (put_price - self.put_entry_price) / self.put_entry_price
 
-                if call_chg >= config.PREMIUM_INCREASE_THRESHOLD:
+                if call_chg >= self.premium_threshold:
                     call_delta = call_ws['delta'] if call_ws else 0
                     self.check_adjustment('call', call_price, call_delta)
-                if put_chg >= config.PREMIUM_INCREASE_THRESHOLD:
+                if put_chg >= self.premium_threshold:
                     put_delta = put_ws['delta'] if put_ws else 0
                     self.check_adjustment('put', put_price, put_delta)
 
@@ -181,7 +191,7 @@ class DeltaNeutralStrategy:
                     self.cumulative_realized_pnl
                 )
 
-                print(f"[{ts}] #{iteration} | Adj: {self.adjustment_count}/{config.MAX_ADJUSTMENTS} | {source}")
+                print(f"[{ts}] #{iteration} | Adj: {self.adjustment_count}/{self.max_adjustments} | {source}")
                 for label, price, chg, entry, info in [
                     ("Call", call_price, call_chg, self.call_entry_price, c_info),
                     ("Put ", put_price, put_chg, self.put_entry_price, p_info)
@@ -194,7 +204,7 @@ class DeltaNeutralStrategy:
                     print(line)
                 print(f"  P&L: R=${self.realized_pnl:.2f} | U=${self.unrealized_pnl:.2f} | T=${self.total_pnl:.2f}")
 
-                if self.adjustment_count >= config.MAX_ADJUSTMENTS:
+                if self.adjustment_count >= self.max_adjustments:
                     print("=" * 70)
                     print(f"✓ MAX ADJUSTMENTS REACHED! Count: {self.adjustment_count} | Total PnL: ${self.total_pnl:.2f}")
                     print("=" * 70)
@@ -202,7 +212,7 @@ class DeltaNeutralStrategy:
                     self.running = False
                     break
 
-                if abs(self.total_pnl) >= config.TARGET_PNL:
+                if abs(self.total_pnl) >= self.target_pnl:
                     print("=" * 70)
                     print(f"✓ TARGET P&L REACHED! Total: ${self.total_pnl:.2f} | Adjustments: {self.adjustment_count}")
                     print("=" * 70)
@@ -210,7 +220,7 @@ class DeltaNeutralStrategy:
                     self.running = False
                     break
 
-                time.sleep(config.MONITORING_INTERVAL)
+                time.sleep(self.monitoring_interval)
         except KeyboardInterrupt:
             print("[STOPPED] Strategy stopped by user")
             self.close_all_positions()
@@ -236,7 +246,7 @@ class DeltaNeutralStrategy:
         print(f"  [1/3] Closing {close_leg.upper()}: Entry=${entry_from_pos:.2f} Current=${close_current:.2f} PnL=${realized:+.2f}")
 
         self.ws_manager.unsubscribe([close_pos['symbol']])
-        place_order(close_pos['product_id'], close_pos['symbol'], config.LOT_SIZE, 'buy')
+        place_order(close_pos['product_id'], close_pos['symbol'], self.lot_size, 'buy')
         self.cumulative_realized_pnl += realized
         time.sleep(2)
 
@@ -246,21 +256,21 @@ class DeltaNeutralStrategy:
         if live_data and live_data.get('delta'):
             triggered_delta = live_data['delta']
 
-        search_delta = abs(triggered_delta) if abs(triggered_delta) > config.DELTA_TOLERANCE else config.TARGET_DELTA
+        search_delta = abs(triggered_delta) if abs(triggered_delta) > self.delta_tolerance else self.target_delta
         print(f"  [2/3] Finding NEW {close_leg.upper()} with delta {search_delta:.4f}...")
-        option_chain = get_option_chain(config.EXPIRY_DATE, self.asset)
+        option_chain = get_option_chain(self.expiry_date, self.asset)
 
         if triggered_leg == 'call':
-            _, new_opt = find_target_delta_options(option_chain, search_delta, config.DELTA_TOLERANCE)
+            _, new_opt = find_target_delta_options(option_chain, search_delta, self.delta_tolerance)
         else:
-            new_opt, _ = find_target_delta_options(option_chain, search_delta, config.DELTA_TOLERANCE)
+            new_opt, _ = find_target_delta_options(option_chain, search_delta, self.delta_tolerance)
 
         if not new_opt:
             print(f"  ✗ Could not find suitable {close_leg.upper()} option")
             return
 
         print(f"  [3/3] Entering NEW {close_leg.upper()}: {new_opt['symbol']} @ ${new_opt['mark_price']:.2f}")
-        place_order(new_opt['product_id'], new_opt['symbol'], config.LOT_SIZE, 'sell')
+        place_order(new_opt['product_id'], new_opt['symbol'], self.lot_size, 'sell')
         time.sleep(2)
 
         new_entry, _ = get_position_entry_price(new_opt['product_id'])
@@ -304,7 +314,7 @@ class DeltaNeutralStrategy:
                 pnl = (entry - data['mark_price']) * abs(size) * cv
                 self.cumulative_realized_pnl += pnl
                 print(f"  {label}: Entry=${entry:.2f} Exit=${data['mark_price']:.2f} PnL=${pnl:+.2f}")
-            place_order(pos['product_id'], pos['symbol'], config.LOT_SIZE, 'buy')
+            place_order(pos['product_id'], pos['symbol'], self.lot_size, 'buy')
 
         time.sleep(2)
         self.ws_manager.stop()

@@ -32,50 +32,60 @@ def current_user_id():
 
 
 class LogCapture:
-    def __init__(self, original, q):
+    """Thread-aware stdout that routes print() to the correct strategy's log queue."""
+    _local = threading.local()
+
+    def __init__(self, original):
         self.original = original
-        self.q = q
 
     def write(self, text):
         self.original.write(text)
-        if text.strip():
-            self.q.put(text.strip())
+        q = getattr(LogCapture._local, 'log_queue', None)
+        if q and text.strip():
+            q.put(text.strip())
 
     def flush(self):
         self.original.flush()
 
 
+# Install once at import time — all threads share this, but each routes to its own queue
+import sys
+sys.stdout = LogCapture(sys.stdout)
+
+
 def run_strategy(sid, params):
-    import sys
-    import config
+    from config import set_thread_credentials
     entry = strategies[sid]
-    old_stdout = sys.stdout
-    sys.stdout = LogCapture(old_stdout, entry['log_queue'])
+
+    # Route this thread's print() to this strategy's log queue
+    LogCapture._local.log_queue = entry['log_queue']
+
     try:
-        # Set per-user API keys
+        # Set per-thread API keys (isolated from other strategy threads)
         user = get_user(entry['user_id'])
         if not user or not user.get('api_key') or not user.get('api_secret'):
             entry['log_queue'].put("❌ API keys not configured. Go to Profile to add them.")
             entry['running'] = False
             return
-        config.API_KEY = user['api_key']
-        config.API_SECRET = user['api_secret']
-
-        config.EXPIRY_DATE = params['expiry_date']
-        config.TARGET_DELTA = float(params['target_delta'])
-        config.DELTA_TOLERANCE = float(params['delta_tolerance'])
-        config.LOT_SIZE = int(params['lot_size'])
-        config.PREMIUM_INCREASE_THRESHOLD = float(params['premium_threshold']) / 100
-        config.TARGET_PNL = float(params['target_pnl'])
-        config.MONITORING_INTERVAL = int(params['monitoring_interval'])
-        config.MAX_ADJUSTMENTS = int(params['max_adjustments'])
+        set_thread_credentials(user['api_key'], user['api_secret'])
 
         if not check_api_connection():
             entry['log_queue'].put("❌ Cannot proceed without proper API access")
             entry['running'] = False
             return
 
-        s = DeltaNeutralStrategy(asset=params.get('asset', 'BTC'))
+        s = DeltaNeutralStrategy(
+            asset=params.get('asset', 'BTC'),
+            expiry_date=params['expiry_date'],
+            target_delta=float(params['target_delta']),
+            delta_tolerance=float(params['delta_tolerance']),
+            lot_size=int(params['lot_size']),
+            premium_threshold=float(params['premium_threshold']) / 100,
+            target_pnl=float(params['target_pnl']),
+            max_adjustments=int(params['max_adjustments']),
+            monitoring_interval=int(params['monitoring_interval']),
+        )
+
         entry['strategy'] = s
         entry['running'] = True
 
@@ -96,7 +106,7 @@ def run_strategy(sid, params):
         record_end(sid, pnl, adj)
         if entry.get('strategy'):
             entry['strategy'].ws_manager.stop()
-        sys.stdout = old_stdout
+        LogCapture._local.log_queue = None
         entry['running'] = False
         entry['log_queue'].put("__STOPPED__")
 
@@ -297,14 +307,18 @@ def _leg_info(s, leg):
     pos = getattr(s, f'{leg}_position')
     if not pos:
         return None
-    entry = getattr(s, f'{leg}_actual_entry_price')
     cv = getattr(s, f'{leg}_contract_value')
     ws_data = s.ws_manager.get_latest_price(pos['symbol'])
-    mark = ws_data['mark_price'] if ws_data else entry
+    mark = ws_data['mark_price'] if ws_data else getattr(s, f'{leg}_actual_entry_price')
     delta = ws_data.get('delta', 0) if ws_data else 0
-    import config
-    size = config.LOT_SIZE
+
+    # Use real position data from exchange for accurate P&L
+    from api import get_position_entry_price
+    real_entry, real_size = get_position_entry_price(pos['product_id'])
+    entry = real_entry if real_entry else getattr(s, f'{leg}_actual_entry_price')
+    size = abs(real_size) if real_size else s.lot_size
     payoff = (entry - mark) * size * cv
+
     return dict(
         symbol=pos['symbol'],
         strike=pos.get('strike_price', ''),
