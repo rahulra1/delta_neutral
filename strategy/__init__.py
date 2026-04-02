@@ -180,7 +180,7 @@ class DeltaNeutralStrategy:
                     self.cumulative_realized_pnl
                 )
 
-                print(f"[{ts}] #{iteration} | Adj: {self.adjustment_count} | {source}")
+                print(f"[{ts}] #{iteration} | Adj: {self.adjustment_count}/{config.MAX_ADJUSTMENTS} | {source}")
                 for label, price, chg, entry, info in [
                     ("Call", call_price, call_chg, self.call_entry_price, c_info),
                     ("Put ", put_price, put_chg, self.put_entry_price, p_info)
@@ -192,6 +192,14 @@ class DeltaNeutralStrategy:
                         line += " | No position"
                     print(line)
                 print(f"  P&L: R=${self.realized_pnl:.2f} | U=${self.unrealized_pnl:.2f} | T=${self.total_pnl:.2f}")
+
+                if self.adjustment_count >= config.MAX_ADJUSTMENTS:
+                    print("=" * 70)
+                    print(f"✓ MAX ADJUSTMENTS REACHED! Count: {self.adjustment_count} | Total PnL: ${self.total_pnl:.2f}")
+                    print("=" * 70)
+                    self.close_all_positions()
+                    self.running = False
+                    break
 
                 if abs(self.total_pnl) >= config.TARGET_PNL:
                     print("=" * 70)

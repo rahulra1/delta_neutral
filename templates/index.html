@@ -53,6 +53,7 @@
     <div class="field"><label>Premium Threshold (%)</label><input id="premium_threshold" type="number" value="{{ premium_threshold }}"></div>
     <div class="field"><label>Target PnL ($)</label><input id="target_pnl" type="number" value="{{ target_pnl }}"></div>
     <div class="field"><label>Monitoring Interval (s)</label><input id="monitoring_interval" type="number" value="{{ monitoring_interval }}"></div>
+    <div class="field"><label>Max Adjustments</label><input id="max_adjustments" type="number" value="{{ max_adjustments }}"></div>
   </div>
 
   <div class="actions">
@@ -95,7 +96,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const fields = ['expiry_date','lot_size','target_delta','delta_tolerance','premium_threshold','target_pnl','monitoring_interval'];
+const fields = ['expiry_date','lot_size','target_delta','delta_tolerance','premium_threshold','target_pnl','monitoring_interval','max_adjustments'];
 let evtSource = null, statusTimer = null;
 let sid = '{{ sid }}';
 const isRunning = {{ running }};

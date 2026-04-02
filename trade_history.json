@@ -100,5 +100,23 @@
     "pnl": -0.01,
     "adjustments": 0,
     "status": "completed"
+  },
+  {
+    "sid": "52e535fc",
+    "started_at": "2026-04-02T12:01:29.057124",
+    "ended_at": "2026-04-02T12:01:31.677670",
+    "params": {
+      "expiry_date": "02-04-2026",
+      "lot_size": "1",
+      "target_delta": "0.2",
+      "delta_tolerance": "0.05",
+      "premium_threshold": "40",
+      "target_pnl": "25",
+      "monitoring_interval": "5",
+      "max_adjustments": "6"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "completed"
   }
 ]

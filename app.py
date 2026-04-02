@@ -68,6 +68,7 @@ def run_strategy(sid, params):
         config.PREMIUM_INCREASE_THRESHOLD = float(params['premium_threshold']) / 100
         config.TARGET_PNL = float(params['target_pnl'])
         config.MONITORING_INTERVAL = int(params['monitoring_interval'])
+        config.MAX_ADJUSTMENTS = int(params['max_adjustments'])
 
         if not check_api_connection():
             entry['log_queue'].put("❌ Cannot proceed without proper API access")
@@ -184,6 +185,7 @@ def new_strategy():
         premium_threshold=int(default_config.PREMIUM_INCREASE_THRESHOLD * 100),
         target_pnl=default_config.TARGET_PNL,
         monitoring_interval=default_config.MONITORING_INTERVAL,
+        max_adjustments=default_config.MAX_ADJUSTMENTS,
         running='false',
         username=session.get('username')
     )
@@ -205,6 +207,7 @@ def view_strategy(sid):
         premium_threshold=p.get('premium_threshold', int(default_config.PREMIUM_INCREASE_THRESHOLD * 100)),
         target_pnl=p.get('target_pnl', default_config.TARGET_PNL),
         monitoring_interval=p.get('monitoring_interval', default_config.MONITORING_INTERVAL),
+        max_adjustments=p.get('max_adjustments', default_config.MAX_ADJUSTMENTS),
         running='true' if e['running'] else 'false',
         username=session.get('username')
     )
