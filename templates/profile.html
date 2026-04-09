@@ -4,48 +4,39 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Profile — Delta Neutral Bot</title>
+<link rel='stylesheet' href='/static/style.css'>
 <style>
-  :root { --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a; --accent: #6c5ce7; --green: #00b894; --red: #e17055; --text: #dfe6e9; --muted: #636e72; }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'SF Mono', 'Fira Code', monospace; background: var(--bg); color: var(--text); min-height: 100vh; }
+  body { background: #fafafa; color: #1a1a2e; font-family: 'SF Mono', 'Fira Code', monospace; margin: 0; min-height: 100vh; }
   .container { max-width: 700px; margin: 0 auto; padding: 24px 16px; }
-  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
-  h1 { font-size: 1.3rem; color: var(--accent); }
-  .header a { color: var(--accent); font-size: 0.75rem; text-decoration: none; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 28px; margin-bottom: 20px; }
-  .card h2 { font-size: 1rem; color: var(--accent); margin-bottom: 16px; }
+  .card { background: #fff; border: 1px solid #e8e8e8; border-radius: 12px; padding: 28px; margin-bottom: 20px; }
+  .card h2 { font-size: 1rem; color: #1a1a2e; margin: 0 0 16px; }
   .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }
-  .field label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
-  .field input { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 10px 12px; border-radius: 6px; font-family: inherit; font-size: 0.9rem; }
-  .field input:focus { outline: none; border-color: var(--accent); }
-  .field .hint { font-size: 0.65rem; color: var(--muted); margin-top: 2px; }
-  button { padding: 8px 20px; background: var(--accent); color: #fff; border: none; border-radius: 6px; font-family: inherit; font-size: 0.85rem; cursor: pointer; font-weight: 600; }
-  .btn-green { background: var(--green); color: #000; }
-  .btn-red { background: var(--red); color: #fff; }
-  .btn-sm { padding: 5px 12px; font-size: 0.75rem; }
-  .success { color: var(--green); font-size: 0.8rem; margin-bottom: 16px; }
-  .status { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; font-size: 0.85rem; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; }
-  .dot.on { background: var(--green); } .dot.off { background: var(--red); }
-  /* Profiles */
+  .field label { font-size: .7rem; color: #9ca3af; text-transform: uppercase; letter-spacing: .5px; }
+  .field input { background: #fafafa; border: 1px solid #e8e8e8; color: #1a1a2e; padding: 10px 12px; border-radius: 6px; font-family: inherit; font-size: .9rem; }
+  .field input:focus { outline: none; border-color: #1a1a2e; }
+  .field .hint { font-size: .65rem; color: #9ca3af; margin-top: 2px; }
+  .btn { padding: 8px 20px; border: none; border-radius: 6px; font-family: inherit; font-size: .85rem; cursor: pointer; font-weight: 600; color: #fff; }
+  .btn-primary { background: #1a1a2e; }
+  .btn-green { background: #22c55e; color: #fff; }
+  .btn-red { background: #ef4444; color: #fff; }
+  .btn-sm { padding: 5px 12px; font-size: .75rem; }
+  .success { color: #22c55e; font-size: .8rem; margin-bottom: 16px; }
+  .status { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; font-size: .85rem; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot.on { background: #22c55e; } .dot.off { background: #ef4444; }
   .profile-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
-  .profile-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
-  .profile-card .pname { font-weight: 700; font-size: 0.95rem; }
-  .profile-card .pkey { font-size: 0.75rem; color: var(--muted); }
-  .profile-card .actions { display: flex; gap: 6px; }
-  .add-form { display: none; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+  .profile-card { background: #fafafa; border: 1px solid #e8e8e8; border-radius: 8px; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
+  .profile-card .pname { font-weight: 700; font-size: .95rem; }
+  .profile-card .pkey { font-size: .75rem; color: #9ca3af; }
+  .add-form { display: none; background: #fafafa; border: 1px solid #e8e8e8; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
   .add-form .row { display: flex; gap: 10px; margin-bottom: 10px; }
-  .add-form .row input { flex: 1; }
+  .add-form .row input { flex: 1; background: #fff; border: 1px solid #e8e8e8; color: #1a1a2e; padding: 10px 12px; border-radius: 6px; font-family: inherit; font-size: .9rem; }
 </style>
 </head>
 <body>
-<div class="container">
-  <div class="header">
-    <h1>👤 Profile & API Keys</h1>
-    <a href="/">← Dashboard</a>
-  </div>
+<div class='nav'><div class='logo'>⚡ Delta Neutral</div><a href='/'>Dashboard</a><a href='/option-chain'>Option Chain</a><a href='/strategy/new?asset=BTC'>Strategies</a><a href='/performance'>Performance</a><a href='/profile' class='active'>Profile</a><div class='spacer'></div><div class='user'><div class='avatar'>{{ username[0]|upper }}</div><span>{{ username }}</span><a href='/logout' style='border:none;padding:0;font-size:.75rem'>Logout</a></div></div>
 
-  <!-- Default Keys (legacy) -->
+<div class="container">
   <div class="card">
     <h2>Default API Keys</h2>
     <div class="field"><label>Username</label><input value="{{ username }}" disabled></div>
@@ -57,14 +48,13 @@
     <form method="POST" action="/profile">
       <div class="field"><label>API Key</label><input name="api_key" value="{{ api_key }}" placeholder="Enter API key" required><span class="hint">From Delta Exchange India → Account → API Keys</span></div>
       <div class="field"><label>API Secret</label><input name="api_secret" type="password" value="{{ api_secret }}" placeholder="Enter API secret" required></div>
-      <button type="submit">Save Default Keys</button>
+      <button class="btn btn-primary" type="submit">Save Default Keys</button>
     </form>
   </div>
 
-  <!-- Profiles -->
   <div class="card">
     <h2>🔑 API Profiles</h2>
-    <p style="font-size:0.8rem;color:var(--muted);margin-bottom:14px">Create multiple profiles for different API keys. Select a profile when starting any strategy.</p>
+    <p style="font-size:.8rem;color:#9ca3af;margin-bottom:14px">Create multiple profiles for different API keys. Select a profile when starting any strategy.</p>
 
     <div class="profile-list" id="profileList">
       {% for p in profiles %}
@@ -73,26 +63,22 @@
           <div class="pname">{{ p.name }}</div>
           <div class="pkey">{{ p.api_key[:8] }}...{{ p.api_key[-4:] }}</div>
         </div>
-        <div class="actions">
-          <button class="btn-sm btn-red" onclick="deleteProfile({{ p.id }})">✕</button>
-        </div>
+        <div><button class="btn btn-red btn-sm" onclick="deleteProfile({{ p.id }})">✕</button></div>
       </div>
       {% endfor %}
     </div>
 
     <div class="add-form" id="addForm">
-      <div class="row">
-        <input id="pName" placeholder="Profile name (e.g. Account 1)">
-      </div>
+      <div class="row"><input id="pName" placeholder="Profile name (e.g. Account 1)"></div>
       <div class="row">
         <input id="pKey" placeholder="API Key">
         <input id="pSecret" type="password" placeholder="API Secret">
       </div>
-      <button class="btn-green" onclick="saveProfile()">Save Profile</button>
-      <button class="btn-sm" onclick="document.getElementById('addForm').style.display='none'" style="margin-left:8px">Cancel</button>
+      <button class="btn btn-green" onclick="saveProfile()">Save Profile</button>
+      <button class="btn btn-sm btn-primary" onclick="document.getElementById('addForm').style.display='none'" style="margin-left:8px">Cancel</button>
     </div>
 
-    <button onclick="document.getElementById('addForm').style.display='block'">+ Add Profile</button>
+    <button class="btn btn-primary" onclick="document.getElementById('addForm').style.display='block'">+ Add Profile</button>
   </div>
 </div>
 

@@ -4,112 +4,60 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Performance — Delta Neutral Bot</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<link rel="stylesheet" href="/static/style.css">
 <style>
-  :root { --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a; --accent: #6c5ce7; --green: #00b894; --red: #e17055; --text: #dfe6e9; --muted: #636e72; }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'SF Mono', 'Fira Code', monospace; background: var(--bg); color: var(--text); min-height: 100vh; }
-  .container { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
-  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
-  h1 { font-size: 1.3rem; color: var(--accent); }
-  .header a { color: var(--accent); font-size: 0.75rem; text-decoration: none; }
-  .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 24px; }
-  .stat { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; text-align: center; }
-  .stat .val { font-size: 1.2rem; font-weight: 700; margin-top: 4px; }
-  .stat .lbl { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; }
-  .pnl-pos { color: var(--green); }
-  .pnl-neg { color: var(--red); }
-  .chart-box { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 24px; }
-  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-  th { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); }
-  td { font-size: 0.8rem; padding: 10px 12px; border-bottom: 1px solid var(--border); }
-  tr:last-child td { border-bottom: none; }
-  .empty { color: var(--muted); font-size: 0.85rem; margin-top: 20px; text-align: center; }
+  table{width:100%;border-collapse:collapse}
+  th{font-size:.7rem;color:var(--muted);text-transform:uppercase;text-align:left;padding:10px 14px;border-bottom:1px solid var(--border)}
+  td{font-size:.85rem;padding:10px 14px;border-bottom:1px solid var(--border)}
+  tr:last-child td{border-bottom:none}
+  tr:hover{background:var(--bg)}
+  .empty{color:var(--muted);text-align:center;padding:40px 0}
 </style>
 </head>
 <body>
+<div class='nav'><div class='logo'>⚡ Delta Neutral</div><a href='/'>Dashboard</a><a href='/option-chain'>Option Chain</a><a href='/strategy/new?asset=BTC'>Strategies</a><a href='/performance' class='active'>Performance</a><a href='/profile'>Profile</a><div class='spacer'></div><div class='user'><div class='avatar'>{{ username[0]|upper }}</div><span>{{ username }}</span><a href='/logout' style='border:none;padding:0;font-size:.75rem'>Logout</a></div></div>
+
 <div class="container">
-  <div class="header">
-    <h1>📊 Performance</h1>
-    <a href="/">← Dashboard</a>
+  <div class="page-title">📊 Performance</div>
+
+  <div class="grid-3" id="summary">
+    <div class="card" style="text-align:center"><div style="font-size:.7rem;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Total Trades</div><div style="font-size:1.3rem;font-weight:700" id="s_trades">—</div></div>
+    <div class="card" style="text-align:center"><div style="font-size:.7rem;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Total PnL</div><div style="font-size:1.3rem;font-weight:700" id="s_pnl">—</div></div>
+    <div class="card" style="text-align:center"><div style="font-size:.7rem;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Win Rate</div><div style="font-size:1.3rem;font-weight:700" id="s_winrate">—</div></div>
   </div>
 
-  <div class="summary">
-    <div class="stat"><div class="lbl">Total Trades</div><div class="val" id="s_trades">—</div></div>
-    <div class="stat"><div class="lbl">Total PnL</div><div class="val" id="s_pnl">—</div></div>
-    <div class="stat"><div class="lbl">Win Rate</div><div class="val" id="s_winrate">—</div></div>
-    <div class="stat"><div class="lbl">Avg PnL</div><div class="val" id="s_avg">—</div></div>
+  <div class="card">
+    <h2>Trade History</h2>
+    <table>
+      <thead><tr><th>SID</th><th>Started</th><th>Ended</th><th>Expiry</th><th>Lots</th><th>Delta</th><th>Adj</th><th>Status</th><th>PnL</th></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="empty" id="empty" style="display:none">No trade history yet.</div>
   </div>
-
-  <div class="chart-box"><canvas id="chart" height="260"></canvas></div>
-
-  <table>
-    <thead><tr><th>#</th><th>Started</th><th>Ended</th><th>Expiry</th><th>Lots</th><th>Adj</th><th>PnL</th></tr></thead>
-    <tbody id="tbody"></tbody>
-  </table>
-  <div class="empty" id="empty" style="display:none">No trade history yet.</div>
 </div>
 
 <script>
-fetch('/api/history').then(r=>r.json()).then(data => {
-  const completed = data.filter(d => d.status === 'completed');
-  const tbody = document.getElementById('tbody');
-  const empty = document.getElementById('empty');
+fetch('/api/history').then(r=>r.json()).then(data=>{
+  const tb=document.getElementById('tbody'),em=document.getElementById('empty');
+  if(!data.length){em.style.display='block';return}
 
-  if (!completed.length) { empty.style.display = 'block'; return; }
+  const wins=data.filter(d=>d.pnl>0).length;
+  const total=data.reduce((s,d)=>s+d.pnl,0);
+  document.getElementById('s_trades').textContent=data.length;
+  const pe=document.getElementById('s_pnl');
+  pe.textContent='$'+total.toFixed(2);
+  pe.style.color=total>=0?'var(--green)':'var(--red)';
+  document.getElementById('s_winrate').textContent=(wins/data.length*100).toFixed(0)+'%';
 
-  // Summary
-  const total = completed.reduce((s,d) => s + d.pnl, 0);
-  const wins = completed.filter(d => d.pnl > 0).length;
-  document.getElementById('s_trades').textContent = completed.length;
-  const pnlEl = document.getElementById('s_pnl');
-  pnlEl.textContent = '$' + total.toFixed(2);
-  pnlEl.className = 'val ' + (total >= 0 ? 'pnl-pos' : 'pnl-neg');
-  document.getElementById('s_winrate').textContent = (wins / completed.length * 100).toFixed(0) + '%';
-  const avgEl = document.getElementById('s_avg');
-  const avg = total / completed.length;
-  avgEl.textContent = '$' + avg.toFixed(2);
-  avgEl.className = 'val ' + (avg >= 0 ? 'pnl-pos' : 'pnl-neg');
-
-  // Table
-  completed.forEach((d, i) => {
-    const tr = document.createElement('tr');
-    const started = new Date(d.started_at).toLocaleString();
-    const ended = d.ended_at ? new Date(d.ended_at).toLocaleString() : '—';
-    const pnlCls = d.pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
-    tr.innerHTML = `<td>${i+1}</td><td>${started}</td><td>${ended}</td><td>${d.params.expiry_date||'—'}</td><td>${d.params.lot_size||'—'}</td><td>${d.adjustments}</td><td class="${pnlCls}">$${d.pnl.toFixed(2)}</td>`;
-    tbody.appendChild(tr);
-  });
-
-  // Chart — cumulative PnL over trades
-  const cumPnl = [];
-  let running = 0;
-  completed.forEach(d => { running += d.pnl; cumPnl.push(running); });
-  const labels = completed.map((d, i) => '#' + (i+1));
-
-  new Chart(document.getElementById('chart'), {
-    type: 'line',
-    data: {
-      labels: labels,
-      datasets: [{
-        label: 'Cumulative PnL ($)',
-        data: cumPnl,
-        borderColor: '#6c5ce7',
-        backgroundColor: 'rgba(108,92,231,0.1)',
-        fill: true,
-        tension: 0.3,
-        pointBackgroundColor: cumPnl.map(v => v >= 0 ? '#00b894' : '#e17055'),
-        pointRadius: 5,
-      }]
-    },
-    options: {
-      responsive: true,
-      plugins: { legend: { labels: { color: '#dfe6e9', font: { family: "'SF Mono','Fira Code',monospace", size: 11 } } } },
-      scales: {
-        x: { ticks: { color: '#636e72' }, grid: { color: '#2a2d3a' } },
-        y: { ticks: { color: '#636e72', callback: v => '$' + v }, grid: { color: '#2a2d3a' } }
-      }
-    }
+  data.forEach(d=>{
+    const tr=document.createElement('tr');
+    const s=d.started_at?new Date(d.started_at).toLocaleDateString():'—';
+    const e=d.ended_at?new Date(d.ended_at).toLocaleDateString():'—';
+    const p=d.params||{};
+    const cls=d.pnl>=0?'val-green':'val-red';
+    const badge=d.status==='completed'?'badge-green':d.status==='running'?'badge-yellow':'badge-red';
+    tr.innerHTML=`<td>${d.sid||'—'}</td><td>${s}</td><td>${e}</td><td>${p.expiry_date||'—'}</td><td>${p.lot_size||'—'}</td><td>${p.target_delta||'—'}</td><td>${d.adjustments}</td><td><span class="badge ${badge}">${d.status}</span></td><td class="${cls}">$${d.pnl.toFixed(2)}</td>`;
+    tb.appendChild(tr);
   });
 });
 </script>

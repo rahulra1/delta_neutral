@@ -242,6 +242,51 @@ def dashboard():
     return render_template('dashboard.html', strategies=strats, username=session.get('username'))
 
 
+@app.route('/api/dashboard')
+@login_required
+def api_dashboard():
+    """Compute dashboard stats from trade history."""
+    all_history = get_history()
+    trades = all_history  # show all trades
+
+    completed = [t for t in trades if t.get('status') == 'completed']
+    running_count = sum(1 for sid, e in strategies.items() if e.get('user_id') == current_user_id() and e.get('running'))
+    pnls = [t.get('pnl', 0) for t in completed]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p < 0]
+    total_pnl = sum(pnls)
+
+    # P&L over time for chart
+    pnl_series = []
+    cumulative = 0
+    for t in completed:
+        cumulative += t.get('pnl', 0)
+        pnl_series.append({'date': (t.get('ended_at') or t.get('started_at', ''))[:10], 'pnl': round(cumulative, 2)})
+
+    # Asset allocation from params
+    asset_counts = {}
+    for t in trades:
+        asset = t.get('params', {}).get('asset', 'BTC')
+        asset_counts[asset] = asset_counts.get(asset, 0) + 1
+
+    return jsonify(
+        total_pnl=round(total_pnl, 2),
+        open_positions=running_count,
+        total_trades=len(completed),
+        win_rate=round(len(wins)/len(completed)*100, 2) if completed else 0,
+        avg_gain=round(sum(wins)/len(wins), 2) if wins else 0,
+        avg_loss=round(sum(losses)/len(losses), 2) if losses else 0,
+        big_win=round(max(wins), 2) if wins else 0,
+        big_loss=round(min(losses), 2) if losses else 0,
+        max_drawdown=round(min(pnls), 2) if pnls else 0,
+        profitable_trades=len(wins),
+        losing_trades=len(losses),
+        pnl_series=pnl_series,
+        asset_allocation=asset_counts,
+        recent_trades=trades[-20:][::-1],
+    )
+
+
 @app.route('/strategy/new')
 @login_required
 def new_strategy():
@@ -491,7 +536,7 @@ def api_place_legs():
 @app.route('/api/positions')
 @login_required
 def api_positions():
-    """Return open option positions for the current user."""
+    """Return open option positions with live mark prices."""
     import re
     from api.positions import get_positions
     from config import set_thread_credentials
@@ -501,29 +546,66 @@ def api_positions():
     set_thread_credentials(api_key, api_secret)
 
     positions = get_positions()
+
+    # Fetch live tickers for mark prices
+    mark_prices = {}
+    try:
+        import requests as req
+        from config import BASE_URL
+        from auth import get_headers
+        path = '/v2/tickers'
+        qs = '?contract_types=call_options,put_options'
+        headers = get_headers('GET', path, qs)
+        resp = req.get(f'{BASE_URL}{path}{qs}', headers=headers, timeout=10)
+        if resp.ok:
+            for t in resp.json().get('result', []):
+                mark_prices[t.get('product_id')] = float(t.get('mark_price', 0))
+    except Exception:
+        pass
+
     result = []
     for p in positions:
         size = int(p.get('size', 0))
         if size == 0:
             continue
         sym = p.get('product_symbol', '')
-        # Parse type and strike from symbol: C-BTC-90000-170426 or P-ETH-2000-170426
         m = re.match(r'^(C|P)-(\w+)-(\d+)-\d+$', sym)
         opt_type = 'call' if (m and m.group(1) == 'C') else 'put' if m else 'unknown'
         strike = m.group(3) if m else '0'
         side = 'sell' if size < 0 else 'buy'
+        pid = p.get('product_id')
+        entry = float(p.get('entry_price', 0))
+        mark = mark_prices.get(pid, entry)
+        # contract_value: BTC options = 0.001, ETH options = 0.01
+        asset = m.group(2) if m else 'BTC'
+        cv = 0.01 if asset == 'ETH' else 0.001
+        direction = 1 if side == 'buy' else -1
+        pnl = direction * (mark - entry) * abs(size) * cv
         result.append({
-            'symbol': sym,
-            'product_id': p.get('product_id'),
-            'type': opt_type,
-            'strike': strike,
-            'side': side,
-            'size': abs(size),
-            'entry_price': float(p.get('entry_price', 0)),
-            'mark_price': float(p.get('mark_price', 0)) if p.get('mark_price') else float(p.get('entry_price', 0)),
+            'symbol': sym, 'product_id': pid, 'type': opt_type,
+            'strike': strike, 'side': side, 'size': abs(size),
+            'entry_price': entry, 'mark_price': mark,
+            'pnl': round(pnl, 2), 'asset': asset,
         })
     return jsonify(positions=result)
 
+
+
+@app.route('/api/close-position', methods=['POST'])
+@login_required
+def api_close_position():
+    """Close a single position leg."""
+    from api.orders import place_order
+    from config import set_thread_credentials
+    data = request.json
+    api_key, api_secret, _ = get_profile_creds(data.get('profile_id'))
+    if not api_key:
+        return jsonify(error="No API profile selected"), 400
+    set_thread_credentials(api_key, api_secret)
+    # To close: buy back if short, sell if long
+    close_side = 'buy' if data['side'] == 'sell' else 'sell'
+    result = place_order(data['product_id'], data['symbol'], int(data['size']), close_side)
+    return jsonify(success=result is not None)
 
 @app.route('/api/monitor/<mid>')
 @login_required

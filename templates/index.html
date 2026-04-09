@@ -3,64 +3,58 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Delta Neutral Bot</title>
+<title>Strategy — Delta Neutral Bot</title>
+<link rel="stylesheet" href="/static/style.css">
 <style>
-  :root { --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a; --accent: #6c5ce7; --green: #00b894; --red: #e17055; --text: #dfe6e9; --muted: #636e72; }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'SF Mono', 'Fira Code', monospace; background: var(--bg); color: var(--text); min-height: 100vh; }
-  .container { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
-  h1 { font-size: 1.3rem; margin-bottom: 24px; color: var(--accent); }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
-  .field { display: flex; flex-direction: column; gap: 4px; }
-  .field label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
-  .field input { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 6px; font-family: inherit; font-size: 0.9rem; }
-  .field input:focus { outline: none; border-color: var(--accent); }
-  .actions { display: flex; gap: 10px; margin-bottom: 20px; }
-  button { padding: 10px 24px; border: none; border-radius: 6px; font-family: inherit; font-size: 0.85rem; cursor: pointer; font-weight: 600; }
-  #startBtn { background: var(--green); color: #000; }
-  #stopBtn { background: var(--red); color: #fff; }
-  button:disabled { opacity: 0.4; cursor: not-allowed; }
-  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 20px; }
-  .stat { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; text-align: center; }
-  .stat .val { font-size: 1.2rem; font-weight: 700; margin-top: 4px; }
-  .stat .lbl { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; }
-  .pnl-pos { color: var(--green); }
-  .pnl-neg { color: var(--red); }
-  .legs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
-  .leg { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
-  .leg .leg-title { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
-  .leg .leg-row { display: flex; justify-content: space-between; font-size: 0.8rem; padding: 2px 0; }
-  .leg .leg-row .leg-val { font-weight: 600; }
-  #log { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; height: 420px; overflow-y: auto; font-size: 0.78rem; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
-  #log .line { padding: 1px 0; }
-  #log .line.warn { color: #fdcb6e; }
-  #log .line.err { color: var(--red); }
-  #log .line.ok { color: var(--green); }
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;text-align:center}
+.stat .val{font-size:1.2rem;font-weight:700;margin-top:4px}
+.stat .lbl{font-size:.7rem;color:var(--muted);text-transform:uppercase}
+.legs{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px}
+.leg{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px}
+.leg .leg-title{font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;font-weight:600}
+.leg .leg-row{display:flex;justify-content:space-between;font-size:.85rem;padding:4px 0;border-bottom:1px solid var(--border)}
+.leg .leg-row:last-child{border:none}
+.leg .leg-row .leg-val{font-weight:600}
+#log{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px;height:400px;overflow-y:auto;font-size:.8rem;line-height:1.7;white-space:pre-wrap;word-break:break-all;font-family:'SF Mono',monospace}
+#log .line{padding:1px 0}
+#log .line.warn{color:#d97706}
+#log .line.err{color:var(--red)}
+#log .line.ok{color:var(--green)}
 </style>
 </head>
 <body>
+<div class="nav">
+  <div class="logo">⚡ Delta Neutral</div>
+  <a href="/">Dashboard</a>
+  <a href="/option-chain">Option Chain</a>
+  <a href="/strategy/new?asset=BTC" class="active">Strategies</a>
+  <a href="/performance">Performance</a>
+  <a href="/profile">Profile</a>
+  <div class="spacer"></div>
+  <div class="user"><div class="avatar">{{ username[0]|upper }}</div><span>{{ username }}</span><a href="/logout" style="border:none;padding:0;font-size:.75rem">Logout</a></div>
+</div>
+
 <div class="container">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
-    <h1>⚡ Delta Neutral — {{ asset }}</h1>
-    <div><a href="/" style="color:var(--accent);font-size:0.75rem;text-decoration:none;margin-right:16px">← Dashboard</a><a href="/logout" style="color:var(--muted);font-size:0.75rem;text-decoration:none">Logout</a></div>
-  </div>
+  <div class="page-title">⚡ Delta Neutral — {{ asset }}</div>
 
-  <div class="grid">
-    <div class="field"><label>Asset</label><input id="asset" value="{{ asset }}" readonly style="opacity:0.7;cursor:not-allowed"></div>
-    <div class="field"><label>Expiry Date (DD-MM-YYYY)</label><input id="expiry_date" value="{{ expiry_date }}"></div>
-    <div class="field"><label>Lot Size</label><input id="lot_size" type="number" value="{{ lot_size }}"></div>
-    <div class="field"><label>Target Delta</label><input id="target_delta" type="number" step="0.01" value="{{ target_delta }}"></div>
-    <div class="field"><label>Delta Tolerance</label><input id="delta_tolerance" type="number" step="0.01" value="{{ delta_tolerance }}"></div>
-    <div class="field"><label>Premium Threshold (%)</label><input id="premium_threshold" type="number" value="{{ premium_threshold }}"></div>
-    <div class="field"><label>Target PnL ($)</label><input id="target_pnl" type="number" value="{{ target_pnl }}"></div>
-    <div class="field"><label>Monitoring Interval (s)</label><input id="monitoring_interval" type="number" value="{{ monitoring_interval }}"></div>
-    <div class="field"><label>Max Adjustments</label><input id="max_adjustments" type="number" value="{{ max_adjustments }}"></div>
-    <div class="field"><label>API Profile</label><select id="profile_id" style="background:var(--card);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:6px;font-family:inherit;font-size:0.9rem"><option value="">Default Keys</option></select></div>
-  </div>
-
-  <div class="actions">
-    <button id="startBtn" onclick="startBot()">▶ Start</button>
-    <button id="stopBtn" onclick="stopBot()" disabled>■ Stop</button>
+  <div class="card">
+    <div class="grid-2" style="gap:14px;margin-bottom:16px">
+      <div class="field"><label>Asset</label><input id="asset" value="{{ asset }}" readonly style="opacity:.6;cursor:not-allowed"></div>
+      <div class="field"><label>Expiry Date (DD-MM-YYYY)</label><input id="expiry_date" value="{{ expiry_date }}"></div>
+      <div class="field"><label>Lot Size</label><input id="lot_size" type="number" value="{{ lot_size }}"></div>
+      <div class="field"><label>Target Delta</label><input id="target_delta" type="number" step="0.01" value="{{ target_delta }}"></div>
+      <div class="field"><label>Delta Tolerance</label><input id="delta_tolerance" type="number" step="0.01" value="{{ delta_tolerance }}"></div>
+      <div class="field"><label>Premium Threshold (%)</label><input id="premium_threshold" type="number" value="{{ premium_threshold }}"></div>
+      <div class="field"><label>Target PnL ($)</label><input id="target_pnl" type="number" value="{{ target_pnl }}"></div>
+      <div class="field"><label>Monitoring Interval (s)</label><input id="monitoring_interval" type="number" value="{{ monitoring_interval }}"></div>
+      <div class="field"><label>Max Adjustments</label><input id="max_adjustments" type="number" value="{{ max_adjustments }}"></div>
+      <div class="field"><label>API Profile</label><select id="profile_id"><option value="">Default Keys</option></select></div>
+    </div>
+    <div style="display:flex;gap:10px">
+      <button class="btn btn-green" id="startBtn" onclick="startBot()">▶ Start</button>
+      <button class="btn btn-red" id="stopBtn" onclick="stopBot()" disabled>■ Stop</button>
+    </div>
   </div>
 
   <div class="stats">
@@ -71,7 +65,7 @@
   </div>
 
   <div class="legs" id="legs" style="display:none">
-    <div class="leg" id="leg_call">
+    <div class="leg">
       <div class="leg-title">📈 Short Call</div>
       <div class="leg-row"><span>Symbol</span><span class="leg-val" id="c_sym">—</span></div>
       <div class="leg-row"><span>Strike</span><span class="leg-val" id="c_strike">—</span></div>
@@ -81,7 +75,7 @@
       <div class="leg-row"><span>Size</span><span class="leg-val" id="c_size">—</span></div>
       <div class="leg-row"><span>Payoff</span><span class="leg-val" id="c_payoff">—</span></div>
     </div>
-    <div class="leg" id="leg_put">
+    <div class="leg">
       <div class="leg-title">📉 Short Put</div>
       <div class="leg-row"><span>Symbol</span><span class="leg-val" id="p_sym">—</span></div>
       <div class="leg-row"><span>Strike</span><span class="leg-val" id="p_strike">—</span></div>
@@ -97,100 +91,62 @@
 </div>
 
 <script>
-const $ = id => document.getElementById(id);
-const fields = ['asset','expiry_date','lot_size','target_delta','delta_tolerance','premium_threshold','target_pnl','monitoring_interval','max_adjustments'];
-let evtSource = null, statusTimer = null;
-let sid = '{{ sid }}';
-const isRunning = {{ running }};
+const $=id=>document.getElementById(id);
+const fields=['asset','expiry_date','lot_size','target_delta','delta_tolerance','premium_threshold','target_pnl','monitoring_interval','max_adjustments'];
+let evtSource=null,statusTimer=null,sid='{{ sid }}';
+const isRunning={{ running }};
 
-function setRunning(on) {
-  $('startBtn').disabled = on;
-  $('stopBtn').disabled = !on;
-  fields.forEach(f => $(f).disabled = on);
+function setRunning(on){$('startBtn').disabled=on;$('stopBtn').disabled=!on;fields.forEach(f=>$(f).disabled=on)}
+
+function appendLog(text){
+  const el=document.createElement('div');
+  el.className='line'+(text.includes('✗')||text.includes('❌')?' err':text.includes('⚠')?' warn':text.includes('✓')?' ok':'');
+  el.textContent=text;$('log').appendChild(el);$('log').scrollTop=$('log').scrollHeight;
 }
 
-function appendLog(text) {
-  const el = document.createElement('div');
-  el.className = 'line' + (text.includes('✗') || text.includes('❌') ? ' err' : text.includes('⚠') ? ' warn' : text.includes('✓') ? ' ok' : '');
-  el.textContent = text;
-  $('log').appendChild(el);
-  $('log').scrollTop = $('log').scrollHeight;
-}
-
-function startBot() {
-  $('log').innerHTML = '';
-  const params = {sid: sid, profile_id: $('profile_id').value};
-  fields.forEach(f => params[f] = $(f).value);
-  fetch('/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(params) })
-    .then(r => r.json()).then(d => {
-      if (d.error) { appendLog('❌ ' + d.error); return; }
-      sid = d.sid;
-      history.replaceState(null, '', '/strategy/' + sid);
-      setRunning(true);
-      listenLogs();
-      statusTimer = setInterval(pollStatus, 3000);
+function startBot(){
+  $('log').innerHTML='';
+  const params={sid:sid,profile_id:$('profile_id').value};
+  fields.forEach(f=>params[f]=$(f).value);
+  fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(params)})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){appendLog('❌ '+d.error);return}
+      sid=d.sid;history.replaceState(null,'','/strategy/'+sid);
+      setRunning(true);listenLogs();statusTimer=setInterval(pollStatus,3000);
     });
 }
 
-function stopBot() {
-  fetch('/stop', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({sid: sid}) })
-    .then(r => r.json()).then(d => appendLog('Stopping...'));
+function stopBot(){
+  fetch('/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sid:sid})})
+    .then(r=>r.json()).then(()=>appendLog('Stopping...'));
 }
 
-function listenLogs() {
-  if (evtSource) evtSource.close();
-  evtSource = new EventSource('/stream/' + sid);
-  evtSource.onmessage = e => appendLog(e.data);
-  evtSource.addEventListener('stopped', () => {
-    evtSource.close();
-    clearInterval(statusTimer);
-    setRunning(false);
-    appendLog('— Strategy stopped —');
+function listenLogs(){
+  if(evtSource)evtSource.close();
+  evtSource=new EventSource('/stream/'+sid);
+  evtSource.onmessage=e=>appendLog(e.data);
+  evtSource.addEventListener('stopped',()=>{evtSource.close();clearInterval(statusTimer);setRunning(false);appendLog('— Strategy stopped —')});
+}
+
+function pollStatus(){
+  fetch('/status/'+sid).then(r=>r.json()).then(d=>{
+    if(!d.running){clearInterval(statusTimer);setRunning(false);$('legs').style.display='none';return}
+    const cls=v=>v>=0?'val-green':'val-red';
+    $('s_total').className='val '+cls(d.total_pnl);$('s_total').textContent='$'+d.total_pnl.toFixed(2);
+    $('s_realized').className='val '+cls(d.realized_pnl);$('s_realized').textContent='$'+d.realized_pnl.toFixed(2);
+    $('s_unrealized').className='val '+cls(d.unrealized_pnl);$('s_unrealized').textContent='$'+d.unrealized_pnl.toFixed(2);
+    $('s_adj').textContent=d.adjustment_count;
+    $('legs').style.display='grid';
+    function fillLeg(pre,leg){if(!leg)return;$(pre+'_sym').textContent=leg.symbol;$(pre+'_strike').textContent=leg.strike;
+      $(pre+'_entry').textContent='$'+leg.entry.toFixed(2);$(pre+'_mark').textContent='$'+leg.mark.toFixed(2);
+      $(pre+'_delta').textContent=leg.delta.toFixed(4);$(pre+'_size').textContent=leg.size;
+      const po=$(pre+'_payoff');po.textContent='$'+leg.payoff.toFixed(2);po.style.color=leg.payoff>=0?'var(--green)':'var(--red)'}
+    fillLeg('c',d.call);fillLeg('p',d.put);
   });
 }
 
-function pollStatus() {
-  fetch('/status/' + sid).then(r => r.json()).then(d => {
-    if (!d.running) { clearInterval(statusTimer); setRunning(false); $('legs').style.display='none'; return; }
-    const cls = v => v >= 0 ? 'pnl-pos' : 'pnl-neg';
-    $('s_total').className = 'val ' + cls(d.total_pnl);
-    $('s_total').textContent = '$' + d.total_pnl.toFixed(2);
-    $('s_realized').className = 'val ' + cls(d.realized_pnl);
-    $('s_realized').textContent = '$' + d.realized_pnl.toFixed(2);
-    $('s_unrealized').className = 'val ' + cls(d.unrealized_pnl);
-    $('s_unrealized').textContent = '$' + d.unrealized_pnl.toFixed(2);
-    $('s_adj').textContent = d.adjustment_count;
-
-    $('legs').style.display = 'grid';
-    function fillLeg(prefix, leg) {
-      if (!leg) return;
-      $(prefix+'_sym').textContent = leg.symbol;
-      $(prefix+'_strike').textContent = leg.strike;
-      $(prefix+'_entry').textContent = '$' + leg.entry.toFixed(2);
-      $(prefix+'_mark').textContent = '$' + leg.mark.toFixed(2);
-      $(prefix+'_delta').textContent = leg.delta.toFixed(4);
-      $(prefix+'_size').textContent = leg.size;
-      const po = $(prefix+'_payoff');
-      po.textContent = '$' + leg.payoff.toFixed(2);
-      po.style.color = leg.payoff >= 0 ? 'var(--green)' : 'var(--red)';
-    }
-    fillLeg('c', d.call);
-    fillLeg('p', d.put);
-  });
-}
-
-if (isRunning) {
-  setRunning(true);
-  listenLogs();
-  statusTimer = setInterval(pollStatus, 3000);
-  appendLog('— Reconnected to running strategy —');
-}
-
-// Load profiles
-fetch('/api/profiles').then(r=>r.json()).then(d=>{
-  const sel=$('profile_id');
-  (d.profiles||[]).forEach(p=>{const o=document.createElement('option');o.value=p.id;o.textContent=p.name;sel.appendChild(o)});
-});
+if(isRunning){setRunning(true);listenLogs();statusTimer=setInterval(pollStatus,3000);appendLog('— Reconnected to running strategy —')}
+fetch('/api/profiles').then(r=>r.json()).then(d=>{const sel=$('profile_id');(d.profiles||[]).forEach(p=>{const o=document.createElement('option');o.value=p.id;o.textContent=p.name;sel.appendChild(o)})});
 </script>
 </body>
 </html>

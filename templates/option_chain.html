@@ -4,14 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Option Chain — Delta Neutral Bot</title>
+<link rel="stylesheet" href="/static/style.css">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
-:root{--bg:#0f1117;--card:#1a1d27;--border:#2a2d3a;--accent:#6c5ce7;--green:#00b894;--red:#e17055;--text:#dfe6e9;--muted:#636e72;--call-bg:rgba(0,184,148,0.06);--put-bg:rgba(225,112,85,0.06);--itm:rgba(108,92,231,0.08)}
+:root{--bg:#fafafa;--card:#fff;--border:#e8e8e8;--accent:#1a1a2e;--green:#22c55e;--red:#ef4444;--text:#1a1a2e;--muted:#9ca3af;--call-bg:rgba(34,197,94,0.04);--put-bg:rgba(239,68,68,0.04);--itm:rgba(99,102,241,0.06)}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'SF Mono','Fira Code',monospace;background:var(--bg);color:var(--text);min-height:100vh;font-size:13px}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:13px}
 .container{max-width:1400px;margin:0 auto;padding:16px}
 .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
-h1{font-size:1.2rem;color:var(--accent);background:linear-gradient(135deg,var(--accent),var(--green));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+h1{font-size:1.2rem;font-weight:700;color:var(--accent)}
 .header a{color:var(--muted);font-size:.75rem;text-decoration:none;margin-left:16px}
 .controls{display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
 .controls select,.controls button{background:var(--card);border:1px solid var(--border);color:var(--text);padding:6px 12px;border-radius:6px;font-family:inherit;font-size:.85rem;cursor:pointer}
@@ -23,7 +24,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}
 th{background:var(--card);color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;padding:8px 6px;position:sticky;top:0;z-index:2}
 th.strike-hdr{background:var(--accent);color:#fff;font-size:11px;min-width:80px}
 td{padding:5px 6px;text-align:center;border-bottom:1px solid var(--border);white-space:nowrap}
-tr:hover td{background:rgba(108,92,231,0.04)}
+tr:hover td{background:rgba(26,26,46,0.04)}
 .call-side{background:var(--call-bg)}
 .put-side{background:var(--put-bg)}
 .strike-col{background:var(--card);font-weight:700;font-size:13px;color:var(--text);border-left:2px solid var(--accent);border-right:2px solid var(--accent)}
@@ -32,7 +33,7 @@ tr:hover td{background:rgba(108,92,231,0.04)}
 tr.atm-bar td{padding:0;height:4px;border:none}
 tr.atm-bar .atm-line{background:linear-gradient(90deg,transparent,var(--accent),transparent);height:4px}
 tr.atm-bar .atm-label{position:relative}
-tr.atm-bar .atm-label span{position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:var(--accent);color:#fff;font-size:10px;padding:2px 12px;border-radius:4px;font-weight:700;white-space:nowrap;box-shadow:0 2px 8px rgba(108,92,231,0.4)}
+tr.atm-bar .atm-label span{position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:var(--accent);color:#fff;font-size:10px;padding:2px 12px;border-radius:4px;font-weight:700;white-space:nowrap;box-shadow:0 2px 8px rgba(26,26,46,0.2)}
 .oi-bar{display:inline-block;height:10px;border-radius:2px;min-width:2px;vertical-align:middle;margin-right:3px}
 .oi-bar.call{background:var(--green)}.oi-bar.put{background:var(--red)}
 .delta{color:var(--accent);font-weight:600}
@@ -42,7 +43,7 @@ td.selectable:hover{outline:2px solid var(--accent);outline-offset:-2px}
 td.selected-buy{outline:2px solid var(--green);outline-offset:-2px;background:rgba(0,184,148,0.18)!important}
 td.selected-sell{outline:2px solid var(--red);outline-offset:-2px;background:rgba(225,112,85,0.18)!important}
 /* Builder */
-.builder{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px;margin-bottom:16px;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
+.builder{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px;margin-bottom:16px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
 .builder h3{font-size:.85rem;color:var(--accent);margin-bottom:10px}
 .legs-table{width:100%;font-size:12px;margin-bottom:10px}
 .legs-table th{background:transparent;color:var(--muted);text-align:left;padding:4px 8px}
@@ -72,13 +73,13 @@ td.selected-sell{outline:2px solid var(--red);outline-offset:-2px;background:rgb
 .toast{position:fixed;bottom:20px;right:20px;background:var(--green);color:#000;padding:12px 20px;border-radius:8px;font-weight:600;display:none;z-index:999}
 .toast.error{background:var(--red);color:#fff}
 /* Positions */
-.positions-section{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px;margin-bottom:16px;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
+.positions-section{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px;margin-bottom:16px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
 .pos-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
 .pos-header h3{font-size:.85rem;color:var(--accent)}
 .pos-list{display:flex;flex-wrap:wrap;gap:8px}
 .pos-card{background:var(--bg);border:2px solid var(--border);border-radius:8px;padding:10px 14px;cursor:pointer;font-size:12px;transition:all .2s;min-width:180px}
 .pos-card:hover{border-color:var(--accent)}
-.pos-card.selected{border-color:var(--accent);box-shadow:0 0 10px rgba(108,92,231,0.3)}
+.pos-card.selected{border-color:var(--accent);box-shadow:0 0 10px rgba(26,26,46,0.3)}
 .pos-card .pos-sym{font-weight:700;font-size:13px;margin-bottom:4px}
 .pos-card .pos-row{display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:11px}
 .pos-card .pos-row .v{color:var(--text);font-weight:600}
@@ -88,11 +89,18 @@ td.selected-sell{outline:2px solid var(--red);outline-offset:-2px;background:rgb
 </style>
 </head>
 <body>
+<div class="nav">
+  <div class="logo">⚡ Delta Neutral</div>
+  <a href="/">Dashboard</a>
+  <a href="/option-chain" class="active">Option Chain</a>
+  <a href="/strategy/new?asset=BTC">Strategies</a>
+  <a href="/performance">Performance</a>
+  <a href="/profile">Profile</a>
+  <div class="spacer"></div>
+  <div class="user"><div class="avatar">U</div><a href="/logout" style="border:none;padding:0;font-size:.75rem">Logout</a></div>
+</div>
 <div class="container">
-  <div class="header">
-    <h1>⛓ Option Chain</h1>
-    <div><a href="/" style="color:var(--accent)">← Dashboard</a><a href="/logout">Logout</a></div>
-  </div>
+  <div style="margin-bottom:16px"><h1>⛓ Option Chain</h1></div>
   <div class="controls">
     <select id="asset"><option value="BTC">₿ BTC</option><option value="ETH">⟠ ETH</option></select>
     <select id="expiry"><option value="">Select expiry...</option></select>
@@ -352,7 +360,7 @@ function updateSummary(){
       datasets:[{
         label:'P&L at Expiry',
         data:ys,
-        borderColor:'rgba(108,92,231,0.9)',
+        borderColor:'rgba(26,26,46,0.9)',
         borderWidth:2,
         pointRadius:0,
         fill:{target:'origin',above:'rgba(0,184,148,0.1)',below:'rgba(225,112,85,0.1)'},
@@ -366,8 +374,8 @@ function updateSummary(){
         tooltip:{callbacks:{label:ctx=>'P&L: $'+ctx.parsed.y.toFixed(2)}}
       },
       scales:{
-        x:{title:{display:true,text:'Spot Price at Expiry',color:'#636e72',font:{size:10}},ticks:{color:'#636e72',maxTicksLimit:10,font:{size:10}},grid:{color:'#2a2d3a'}},
-        y:{title:{display:true,text:'Profit / Loss',color:'#636e72',font:{size:10}},ticks:{color:'#636e72',font:{size:10}},grid:{color:'#2a2d3a'},
+        x:{title:{display:true,text:'Spot Price at Expiry',color:'#9ca3af',font:{size:10}},ticks:{color:'#9ca3af',maxTicksLimit:10,font:{size:10}},grid:{color:'#e8e8e8'}},
+        y:{title:{display:true,text:'Profit / Loss',color:'#9ca3af',font:{size:10}},ticks:{color:'#9ca3af',font:{size:10}},grid:{color:'#e8e8e8'},
           afterDataLimits:s=>{/* ensure 0 line visible */if(s.min>0)s.min=-s.max*0.1;if(s.max<0)s.max=-s.min*0.1}
         }
       },
@@ -381,7 +389,7 @@ function updateSummary(){
         const y=yScale.getPixelForValue(0);
         if(y>=chart.chartArea.top&&y<=chart.chartArea.bottom){
           const ctx2=chart.ctx;ctx2.save();ctx2.beginPath();ctx2.moveTo(chart.chartArea.left,y);
-          ctx2.lineTo(chart.chartArea.right,y);ctx2.strokeStyle='rgba(255,255,255,0.25)';ctx2.lineWidth=1;ctx2.setLineDash([4,4]);ctx2.stroke();ctx2.restore();
+          ctx2.lineTo(chart.chartArea.right,y);ctx2.strokeStyle='rgba(0,0,0,0.1)';ctx2.lineWidth=1;ctx2.setLineDash([4,4]);ctx2.stroke();ctx2.restore();
         }
         // Spot price vertical line
         if(spotPrice){
@@ -390,7 +398,7 @@ function updateSummary(){
           if(xIdx>=0){
             const x=xScale.getPixelForValue(xIdx);
             const ctx3=chart.ctx;ctx3.save();ctx3.beginPath();ctx3.moveTo(x,chart.chartArea.top);
-            ctx3.lineTo(x,chart.chartArea.bottom);ctx3.strokeStyle='rgba(108,92,231,0.5)';ctx3.lineWidth=1;ctx3.setLineDash([4,4]);ctx3.stroke();
+            ctx3.lineTo(x,chart.chartArea.bottom);ctx3.strokeStyle='rgba(26,26,46,0.5)';ctx3.lineWidth=1;ctx3.setLineDash([4,4]);ctx3.stroke();
             ctx3.fillStyle='var(--accent)';ctx3.font='10px monospace';ctx3.fillText('Spot',x-12,chart.chartArea.top-4);ctx3.restore();
           }
         }
@@ -546,15 +554,15 @@ function renderPosPayoff(){
     type:'line',
     data:{labels:xs,datasets:[{
       label:'Position P&L at Expiry',data:ys,
-      borderColor:'rgba(108,92,231,0.9)',borderWidth:2,pointRadius:0,
+      borderColor:'rgba(26,26,46,0.9)',borderWidth:2,pointRadius:0,
       fill:{target:'origin',above:'rgba(0,184,148,0.12)',below:'rgba(225,112,85,0.12)'},tension:0.1
     }]},
     options:{
       responsive:true,animation:false,
       plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>'P&L: $'+ctx.parsed.y.toFixed(2)}}},
       scales:{
-        x:{title:{display:true,text:'Spot at Expiry',color:'#636e72',font:{size:10}},ticks:{color:'#636e72',maxTicksLimit:10,font:{size:10}},grid:{color:'#2a2d3a'}},
-        y:{title:{display:true,text:'P&L ($)',color:'#636e72',font:{size:10}},ticks:{color:'#636e72',font:{size:10}},grid:{color:'#2a2d3a'},
+        x:{title:{display:true,text:'Spot at Expiry',color:'#9ca3af',font:{size:10}},ticks:{color:'#9ca3af',maxTicksLimit:10,font:{size:10}},grid:{color:'#e8e8e8'}},
+        y:{title:{display:true,text:'P&L ($)',color:'#9ca3af',font:{size:10}},ticks:{color:'#9ca3af',font:{size:10}},grid:{color:'#e8e8e8'},
           afterDataLimits:s=>{if(s.min>0)s.min=-s.max*0.1;if(s.max<0)s.max=-s.min*0.1}}
       }
     },
@@ -562,14 +570,14 @@ function renderPosPayoff(){
       const y=chart.scales.y.getPixelForValue(0);
       if(y>=chart.chartArea.top&&y<=chart.chartArea.bottom){
         const ctx2=chart.ctx;ctx2.save();ctx2.beginPath();ctx2.moveTo(chart.chartArea.left,y);
-        ctx2.lineTo(chart.chartArea.right,y);ctx2.strokeStyle='rgba(255,255,255,0.25)';ctx2.lineWidth=1;ctx2.setLineDash([4,4]);ctx2.stroke();ctx2.restore();
+        ctx2.lineTo(chart.chartArea.right,y);ctx2.strokeStyle='rgba(0,0,0,0.1)';ctx2.lineWidth=1;ctx2.setLineDash([4,4]);ctx2.stroke();ctx2.restore();
       }
       if(sp){
         const xIdx=xs.findIndex(v=>v>=sp);
         if(xIdx>=0){const x=chart.scales.x.getPixelForValue(xIdx);
           const ctx3=chart.ctx;ctx3.save();ctx3.beginPath();ctx3.moveTo(x,chart.chartArea.top);ctx3.lineTo(x,chart.chartArea.bottom);
-          ctx3.strokeStyle='rgba(108,92,231,0.5)';ctx3.lineWidth=1;ctx3.setLineDash([4,4]);ctx3.stroke();
-          ctx3.fillStyle='#6c5ce7';ctx3.font='10px monospace';ctx3.fillText('Spot',x-12,chart.chartArea.top-4);ctx3.restore();
+          ctx3.strokeStyle='rgba(26,26,46,0.5)';ctx3.lineWidth=1;ctx3.setLineDash([4,4]);ctx3.stroke();
+          ctx3.fillStyle='#1a1a2e';ctx3.font='10px monospace';ctx3.fillText('Spot',x-12,chart.chartArea.top-4);ctx3.restore();
         }
       }
     }}]
