@@ -55,6 +55,7 @@
     <div class="field"><label>Target PnL ($)</label><input id="target_pnl" type="number" value="{{ target_pnl }}"></div>
     <div class="field"><label>Monitoring Interval (s)</label><input id="monitoring_interval" type="number" value="{{ monitoring_interval }}"></div>
     <div class="field"><label>Max Adjustments</label><input id="max_adjustments" type="number" value="{{ max_adjustments }}"></div>
+    <div class="field"><label>API Profile</label><select id="profile_id" style="background:var(--card);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:6px;font-family:inherit;font-size:0.9rem"><option value="">Default Keys</option></select></div>
   </div>
 
   <div class="actions">
@@ -118,7 +119,7 @@ function appendLog(text) {
 
 function startBot() {
   $('log').innerHTML = '';
-  const params = {sid: sid};
+  const params = {sid: sid, profile_id: $('profile_id').value};
   fields.forEach(f => params[f] = $(f).value);
   fetch('/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(params) })
     .then(r => r.json()).then(d => {
@@ -184,6 +185,12 @@ if (isRunning) {
   statusTimer = setInterval(pollStatus, 3000);
   appendLog('— Reconnected to running strategy —');
 }
+
+// Load profiles
+fetch('/api/profiles').then(r=>r.json()).then(d=>{
+  const sel=$('profile_id');
+  (d.profiles||[]).forEach(p=>{const o=document.createElement('option');o.value=p.id;o.textContent=p.name;sel.appendChild(o)});
+});
 </script>
 </body>
 </html>

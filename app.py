@@ -7,7 +7,7 @@ from functools import wraps
 from auth import check_api_connection
 from strategy import DeltaNeutralStrategy
 from trade_history import record_start, record_end, get_history
-from models import init_db, create_user, verify_user, get_user, update_api_keys
+from models import init_db, create_user, verify_user, get_user, update_api_keys, get_profiles, get_profile, create_profile, update_profile, delete_profile
 
 app = Flask(__name__)
 app.secret_key = 'delta-neutral-bot-secret-key-change-me'
@@ -54,20 +54,30 @@ sys.stdout = LogCapture(sys.stdout)
 
 
 def run_strategy(sid, params):
-    from config import set_thread_credentials
     entry = strategies[sid]
 
     # Route this thread's print() to this strategy's log queue
     LogCapture._local.log_queue = entry['log_queue']
 
     try:
-        # Set per-thread API keys (isolated from other strategy threads)
-        user = get_user(entry['user_id'])
-        if not user or not user.get('api_key') or not user.get('api_secret'):
-            entry['log_queue'].put("❌ API keys not configured. Go to Profile to add them.")
-            entry['running'] = False
-            return
-        set_thread_credentials(user['api_key'], user['api_secret'])
+        # Set per-thread API keys from profile or default
+        from config import set_thread_credentials
+        profile_id = entry.get('profile_id')
+        if profile_id:
+            p = get_profile(int(profile_id), entry['user_id'])
+            if p:
+                set_thread_credentials(p['api_key'], p['api_secret'])
+            else:
+                entry['log_queue'].put("❌ Profile not found.")
+                entry['running'] = False
+                return
+        else:
+            user = get_user(entry['user_id'])
+            if not user or not user.get('api_key') or not user.get('api_secret'):
+                entry['log_queue'].put("❌ API keys not configured. Go to Profile to add them.")
+                entry['running'] = False
+                return
+            set_thread_credentials(user['api_key'], user['api_secret'])
 
         if not check_api_connection():
             entry['log_queue'].put("❌ Cannot proceed without proper API access")
@@ -160,8 +170,57 @@ def profile():
         api_key = request.form.get('api_key', '').strip()
         api_secret = request.form.get('api_secret', '').strip()
         update_api_keys(current_user_id(), api_key, api_secret)
-        return render_template('profile.html', username=user['username'], api_key=api_key, api_secret=api_secret, success='API keys saved successfully')
-    return render_template('profile.html', username=user['username'], api_key=user['api_key'] or '', api_secret=user['api_secret'] or '', success=None)
+        return render_template('profile.html', username=user['username'], api_key=api_key, api_secret=api_secret, success='API keys saved successfully', profiles=get_profiles(current_user_id()))
+    return render_template('profile.html', username=user['username'], api_key=user['api_key'] or '', api_secret=user['api_secret'] or '', success=None, profiles=get_profiles(current_user_id()))
+
+
+# ── Profile API ──
+
+def get_profile_creds(profile_id):
+    """Get API credentials from a profile, or fall back to user's default keys."""
+    uid = current_user_id()
+    if profile_id:
+        p = get_profile(int(profile_id), uid)
+        if p:
+            return p['api_key'], p['api_secret'], p['name']
+    user = get_user(uid)
+    if user and user.get('api_key') and user.get('api_secret'):
+        return user['api_key'], user['api_secret'], 'Default'
+    return None, None, None
+
+
+@app.route('/api/profiles')
+@login_required
+def api_profiles():
+    return jsonify(profiles=get_profiles(current_user_id()))
+
+
+@app.route('/api/profiles', methods=['POST'])
+@login_required
+def api_create_profile():
+    d = request.json
+    name = (d.get('name') or '').strip()
+    api_key = (d.get('api_key') or '').strip()
+    api_secret = (d.get('api_secret') or '').strip()
+    if not name or not api_key or not api_secret:
+        return jsonify(error="Name, API key, and secret are required"), 400
+    create_profile(current_user_id(), name, api_key, api_secret)
+    return jsonify(status="created")
+
+
+@app.route('/api/profiles/<int:pid>', methods=['PUT'])
+@login_required
+def api_update_profile(pid):
+    d = request.json
+    update_profile(pid, current_user_id(), d.get('name',''), d.get('api_key',''), d.get('api_secret',''))
+    return jsonify(status="updated")
+
+
+@app.route('/api/profiles/<int:pid>', methods=['DELETE'])
+@login_required
+def api_delete_profile(pid):
+    delete_profile(pid, current_user_id())
+    return jsonify(status="deleted")
 
 
 # ── Strategy Routes (per-user isolated) ──
@@ -229,17 +288,20 @@ def view_strategy(sid):
 @app.route('/start', methods=['POST'])
 @login_required
 def start():
-    user = get_user(current_user_id())
-    if not user.get('api_key') or not user.get('api_secret'):
-        return jsonify(error="API keys not configured. Go to Profile first."), 400
-
     params = request.json
+    profile_id = params.pop('profile_id', None)
+
+    # Validate credentials from profile or default
+    api_key, api_secret, _ = get_profile_creds(profile_id)
+    if not api_key:
+        return jsonify(error="No API profile selected or keys not configured."), 400
+
     sid = params.pop('sid', '') or str(uuid.uuid4())[:8]
 
     if sid in strategies and strategies[sid]['running']:
         return jsonify(error="Strategy already running"), 400
 
-    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'running': False, 'params': params, 'user_id': current_user_id()}
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     strategies[sid] = entry
     record_start(sid, params)
     entry['thread'] = threading.Thread(target=run_strategy, args=(sid, params), daemon=True)
@@ -385,12 +447,12 @@ def api_place_legs():
     """Place multiple option legs and optionally start monitoring."""
     from api.orders import place_order
     from config import set_thread_credentials
-    user = get_user(current_user_id())
-    if not user or not user.get('api_key') or not user.get('api_secret'):
-        return jsonify(error="API keys not configured"), 400
-    set_thread_credentials(user['api_key'], user['api_secret'])
-
     data = request.json
+    api_key, api_secret, pname = get_profile_creds(data.get('profile_id'))
+    if not api_key:
+        return jsonify(error="No API profile selected or keys not configured"), 400
+    set_thread_credentials(api_key, api_secret)
+
     legs = data.get('legs', [])
     max_profit = float(data.get('max_profit', 0))
     max_loss = float(data.get('max_loss', 0))
@@ -433,10 +495,10 @@ def api_positions():
     import re
     from api.positions import get_positions
     from config import set_thread_credentials
-    user = get_user(current_user_id())
-    if not user or not user.get('api_key') or not user.get('api_secret'):
-        return jsonify(error="API keys not configured"), 400
-    set_thread_credentials(user['api_key'], user['api_secret'])
+    api_key, api_secret, _ = get_profile_creds(request.args.get('profile_id'))
+    if not api_key:
+        return jsonify(error="No API profile selected"), 400
+    set_thread_credentials(api_key, api_secret)
 
     positions = get_positions()
     result = []
