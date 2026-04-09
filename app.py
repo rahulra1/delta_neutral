@@ -223,6 +223,34 @@ def api_delete_profile(pid):
     return jsonify(status="deleted")
 
 
+@app.route('/broker')
+@login_required
+def broker_page():
+    return render_template('broker.html', username=session.get('username'))
+
+
+@app.route('/broker/setup')
+@login_required
+def broker_setup_page():
+    return render_template('broker_setup.html', username=session.get('username'))
+
+
+@app.route('/api/test-connection')
+@login_required
+def api_test_connection():
+    """Test if an API profile can connect to Delta Exchange."""
+    from config import set_thread_credentials
+    api_key, api_secret, _ = get_profile_creds(request.args.get('profile_id'))
+    if not api_key:
+        return jsonify(success=False, error="No keys")
+    set_thread_credentials(api_key, api_secret)
+    try:
+        ok = check_api_connection()
+        return jsonify(success=ok)
+    except Exception:
+        return jsonify(success=False)
+
+
 # ── Strategy Routes (per-user isolated) ──
 
 @app.route('/')

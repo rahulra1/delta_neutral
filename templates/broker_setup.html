@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Connect Delta Exchange — Delta Neutral Bot</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.setup-container{max-width:800px;margin:0 auto}
+.back-link{display:inline-flex;align-items:center;gap:6px;color:var(--muted);text-decoration:none;font-size:.85rem;margin-bottom:20px}
+.back-link:hover{color:var(--text)}
+.broker-header{display:flex;align-items:center;gap:16px;margin-bottom:24px}
+.broker-header .logo-box{width:64px;height:64px;border-radius:14px;background:linear-gradient(135deg,#1a1a2e,#6366f1);display:flex;align-items:center;justify-content:center;color:#fff;font-size:2rem}
+.broker-header .info h2{font-size:1.3rem;font-weight:800;margin-bottom:2px}
+.broker-header .info p{color:var(--muted);font-size:.85rem}
+.steps{margin-bottom:30px}
+.step{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px 24px;margin-bottom:12px;position:relative;padding-left:60px}
+.step .step-num{position:absolute;left:20px;top:20px;width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:.8rem;font-weight:700}
+.step .step-title{font-weight:700;font-size:.9rem;margin-bottom:6px}
+.step .step-desc{font-size:.85rem;color:#555;line-height:1.6}
+.step .step-desc a{color:var(--purple);font-weight:600;text-decoration:none}
+.step .step-desc a:hover{text-decoration:underline}
+.step .step-desc code{background:#f0f0f5;padding:2px 8px;border-radius:4px;font-size:.8rem;font-family:monospace;color:var(--accent)}
+.step .step-note{margin-top:8px;padding:8px 12px;background:#fef3c7;border-radius:6px;font-size:.8rem;color:#92400e}
+.form-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:28px}
+.form-card h3{font-size:1rem;font-weight:700;margin-bottom:18px}
+.form-row{display:grid;grid-template-columns:1fr;gap:14px;margin-bottom:16px}
+.form-actions{display:flex;gap:10px;align-items:center}
+.test-result{font-size:.82rem;padding:8px 14px;border-radius:6px;display:none;margin-left:10px}
+.test-ok{background:rgba(34,197,94,.1);color:var(--green)}
+.test-fail{background:rgba(239,68,68,.1);color:var(--red)}
+.info-box{background:linear-gradient(135deg,#f0f0ff,#e8f5e9);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:20px;font-size:.85rem;line-height:1.6;color:#555}
+.info-box strong{color:var(--accent)}
+.fees-table{width:100%;border-collapse:collapse;font-size:.85rem;margin-top:10px}
+.fees-table th{text-align:left;padding:8px;color:var(--muted);font-size:.75rem;border-bottom:1px solid var(--border)}
+.fees-table td{padding:8px;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="nav">
+  <div class="logo">⚡ Delta Neutral</div>
+  <a href="/">Dashboard</a>
+  <a href="/option-chain">Option Chain</a>
+  <a href="/strategy/new?asset=BTC">Strategies</a>
+  <a href="/performance">Performance</a>
+  <a href="/profile">Profile</a>
+  <a href="/broker" class="active">Broker</a>
+  <div class="spacer"></div>
+  <div class="user"><div class="avatar">{{ username[0]|upper }}</div><span>{{ username }}</span><a href="/logout" style="border:none;padding:0;font-size:.75rem">Logout</a></div>
+</div>
+
+<div class="container">
+  <div class="setup-container">
+    <a href="/broker" class="back-link">← Back to Broker Setup</a>
+
+    <div class="broker-header">
+      <div class="logo-box">Δ</div>
+      <div class="info">
+        <h2>Connect Delta Exchange</h2>
+        <p>India · Crypto Options & Futures · 24/7 Trading</p>
+      </div>
+    </div>
+
+    <div class="info-box">
+      <strong>What you'll need:</strong> A Delta Exchange India account with API access enabled.
+      If you don't have one, <a href="https://www.delta.exchange/?code=LCNMJM" target="_blank" style="color:var(--purple);font-weight:600">create an account here</a>.
+      Make sure to complete KYC verification.
+    </div>
+
+    <!-- Step by step guide -->
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-title">Go to Delta Exchange API Keys page</div>
+        <div class="step-desc">
+          Login to your Delta Exchange account and navigate to<br>
+          <a href="https://india.delta.exchange/app/account/manageapikeys" target="_blank">Account → Manage API Keys</a>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-title">Create a new API Key</div>
+        <div class="step-desc">
+          Click <strong>"Create New API Key"</strong>. Enter a name like <code>DeltaNeutralBot</code>.
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-title">Whitelist your IP address</div>
+        <div class="step-desc">
+          In the "Whitelisted IPs" field, add <code>110.10.4.5</code>
+        </div>
+        <div class="step-note">⚠️ Without IP whitelisting, API calls will be rejected by Delta Exchange.</div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-title">Enable Trading permissions</div>
+        <div class="step-desc">
+          Make sure to enable <strong>"Trading"</strong> in the permissions section, then click <strong>"Create API Key"</strong>.
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">5</div>
+        <div class="step-title">Verify and save your keys</div>
+        <div class="step-desc">
+          Enter the verification code sent to your email and your 2FA code.
+          Once verified, your <strong>API Key</strong> and <strong>API Secret</strong> will be displayed.
+        </div>
+        <div class="step-note">🔑 Save both keys somewhere safe — the secret won't be shown again!</div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">6</div>
+        <div class="step-title">Paste your keys below</div>
+        <div class="step-desc">
+          Copy the API Key and API Secret from Delta Exchange and paste them in the form below.
+        </div>
+      </div>
+    </div>
+
+    <!-- Connection Form -->
+    <div class="form-card">
+      <h3>🔗 Add Delta Exchange Connection</h3>
+      <div class="form-row">
+        <div class="field">
+          <label>Connection Name</label>
+          <input id="connName" placeholder="e.g. Main Account, Sub Account 1">
+          <span class="hint">A friendly name to identify this connection</span>
+        </div>
+      </div>
+      <div class="form-row" style="grid-template-columns:1fr 1fr">
+        <div class="field">
+          <label>API Key</label>
+          <input id="connKey" placeholder="Paste your Delta Exchange API key">
+        </div>
+        <div class="field">
+          <label>API Secret</label>
+          <input id="connSecret" type="password" placeholder="Paste your API secret">
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary" onclick="saveConnection()">Add Delta Exchange</button>
+        <button class="btn btn-outline" onclick="testOnly()">🔍 Test Connection</button>
+        <span class="test-result" id="testResult"></span>
+      </div>
+    </div>
+
+    <!-- Broker Info -->
+    <div class="card" style="margin-top:24px">
+      <h2>About Delta Exchange</h2>
+      <p style="font-size:.85rem;color:#555;line-height:1.6;margin-bottom:14px">
+        Delta Exchange is a crypto derivatives trading platform offering futures and options on Bitcoin, Ethereum, and other major altcoins. It features a robust risk engine, institutional-grade APIs, and support for advanced trading strategies.
+      </p>
+      <div style="font-size:.85rem;font-weight:700;margin-bottom:8px">Trading Fees</div>
+      <table class="fees-table">
+        <thead><tr><th>Type</th><th>Fee</th></tr></thead>
+        <tbody>
+          <tr><td>Maker Fee</td><td>0.02%</td></tr>
+          <tr><td>Taker Fee</td><td>0.05%</td></tr>
+        </tbody>
+      </table>
+      <p style="font-size:.75rem;color:var(--muted);margin-top:8px">Fees may vary based on VIP level. See <a href="https://www.delta.exchange/fees" target="_blank" style="color:var(--purple)">Delta Exchange Fees</a> for details.</p>
+    </div>
+
+  </div>
+</div>
+
+<script>
+function saveConnection(){
+  const name=document.getElementById('connName').value.trim();
+  const key=document.getElementById('connKey').value.trim();
+  const secret=document.getElementById('connSecret').value.trim();
+  const res=document.getElementById('testResult');
+
+  if(!name||!key||!secret){showResult('All fields are required','fail');return}
+  showResult('Saving...','');
+
+  fetch('/api/profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,api_key:key,api_secret:secret})})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){showResult(d.error,'fail');return}
+      showResult('✓ Connection saved! Redirecting...','ok');
+      setTimeout(()=>window.location.href='/broker',1500);
+    });
+}
+
+function testOnly(){
+  const key=document.getElementById('connKey').value.trim();
+  const secret=document.getElementById('connSecret').value.trim();
+  if(!key||!secret){showResult('Enter API key and secret first','fail');return}
+  showResult('Testing...','');
+
+  // Save temporarily, test, then we'll keep it
+  const name=document.getElementById('connName').value.trim()||'Test';
+  fetch('/api/profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,api_key:key,api_secret:secret})})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){showResult(d.error,'fail');return}
+      // Get the latest profile and test it
+      fetch('/api/profiles').then(r=>r.json()).then(pd=>{
+        const profiles=pd.profiles||[];
+        const latest=profiles[profiles.length-1];
+        if(!latest){showResult('Error','fail');return}
+        fetch('/api/test-connection?profile_id='+latest.id).then(r=>r.json()).then(td=>{
+          if(td.success){
+            showResult('✓ Connection successful! API keys are valid.','ok');
+          } else {
+            showResult('✗ Connection failed. Check your keys and IP whitelist.','fail');
+            // Remove the failed test profile
+            fetch('/api/profiles/'+latest.id,{method:'DELETE'});
+          }
+        });
+      });
+    });
+}
+
+function showResult(msg,type){
+  const el=document.getElementById('testResult');
+  el.textContent=msg;
+  el.className='test-result'+(type==='ok'?' test-ok':type==='fail'?' test-fail':'');
+  el.style.display='inline-block';
+}
+</script>
+</body>
+</html>
