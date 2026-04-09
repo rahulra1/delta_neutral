@@ -347,5 +347,143 @@ def api_history():
     return jsonify(user_history)
 
 
+# ── Option Chain Routes ──
+
+active_monitors = {}  # {monitor_id: {monitor, user_id}}
+
+@app.route('/option-chain')
+@login_required
+def option_chain_page():
+    return render_template('option_chain.html', username=session.get('username'))
+
+
+@app.route('/api/expiries')
+@login_required
+def api_expiries():
+    from api.chain import get_expiries
+    asset = request.args.get('asset', 'BTC')
+    return jsonify(expiries=get_expiries(asset))
+
+
+@app.route('/api/chain')
+@login_required
+def api_chain():
+    from api.chain import get_option_chain_full
+    asset = request.args.get('asset', 'BTC')
+    expiry = request.args.get('expiry', '')
+    if not expiry:
+        return jsonify(error="expiry required"), 400
+    chain, spot, exp = get_option_chain_full(expiry, asset)
+    if chain is None:
+        return jsonify(error="Failed to fetch chain"), 500
+    return jsonify(chain=chain, spot_price=spot, expiry=exp)
+
+
+@app.route('/api/place-legs', methods=['POST'])
+@login_required
+def api_place_legs():
+    """Place multiple option legs and optionally start monitoring."""
+    from api.orders import place_order
+    from config import set_thread_credentials
+    user = get_user(current_user_id())
+    if not user or not user.get('api_key') or not user.get('api_secret'):
+        return jsonify(error="API keys not configured"), 400
+    set_thread_credentials(user['api_key'], user['api_secret'])
+
+    data = request.json
+    legs = data.get('legs', [])
+    max_profit = float(data.get('max_profit', 0))
+    max_loss = float(data.get('max_loss', 0))
+
+    results = []
+    placed_legs = []
+    for leg in legs:
+        result = place_order(leg['product_id'], leg['symbol'], int(leg['size']), leg['side'])
+        ok = result is not None
+        results.append({'symbol': leg['symbol'], 'side': leg['side'], 'size': leg['size'], 'success': ok})
+        if ok:
+            placed_legs.append({
+                'product_id': leg['product_id'], 'symbol': leg['symbol'],
+                'type': leg.get('type', ''), 'strike': leg.get('strike', ''),
+                'side': leg['side'], 'size': int(leg['size']),
+                'entry_price': float(leg.get('mark', 0)),
+            })
+
+    # Start monitor if targets are set and all orders succeeded
+    monitor_id = None
+    if max_profit > 0 and max_loss > 0 and placed_legs and all(r['success'] for r in results):
+        from strategy.monitor import StrategyMonitor
+        asset = data.get('asset', 'BTC')
+        lot_sizes = {'BTC': 0.001, 'ETH': 0.01}
+        mon = StrategyMonitor(
+            legs=placed_legs, max_profit=max_profit, max_loss=max_loss,
+            asset=asset, lot_size=lot_sizes.get(asset, 0.001),
+        )
+        monitor_id = str(uuid.uuid4())[:8]
+        active_monitors[monitor_id] = {'monitor': mon, 'user_id': current_user_id()}
+        mon.start()
+
+    return jsonify(results=results, monitor_id=monitor_id)
+
+
+@app.route('/api/positions')
+@login_required
+def api_positions():
+    """Return open option positions for the current user."""
+    import re
+    from api.positions import get_positions
+    from config import set_thread_credentials
+    user = get_user(current_user_id())
+    if not user or not user.get('api_key') or not user.get('api_secret'):
+        return jsonify(error="API keys not configured"), 400
+    set_thread_credentials(user['api_key'], user['api_secret'])
+
+    positions = get_positions()
+    result = []
+    for p in positions:
+        size = int(p.get('size', 0))
+        if size == 0:
+            continue
+        sym = p.get('product_symbol', '')
+        # Parse type and strike from symbol: C-BTC-90000-170426 or P-ETH-2000-170426
+        m = re.match(r'^(C|P)-(\w+)-(\d+)-\d+$', sym)
+        opt_type = 'call' if (m and m.group(1) == 'C') else 'put' if m else 'unknown'
+        strike = m.group(3) if m else '0'
+        side = 'sell' if size < 0 else 'buy'
+        result.append({
+            'symbol': sym,
+            'product_id': p.get('product_id'),
+            'type': opt_type,
+            'strike': strike,
+            'side': side,
+            'size': abs(size),
+            'entry_price': float(p.get('entry_price', 0)),
+            'mark_price': float(p.get('mark_price', 0)) if p.get('mark_price') else float(p.get('entry_price', 0)),
+        })
+    return jsonify(positions=result)
+
+
+@app.route('/api/monitor/<mid>')
+@login_required
+def api_monitor_status(mid):
+    entry = active_monitors.get(mid)
+    if not entry or entry['user_id'] != current_user_id():
+        return jsonify(error="Not found"), 404
+    return jsonify(**entry['monitor'].get_status())
+
+
+@app.route('/api/monitor/<mid>/stop', methods=['POST'])
+@login_required
+def api_monitor_stop(mid):
+    entry = active_monitors.get(mid)
+    if not entry or entry['user_id'] != current_user_id():
+        return jsonify(error="Not found"), 404
+    from config import set_thread_credentials
+    user = get_user(current_user_id())
+    set_thread_credentials(user['api_key'], user['api_secret'])
+    entry['monitor'].stop()
+    return jsonify(status="stopped")
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', debug=False, port=5000)

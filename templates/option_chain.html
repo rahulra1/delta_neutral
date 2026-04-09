@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Option Chain — Delta Neutral Bot</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+:root{--bg:#0f1117;--card:#1a1d27;--border:#2a2d3a;--accent:#6c5ce7;--green:#00b894;--red:#e17055;--text:#dfe6e9;--muted:#636e72;--call-bg:rgba(0,184,148,0.06);--put-bg:rgba(225,112,85,0.06);--itm:rgba(108,92,231,0.08)}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'SF Mono','Fira Code',monospace;background:var(--bg);color:var(--text);min-height:100vh;font-size:13px}
+.container{max-width:1400px;margin:0 auto;padding:16px}
+.header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+h1{font-size:1.2rem;color:var(--accent);background:linear-gradient(135deg,var(--accent),var(--green));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.header a{color:var(--muted);font-size:.75rem;text-decoration:none;margin-left:16px}
+.controls{display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+.controls select,.controls button{background:var(--card);border:1px solid var(--border);color:var(--text);padding:6px 12px;border-radius:6px;font-family:inherit;font-size:.85rem;cursor:pointer}
+.controls button{font-weight:600}
+.controls .btn-load{background:var(--accent);color:#fff;border:none}
+.spot-badge{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:6px 14px;font-weight:700;color:var(--accent)}
+.chain-wrap{overflow-x:auto;margin-bottom:16px;max-height:55vh;overflow-y:auto}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{background:var(--card);color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;padding:8px 6px;position:sticky;top:0;z-index:2}
+th.strike-hdr{background:var(--accent);color:#fff;font-size:11px;min-width:80px}
+td{padding:5px 6px;text-align:center;border-bottom:1px solid var(--border);white-space:nowrap}
+tr:hover td{background:rgba(108,92,231,0.04)}
+.call-side{background:var(--call-bg)}
+.put-side{background:var(--put-bg)}
+.strike-col{background:var(--card);font-weight:700;font-size:13px;color:var(--text);border-left:2px solid var(--accent);border-right:2px solid var(--accent)}
+.itm{background:var(--itm)!important}
+/* ATM bar */
+tr.atm-bar td{padding:0;height:4px;border:none}
+tr.atm-bar .atm-line{background:linear-gradient(90deg,transparent,var(--accent),transparent);height:4px}
+tr.atm-bar .atm-label{position:relative}
+tr.atm-bar .atm-label span{position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:var(--accent);color:#fff;font-size:10px;padding:2px 12px;border-radius:4px;font-weight:700;white-space:nowrap;box-shadow:0 2px 8px rgba(108,92,231,0.4)}
+.oi-bar{display:inline-block;height:10px;border-radius:2px;min-width:2px;vertical-align:middle;margin-right:3px}
+.oi-bar.call{background:var(--green)}.oi-bar.put{background:var(--red)}
+.delta{color:var(--accent);font-weight:600}
+.iv{color:#fdcb6e}
+td.selectable{cursor:pointer}
+td.selectable:hover{outline:2px solid var(--accent);outline-offset:-2px}
+td.selected-buy{outline:2px solid var(--green);outline-offset:-2px;background:rgba(0,184,148,0.18)!important}
+td.selected-sell{outline:2px solid var(--red);outline-offset:-2px;background:rgba(225,112,85,0.18)!important}
+/* Builder */
+.builder{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px;margin-bottom:16px;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
+.builder h3{font-size:.85rem;color:var(--accent);margin-bottom:10px}
+.legs-table{width:100%;font-size:12px;margin-bottom:10px}
+.legs-table th{background:transparent;color:var(--muted);text-align:left;padding:4px 8px}
+.legs-table td{text-align:left;padding:4px 8px;border:none}
+.legs-table .remove{color:var(--red);cursor:pointer;font-size:14px}
+.side-toggle{display:inline-flex;border-radius:4px;overflow:hidden;font-size:11px;font-weight:700}
+.side-toggle span{padding:3px 10px;cursor:pointer}
+.side-toggle .buy{background:rgba(0,184,148,0.15);color:var(--green)}
+.side-toggle .sell{background:rgba(225,112,85,0.15);color:var(--red)}
+.side-toggle .active-buy{background:var(--green);color:#000}
+.side-toggle .active-sell{background:var(--red);color:#fff}
+.builder input{background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;width:60px;font-family:inherit;text-align:center}
+.builder .actions{display:flex;gap:10px;align-items:center}
+.builder .actions button{padding:8px 20px;border:none;border-radius:6px;font-family:inherit;font-weight:600;cursor:pointer}
+.btn-execute{background:var(--green);color:#000;transition:box-shadow .2s}
+.btn-execute:hover{box-shadow:0 0 12px rgba(0,184,148,0.5)}
+.btn-clear{background:var(--muted);color:#fff}
+.summary-row{display:flex;gap:20px;margin:10px 0;font-size:.82rem;flex-wrap:wrap}
+.summary-row .item{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 16px;text-align:center;min-width:100px;transition:border-color .2s}
+.summary-row .item:hover{border-color:var(--accent)}
+.summary-row .item .lbl{font-size:.65rem;color:var(--muted);text-transform:uppercase}
+.summary-row .item .val{font-size:1rem;font-weight:700;margin-top:2px}
+/* Payoff chart */
+.payoff-wrap{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;margin-top:10px}
+.tag-buy{color:var(--green);font-weight:700}
+.tag-sell{color:var(--red);font-weight:700}
+.toast{position:fixed;bottom:20px;right:20px;background:var(--green);color:#000;padding:12px 20px;border-radius:8px;font-weight:600;display:none;z-index:999}
+.toast.error{background:var(--red);color:#fff}
+/* Positions */
+.positions-section{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px;margin-bottom:16px;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
+.pos-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.pos-header h3{font-size:.85rem;color:var(--accent)}
+.pos-list{display:flex;flex-wrap:wrap;gap:8px}
+.pos-card{background:var(--bg);border:2px solid var(--border);border-radius:8px;padding:10px 14px;cursor:pointer;font-size:12px;transition:all .2s;min-width:180px}
+.pos-card:hover{border-color:var(--accent)}
+.pos-card.selected{border-color:var(--accent);box-shadow:0 0 10px rgba(108,92,231,0.3)}
+.pos-card .pos-sym{font-weight:700;font-size:13px;margin-bottom:4px}
+.pos-card .pos-row{display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:11px}
+.pos-card .pos-row .v{color:var(--text);font-weight:600}
+.pos-card .pos-side{display:inline-block;padding:1px 8px;border-radius:3px;font-size:10px;font-weight:700}
+.pos-card .pos-side.buy{background:rgba(0,184,148,0.15);color:var(--green)}
+.pos-card .pos-side.sell{background:rgba(225,112,85,0.15);color:var(--red)}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>⛓ Option Chain</h1>
+    <div><a href="/" style="color:var(--accent)">← Dashboard</a><a href="/logout">Logout</a></div>
+  </div>
+  <div class="controls">
+    <select id="asset"><option value="BTC">₿ BTC</option><option value="ETH">⟠ ETH</option></select>
+    <select id="expiry"><option value="">Select expiry...</option></select>
+    <button class="btn-load" onclick="loadChain()">Load Chain</button>
+    <button onclick="loadChain()" style="font-size:16px" title="Refresh">🔄</button>
+    <div class="spot-badge" id="spotBadge">Spot: —</div>
+    <div class="spot-badge" id="lotBadge" style="font-size:11px;color:var(--muted);font-weight:400">1 Lot = 0.001 BTC</div>
+    <div style="margin-left:auto;color:var(--muted);font-size:11px">Click = BUY · Right-click = SELL</div>
+    <button onclick="loadPositions()" style="background:var(--card);border:1px solid var(--border);color:var(--text);padding:6px 12px;border-radius:6px;font-family:inherit;font-size:.85rem;cursor:pointer;font-weight:600">📋 Positions</button>
+  </div>
+
+  <!-- Strategy Builder -->
+  <div class="builder" id="builder" style="display:none">
+    <h3>📐 Strategy Builder</h3>
+    <table class="legs-table">
+      <thead><tr><th>Side</th><th>Type</th><th>Strike</th><th>Symbol</th><th>Δ</th><th>Mark</th><th>IV</th><th>Lots</th><th>Value</th><th></th></tr></thead>
+      <tbody id="legsBody"></tbody>
+    </table>
+    <div class="summary-row" id="summaryRow"></div>
+    <div class="payoff-wrap" id="payoffWrap" style="display:none"><canvas id="payoffChart" height="70"></canvas></div>
+    <div style="display:flex;gap:12px;align-items:center;margin-top:12px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:6px"><label style="font-size:11px;color:var(--muted)">Max Profit $</label><input id="maxProfit" type="number" step="0.01" value="0" min="0" style="width:80px"></div>
+      <div style="display:flex;align-items:center;gap:6px"><label style="font-size:11px;color:var(--muted)">Max Loss $</label><input id="maxLoss" type="number" step="0.01" value="0" min="0" style="width:80px"></div>
+      <button class="btn-execute" onclick="executeTrade()">⚡ Execute & Monitor</button>
+      <button class="btn-clear" onclick="clearLegs()">✕ Clear All</button>
+    </div>
+  </div>
+
+  <!-- Active Monitor -->
+  <div class="builder" id="monitorPanel" style="display:none">
+    <h3>👁 Live Strategy Monitor</h3>
+    <div class="summary-row" id="monitorSummary"></div>
+    <div id="monitorLog" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;max-height:180px;overflow-y:auto;font-size:12px;line-height:1.6;margin-top:8px"></div>
+    <div style="margin-top:10px">
+      <button onclick="stopMonitor()" style="background:var(--red);color:#fff;border:none;padding:8px 20px;border-radius:6px;font-family:inherit;font-weight:600;cursor:pointer">🛑 Stop & Close All</button>
+    </div>
+  </div>
+
+  <div class="chain-wrap">
+    <table><thead id="chainHead"></thead><tbody id="chainBody"></tbody></table>
+  </div>
+
+  <!-- Open Positions -->
+  <div class="positions-section" id="posSection" style="display:none">
+    <div class="pos-header">
+      <h3>📋 Open Positions</h3>
+      <button onclick="loadPositions()" style="font-size:13px;background:var(--card);border:1px solid var(--border);color:var(--text);padding:4px 12px;border-radius:6px;cursor:pointer">🔄 Refresh</button>
+    </div>
+    <div class="pos-list" id="posList"></div>
+    <div class="payoff-wrap" id="posPayoffWrap" style="display:none;margin-top:10px"><canvas id="posPayoffChart" height="70"></canvas></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+let chainData=[], spotPrice=0, legs=[], maxOI=1, payoffChart=null;
+const LOT_SIZE = {BTC: 0.001, ETH: 0.01};
+function getAsset(){ return document.getElementById('asset').value }
+function getLotSize(){ return LOT_SIZE[getAsset()] || 0.001 }
+function f2(v){ return (typeof v==='number' && !isNaN(v)) ? v.toFixed(2) : '—' }
+function f4(v){ return (typeof v==='number' && !isNaN(v)) ? v.toFixed(4) : '—' }
+
+document.getElementById('asset').addEventListener('change', loadExpiries);
+window.addEventListener('load', loadExpiries);
+
+function loadExpiries(){
+  const asset=getAsset();
+  document.getElementById('lotBadge').textContent='1 Lot = '+getLotSize()+' '+asset;
+  fetch('/api/expiries?asset='+asset).then(r=>r.json()).then(d=>{
+    const s=document.getElementById('expiry');
+    s.innerHTML='<option value="">Select expiry...</option>';
+    (d.expiries||[]).forEach(e=>{const o=document.createElement('option');o.value=e;o.textContent=e;s.appendChild(o)});
+  });
+}
+
+function loadChain(){
+  const asset=getAsset(), expiry=document.getElementById('expiry').value;
+  if(!expiry) return;
+  document.getElementById('chainBody').innerHTML='<tr><td colspan="15" style="padding:30px;color:var(--muted)">Loading...</td></tr>';
+  fetch(`/api/chain?asset=${asset}&expiry=${expiry}`).then(r=>r.json()).then(d=>{
+    if(d.error){showToast(d.error,true);return}
+    chainData=d.chain||[];spotPrice=d.spot_price||0;
+    document.getElementById('spotBadge').textContent='Spot: $'+(spotPrice?spotPrice.toFixed(2):'—');
+    maxOI=1;
+    chainData.forEach(r=>{if(r.call)maxOI=Math.max(maxOI,parseFloat(r.call.oi)||0);if(r.put)maxOI=Math.max(maxOI,parseFloat(r.put.oi)||0)});
+    renderChain();
+  });
+}
+
+function renderChain(){
+  const head=document.getElementById('chainHead'), body=document.getElementById('chainBody');
+  head.innerHTML=`<tr>
+    <th class="call-side">OI (Lots)</th><th class="call-side">Vol</th><th class="call-side">IV%</th>
+    <th class="call-side">Δ</th><th class="call-side">Bid</th><th class="call-side">Ask</th><th class="call-side">Mark</th>
+    <th class="strike-hdr">STRIKE</th>
+    <th class="put-side">Mark</th><th class="put-side">Bid</th><th class="put-side">Ask</th>
+    <th class="put-side">Δ</th><th class="put-side">IV%</th><th class="put-side">Vol</th><th class="put-side">OI (Lots)</th>
+  </tr>`;
+
+  // Find ATM index
+  let atmIdx=-1, minDist=Infinity;
+  chainData.forEach((r,i)=>{const d=Math.abs(parseFloat(r.strike)-spotPrice);if(d<minDist){minDist=d;atmIdx=i}});
+
+  let html='';
+  chainData.forEach((row,i)=>{
+    // Insert ATM bar before the ATM row
+    if(i===atmIdx && spotPrice){
+      html+=`<tr class="atm-bar"><td colspan="7" class="atm-line"></td><td class="atm-label"><span>⚡ ATM $${spotPrice.toFixed(2)}</span></td><td colspan="7" class="atm-line"></td></tr>`;
+    }
+    const s=parseFloat(row.strike), c=row.call||{}, p=row.put||{};
+    const cITM=spotPrice&&s<spotPrice, pITM=spotPrice&&s>spotPrice;
+    const sel=(type,strike)=>`data-type="${type}" data-strike="${strike}" onclick="addLeg(this,'buy')" oncontextmenu="addLeg(this,'sell');return false"`;
+    const ls=getLotSize();
+    const cOI=Math.round((parseFloat(c.oi)||0)/ls), pOI=Math.round((parseFloat(p.oi)||0)/ls);
+    const cVol=Math.round((c.volume||0)/ls), pVol=Math.round((p.volume||0)/ls);
+    html+=`<tr>
+      <td class="call-side ${cITM?'itm':''}">${oiBar(c.oi,'call')}${fmtLots(cOI)}</td>
+      <td class="call-side ${cITM?'itm':''}">${fmtLots(cVol)}</td>
+      <td class="call-side ${cITM?'itm':''} iv">${c.iv?c.iv.toFixed(2)+'%':'—'}</td>
+      <td class="call-side ${cITM?'itm':''} delta">${c.delta?c.delta.toFixed(2):'—'}</td>
+      <td class="call-side ${cITM?'itm':''} selectable" ${sel('call',row.strike)}>${c.bid?'$'+c.bid.toFixed(2):'—'}</td>
+      <td class="call-side ${cITM?'itm':''} selectable" ${sel('call',row.strike)}>${c.ask?'$'+c.ask.toFixed(2):'—'}</td>
+      <td class="call-side ${cITM?'itm':''} selectable" ${sel('call',row.strike)} style="font-weight:600">${c.mark_price?'$'+c.mark_price.toFixed(2):'—'}</td>
+      <td class="strike-col">${Number(row.strike).toLocaleString()}</td>
+      <td class="put-side ${pITM?'itm':''} selectable" ${sel('put',row.strike)} style="font-weight:600">${p.mark_price?'$'+p.mark_price.toFixed(2):'—'}</td>
+      <td class="put-side ${pITM?'itm':''} selectable" ${sel('put',row.strike)}>${p.bid?'$'+p.bid.toFixed(2):'—'}</td>
+      <td class="put-side ${pITM?'itm':''} selectable" ${sel('put',row.strike)}>${p.ask?'$'+p.ask.toFixed(2):'—'}</td>
+      <td class="put-side ${pITM?'itm':''} delta">${p.delta?p.delta.toFixed(2):'—'}</td>
+      <td class="put-side ${pITM?'itm':''} iv">${p.iv?p.iv.toFixed(2)+'%':'—'}</td>
+      <td class="put-side ${pITM?'itm':''}">${fmtLots(pVol)}</td>
+      <td class="put-side ${pITM?'itm':''}">${oiBar(p.oi,'put')}${fmtLots(pOI)}</td>
+    </tr>`;
+  });
+  body.innerHTML=html;
+
+  // Re-apply leg highlights
+  legs.forEach(l=>{
+    document.querySelectorAll(`td[data-strike="${l.strike}"][data-type="${l.type}"]`).forEach(el=>{
+      el.classList.add(l.side==='buy'?'selected-buy':'selected-sell');
+    });
+  });
+
+  // Scroll to ATM
+  if(atmIdx>=0){const rows=body.querySelectorAll('tr');(rows[atmIdx+1]||rows[atmIdx])?.scrollIntoView({block:'center'})}
+}
+
+function oiBar(oi,type){const v=parseFloat(oi)||0;return `<span class="oi-bar ${type}" style="width:${Math.min(40,(v/maxOI)*40)}px"></span>`}
+function fmtLots(n){return n>=1000?(n/1000).toFixed(2)+'K':n.toString()}
+
+// ── Strategy Builder ──
+
+function addLeg(el,side){
+  const type=el.dataset.type, strike=el.dataset.strike;
+  const row=chainData.find(r=>r.strike===strike);if(!row)return;
+  const opt=type==='call'?row.call:row.put;if(!opt)return;
+  // Toggle: if same option exists, remove it
+  const existing=legs.findIndex(l=>l.symbol===opt.symbol);
+  if(existing>=0){legs.splice(existing,1);renderChain();renderLegs();return}
+  legs.push({side,type,strike,symbol:opt.symbol,product_id:opt.product_id,delta:opt.delta,mark:opt.mark_price,iv:opt.iv,size:1});
+  el.classList.add(side==='buy'?'selected-buy':'selected-sell');
+  renderLegs();
+}
+
+function toggleSide(idx){
+  legs[idx].side=legs[idx].side==='buy'?'sell':'buy';
+  renderChain();renderLegs();
+}
+
+function removeLeg(idx){legs.splice(idx,1);renderChain();renderLegs()}
+
+function renderLegs(){
+  const builder=document.getElementById('builder');
+  builder.style.display=legs.length?'block':'none';
+  document.getElementById('legsBody').innerHTML=legs.map((l,i)=>{
+    const lotVal=(l.mark*l.size*getLotSize()).toFixed(2);
+    return `<tr>
+    <td><div class="side-toggle" onclick="toggleSide(${i})">
+      <span class="buy ${l.side==='buy'?'active-buy':''}">BUY</span>
+      <span class="sell ${l.side==='sell'?'active-sell':''}">SELL</span>
+    </div></td>
+    <td>${l.type.toUpperCase()}</td>
+    <td>${Number(l.strike).toLocaleString()}</td>
+    <td style="font-size:11px">${l.symbol}</td>
+    <td class="delta">${l.delta.toFixed(2)}</td>
+    <td>$${l.mark.toFixed(2)}</td>
+    <td class="iv">${l.iv?l.iv.toFixed(2)+'%':'—'}</td>
+    <td><input type="number" value="${l.size}" min="1" onchange="legs[${i}].size=+this.value;renderLegs()"></td>
+    <td style="color:${l.side==='sell'?'var(--green)':'var(--red)'}">$${lotVal}</td>
+    <td class="remove" onclick="removeLeg(${i})">✕</td>
+  </tr>`}).join('');
+  updateSummary();
+}
+
+function updateSummary(){
+  const ls=getLotSize();
+  let netCredit=0, marginReq=0;
+  legs.forEach(l=>{
+    const prem=l.mark*l.size*ls;
+    if(l.side==='sell'){netCredit+=prem;marginReq+=prem*2}
+    else{netCredit-=prem}
+  });
+
+  // Compute payoff at expiry across a range of spot prices
+  const strikes=legs.map(l=>parseFloat(l.strike));
+  const minS=Math.min(...strikes,spotPrice)*0.85, maxS=Math.max(...strikes,spotPrice)*1.15;
+  const step=(maxS-minS)/100;
+  const xs=[], ys=[];
+  let minPnl=Infinity, maxPnl=-Infinity;
+  for(let s=minS;s<=maxS;s+=step){
+    let pnl=0;
+    legs.forEach(l=>{
+      const K=parseFloat(l.strike), dir=l.side==='buy'?1:-1, q=l.size*ls;
+      let intrinsic=l.type==='call'?Math.max(s-K,0):Math.max(K-s,0);
+      pnl+=dir*(intrinsic-l.mark)*q;
+    });
+    xs.push(Math.round(s));ys.push(parseFloat(pnl.toFixed(2)));
+    minPnl=Math.min(minPnl,pnl);maxPnl=Math.max(maxPnl,pnl);
+  }
+
+  const label=netCredit>=0?'Net Credit':'Net Debit';
+  const color=netCredit>=0?'var(--green)':'var(--red)';
+  const asset=getAsset();
+  document.getElementById('summaryRow').innerHTML=`
+    <div class="item"><div class="lbl">${label}</div><div class="val" style="color:${color}">$${Math.abs(netCredit).toFixed(2)}</div></div>
+    <div class="item"><div class="lbl">Max Profit</div><div class="val" style="color:var(--green)">${maxPnl>=1e6?'∞':'$'+maxPnl.toFixed(2)}</div></div>
+    <div class="item"><div class="lbl">Max Loss</div><div class="val" style="color:var(--red)">${Math.abs(minPnl)>=1e6?'∞':'$'+minPnl.toFixed(2)}</div></div>
+    <div class="item"><div class="lbl">Est. Margin</div><div class="val">$${marginReq.toFixed(2)}</div></div>
+    <div class="item"><div class="lbl">Lot Size</div><div class="val">${ls} ${asset}</div></div>
+    <div class="item"><div class="lbl">Legs</div><div class="val">${legs.length}</div></div>`;
+
+  // Payoff chart
+  const wrap=document.getElementById('payoffWrap');
+  wrap.style.display=legs.length?'block':'none';
+  if(!legs.length)return;
+
+  // Color: green above 0, red below
+  const colors=ys.map(y=>y>=0?'rgba(0,184,148,0.7)':'rgba(225,112,85,0.7)');
+
+  if(payoffChart){payoffChart.destroy()}
+  payoffChart=new Chart(document.getElementById('payoffChart'),{
+    type:'line',
+    data:{
+      labels:xs,
+      datasets:[{
+        label:'P&L at Expiry',
+        data:ys,
+        borderColor:'rgba(108,92,231,0.9)',
+        borderWidth:2,
+        pointRadius:0,
+        fill:{target:'origin',above:'rgba(0,184,148,0.1)',below:'rgba(225,112,85,0.1)'},
+        tension:0.1
+      }]
+    },
+    options:{
+      responsive:true,animation:false,
+      plugins:{
+        legend:{display:false},
+        tooltip:{callbacks:{label:ctx=>'P&L: $'+ctx.parsed.y.toFixed(2)}}
+      },
+      scales:{
+        x:{title:{display:true,text:'Spot Price at Expiry',color:'#636e72',font:{size:10}},ticks:{color:'#636e72',maxTicksLimit:10,font:{size:10}},grid:{color:'#2a2d3a'}},
+        y:{title:{display:true,text:'Profit / Loss',color:'#636e72',font:{size:10}},ticks:{color:'#636e72',font:{size:10}},grid:{color:'#2a2d3a'},
+          afterDataLimits:s=>{/* ensure 0 line visible */if(s.min>0)s.min=-s.max*0.1;if(s.max<0)s.max=-s.min*0.1}
+        }
+      },
+      // Zero line
+      plugins2:{annotation:{annotations:{zero:{type:'line',yMin:0,yMax:0,borderColor:'rgba(255,255,255,0.2)',borderWidth:1}}}}
+    },
+    plugins:[{
+      id:'zeroLine',
+      afterDraw(chart){
+        const yScale=chart.scales.y;
+        const y=yScale.getPixelForValue(0);
+        if(y>=chart.chartArea.top&&y<=chart.chartArea.bottom){
+          const ctx2=chart.ctx;ctx2.save();ctx2.beginPath();ctx2.moveTo(chart.chartArea.left,y);
+          ctx2.lineTo(chart.chartArea.right,y);ctx2.strokeStyle='rgba(255,255,255,0.25)';ctx2.lineWidth=1;ctx2.setLineDash([4,4]);ctx2.stroke();ctx2.restore();
+        }
+        // Spot price vertical line
+        if(spotPrice){
+          const xScale=chart.scales.x;
+          const xIdx=xs.findIndex(v=>v>=spotPrice);
+          if(xIdx>=0){
+            const x=xScale.getPixelForValue(xIdx);
+            const ctx3=chart.ctx;ctx3.save();ctx3.beginPath();ctx3.moveTo(x,chart.chartArea.top);
+            ctx3.lineTo(x,chart.chartArea.bottom);ctx3.strokeStyle='rgba(108,92,231,0.5)';ctx3.lineWidth=1;ctx3.setLineDash([4,4]);ctx3.stroke();
+            ctx3.fillStyle='var(--accent)';ctx3.font='10px monospace';ctx3.fillText('Spot',x-12,chart.chartArea.top-4);ctx3.restore();
+          }
+        }
+      }
+    }]
+  });
+}
+
+function clearLegs(){legs=[];renderChain();renderLegs()}
+
+let currentMonitorId=null, monitorTimer=null;
+
+function executeTrade(){
+  if(!legs.length)return;
+  const maxProfit=parseFloat(document.getElementById('maxProfit').value)||0;
+  const maxLoss=parseFloat(document.getElementById('maxLoss').value)||0;
+  const desc=legs.map(l=>`${l.side.toUpperCase()} ${l.size}x ${l.type.toUpperCase()} ${Number(l.strike).toLocaleString()}`).join('\n');
+  let msg='Execute strategy?\n\n'+desc;
+  if(maxProfit>0&&maxLoss>0) msg+=`\n\nAuto-close at: +$${maxProfit.toFixed(2)} / -$${maxLoss.toFixed(2)}`;
+  if(!confirm(msg))return;
+
+  const payload={
+    legs:legs.map(l=>({product_id:l.product_id,symbol:l.symbol,size:l.size,side:l.side,type:l.type,strike:l.strike,mark:l.mark})),
+    max_profit:maxProfit, max_loss:maxLoss, asset:getAsset()
+  };
+  fetch('/api/place-legs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){showToast(d.error,true);return}
+      const ok=(d.results||[]).filter(r=>r.success).length;
+      const fail=(d.results||[]).length-ok;
+      showToast(`${ok} order(s) placed`+(fail?`, ${fail} failed`:''));
+      if(!fail) clearLegs();
+      if(d.monitor_id){
+        currentMonitorId=d.monitor_id;
+        document.getElementById('monitorPanel').style.display='block';
+        monitorTimer=setInterval(pollMonitor,5000);
+        pollMonitor();
+      }
+    });
+}
+
+function pollMonitor(){
+  if(!currentMonitorId)return;
+  fetch('/api/monitor/'+currentMonitorId).then(r=>r.json()).then(d=>{
+    if(d.error){clearInterval(monitorTimer);return}
+    const pnlColor=d.current_pnl>=0?'var(--green)':'var(--red)';
+    const pct=d.max_profit?(d.current_pnl/d.max_profit*100).toFixed(1):0;
+    document.getElementById('monitorSummary').innerHTML=`
+      <div class="item"><div class="lbl">Current PnL</div><div class="val" style="color:${pnlColor}">$${d.current_pnl.toFixed(2)}</div></div>
+      <div class="item"><div class="lbl">Target Profit</div><div class="val" style="color:var(--green)">$${d.max_profit.toFixed(2)}</div></div>
+      <div class="item"><div class="lbl">Max Loss</div><div class="val" style="color:var(--red)">-$${d.max_loss.toFixed(2)}</div></div>
+      <div class="item"><div class="lbl">Status</div><div class="val">${d.running?'🟢 Live':'⚫ '+(d.exit_reason||'Stopped')}</div></div>
+      <div class="item"><div class="lbl">Legs</div><div class="val">${(d.legs||[]).length}</div></div>`;
+
+    const logEl=document.getElementById('monitorLog');
+    logEl.innerHTML=(d.logs||[]).slice(-50).map(t=>{
+      const cls=t.includes('✗')||t.includes('🛑')?'err':t.includes('✓')||t.includes('✅')||t.includes('🎯')?'ok':t.includes('📊')?'info':'';
+      return `<div class="line ${cls}">${t}</div>`;
+    }).join('');
+    logEl.scrollTop=logEl.scrollHeight;
+
+    if(!d.running){clearInterval(monitorTimer);showToast('Strategy closed: '+(d.exit_reason||'stopped'),d.exit_reason==='max_loss')}
+  });
+}
+
+function stopMonitor(){
+  if(!currentMonitorId)return;
+  if(!confirm('Stop monitoring and close all legs?'))return;
+  fetch('/api/monitor/'+currentMonitorId+'/stop',{method:'POST'}).then(r=>r.json()).then(()=>{
+    clearInterval(monitorTimer);pollMonitor();
+  });
+}
+
+function showToast(msg,isError){
+  const t=document.getElementById('toast');t.textContent=msg;
+  t.className='toast'+(isError?' error':'');t.style.display='block';
+  setTimeout(()=>t.style.display='none',3000);
+}
+
+// ── Open Positions ──
+let openPositions=[], selectedPosIdx=new Set(), posPayoffChart=null;
+
+function loadPositions(){
+  fetch('/api/positions').then(r=>r.json()).then(d=>{
+    if(d.error){showToast(d.error,true);return}
+    openPositions=d.positions||[];
+    selectedPosIdx.clear();
+    document.getElementById('posSection').style.display=openPositions.length?'block':'none';
+    if(!openPositions.length){showToast('No open positions',false);return}
+    renderPositions();
+  });
+}
+
+function togglePos(idx){
+  if(selectedPosIdx.has(idx)) selectedPosIdx.delete(idx);
+  else selectedPosIdx.add(idx);
+  renderPositions();
+}
+
+function selectAllPos(){
+  if(selectedPosIdx.size===openPositions.length) selectedPosIdx.clear();
+  else openPositions.forEach((_,i)=>selectedPosIdx.add(i));
+  renderPositions();
+}
+
+function renderPositions(){
+  const list=document.getElementById('posList');
+  list.innerHTML=openPositions.map((p,i)=>{
+    const sel=selectedPosIdx.has(i)?'selected':'';
+    const ls=LOT_SIZE[getAsset()]||0.001;
+    const lots=p.size;
+    const val=(p.entry_price*lots*ls).toFixed(2);
+    return `<div class="pos-card ${sel}" onclick="togglePos(${i})">
+      <div class="pos-sym"><span class="pos-side ${p.side}">${p.side.toUpperCase()}</span> ${p.symbol}</div>
+      <div class="pos-row"><span>Strike</span><span class="v">${Number(p.strike).toLocaleString()}</span></div>
+      <div class="pos-row"><span>Type</span><span class="v">${p.type.toUpperCase()}</span></div>
+      <div class="pos-row"><span>Lots</span><span class="v">${lots}</span></div>
+      <div class="pos-row"><span>Entry</span><span class="v">$${p.entry_price.toFixed(2)}</span></div>
+      <div class="pos-row"><span>Value</span><span class="v" style="color:${p.side==='sell'?'var(--green)':'var(--red)'}">$${val}</span></div>
+    </div>`;
+  }).join('')+`<div class="pos-card" onclick="selectAllPos()" style="display:flex;align-items:center;justify-content:center;min-height:80px;border-style:dashed;color:var(--muted)">
+    ${selectedPosIdx.size===openPositions.length?'Deselect All':'Select All'}
+  </div>`;
+
+  renderPosPayoff();
+}
+
+function renderPosPayoff(){
+  const wrap=document.getElementById('posPayoffWrap');
+  if(!selectedPosIdx.size){wrap.style.display='none';return}
+  wrap.style.display='block';
+
+  const selLegs=[...selectedPosIdx].map(i=>openPositions[i]);
+  const ls=LOT_SIZE[getAsset()]||0.001;
+  const strikes=selLegs.map(l=>parseFloat(l.strike));
+  const sp=spotPrice||strikes.reduce((a,b)=>a+b,0)/strikes.length;
+  const minS=Math.min(...strikes,sp)*0.85, maxS=Math.max(...strikes,sp)*1.15;
+  const step=(maxS-minS)/100;
+  const xs=[], ys=[];
+
+  for(let s=minS;s<=maxS;s+=step){
+    let pnl=0;
+    selLegs.forEach(l=>{
+      const K=parseFloat(l.strike), dir=l.side==='buy'?1:-1, q=l.size*ls;
+      const intrinsic=l.type==='call'?Math.max(s-K,0):Math.max(K-s,0);
+      pnl+=dir*(intrinsic-l.entry_price)*q;
+    });
+    xs.push(Math.round(s));ys.push(parseFloat(pnl.toFixed(2)));
+  }
+
+  if(posPayoffChart) posPayoffChart.destroy();
+  posPayoffChart=new Chart(document.getElementById('posPayoffChart'),{
+    type:'line',
+    data:{labels:xs,datasets:[{
+      label:'Position P&L at Expiry',data:ys,
+      borderColor:'rgba(108,92,231,0.9)',borderWidth:2,pointRadius:0,
+      fill:{target:'origin',above:'rgba(0,184,148,0.12)',below:'rgba(225,112,85,0.12)'},tension:0.1
+    }]},
+    options:{
+      responsive:true,animation:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>'P&L: $'+ctx.parsed.y.toFixed(2)}}},
+      scales:{
+        x:{title:{display:true,text:'Spot at Expiry',color:'#636e72',font:{size:10}},ticks:{color:'#636e72',maxTicksLimit:10,font:{size:10}},grid:{color:'#2a2d3a'}},
+        y:{title:{display:true,text:'P&L ($)',color:'#636e72',font:{size:10}},ticks:{color:'#636e72',font:{size:10}},grid:{color:'#2a2d3a'},
+          afterDataLimits:s=>{if(s.min>0)s.min=-s.max*0.1;if(s.max<0)s.max=-s.min*0.1}}
+      }
+    },
+    plugins:[{id:'posZero',afterDraw(chart){
+      const y=chart.scales.y.getPixelForValue(0);
+      if(y>=chart.chartArea.top&&y<=chart.chartArea.bottom){
+        const ctx2=chart.ctx;ctx2.save();ctx2.beginPath();ctx2.moveTo(chart.chartArea.left,y);
+        ctx2.lineTo(chart.chartArea.right,y);ctx2.strokeStyle='rgba(255,255,255,0.25)';ctx2.lineWidth=1;ctx2.setLineDash([4,4]);ctx2.stroke();ctx2.restore();
+      }
+      if(sp){
+        const xIdx=xs.findIndex(v=>v>=sp);
+        if(xIdx>=0){const x=chart.scales.x.getPixelForValue(xIdx);
+          const ctx3=chart.ctx;ctx3.save();ctx3.beginPath();ctx3.moveTo(x,chart.chartArea.top);ctx3.lineTo(x,chart.chartArea.bottom);
+          ctx3.strokeStyle='rgba(108,92,231,0.5)';ctx3.lineWidth=1;ctx3.setLineDash([4,4]);ctx3.stroke();
+          ctx3.fillStyle='#6c5ce7';ctx3.font='10px monospace';ctx3.fillText('Spot',x-12,chart.chartArea.top-4);ctx3.restore();
+        }
+      }
+    }}]
+  });
+}
+</script>
+</body>
+</html>
