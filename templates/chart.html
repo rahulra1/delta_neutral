@@ -104,6 +104,7 @@ body{background:#131722;color:#d1d4dc;margin:0}
     <button class="ind-btn" data-ind="vwap" onclick="toggleInd(this)">VWAP</button>
     <button class="ind-btn" data-ind="supertrend" onclick="toggleInd(this)">Supertrend</button>
     <button class="ind-btn" data-ind="rsi" onclick="toggleInd(this)">RSI</button>
+    <button class="ind-btn" data-ind="rsi_div_mss" onclick="toggleInd(this)" title="RSI Divergence + Market Structure Shift">Div+MSS</button>
   </div>
 </div>
 
@@ -181,6 +182,11 @@ function toggleInd(btn){
   const name=btn.dataset.ind;
   btn.classList.toggle('active');
   if(activeInds.has(name))activeInds.delete(name); else activeInds.add(name);
+  // Auto-enable RSI panel when Div+MSS is toggled on
+  if(name==='rsi_div_mss'&&activeInds.has('rsi_div_mss')&&!activeInds.has('rsi')){
+    activeInds.add('rsi');
+    document.querySelector('.ind-btn[data-ind="rsi"]').classList.add('active');
+  }
   loadAll();
 }
 
@@ -296,6 +302,31 @@ function loadAll(){
     } else {
       document.getElementById('rsiChart').style.display='none';
       if(rsiChartObj){rsiChartObj.remove();rsiChartObj=null}
+    }
+
+    // RSI Divergence + MSS signals
+    if(inds.rsi_div_mss&&inds.rsi_div_mss.signals&&inds.rsi_div_mss.signals.length){
+      const markers=inds.rsi_div_mss.signals.map(s=>({
+        time:s.time,
+        position:s.type==='buy'?'belowBar':'aboveBar',
+        color:s.type==='buy'?'#26a65b':'#ea3943',
+        shape:s.type==='buy'?'arrowUp':'arrowDown',
+        text:s.type==='buy'?'BUY (MSS)':'SELL (MSS)'
+      }));
+      markers.sort((a,b)=>a.time-b.time);
+      candleSeries.setMarkers(markers);
+      // Draw SL and TP lines for each signal
+      inds.rsi_div_mss.signals.forEach(s=>{
+        const ext=Math.min(30,Math.max(15,ohlc.length/10|0));
+        const slLine=mainChart.addLineSeries({color:'#ea3943',lineWidth:1,lineStyle:2,priceLineVisible:false,lastValueVisible:false,title:'SL'});
+        const tpLine=mainChart.addLineSeries({color:'#26a65b',lineWidth:1,lineStyle:2,priceLineVisible:false,lastValueVisible:false,title:'TP1'});
+        slLine.setData([{time:s.time,value:s.sl},{time:s.time+ext*3600,value:s.sl}]);
+        tpLine.setData([{time:s.time,value:s.tp1},{time:s.time+ext*3600,value:s.tp1}]);
+        indSeries['mss_sl_'+s.time]=slLine;
+        indSeries['mss_tp_'+s.time]=tpLine;
+      });
+    } else {
+      candleSeries.setMarkers([]);
     }
 
     mainChart.timeScale().fitContent();

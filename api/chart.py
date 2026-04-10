@@ -275,6 +275,79 @@ def calc_supertrend(candles, period=10, multiplier=3):
             for i in range(period - 1, len(candles)) if st[i] > 0]
 
 
+def calc_rsi_divergence_mss(candles, rsi_period=14, ob=70, os_level=30, lb=5, max_age=50):
+    """Detect RSI divergence + market structure shift signals."""
+    rsi_data = calc_rsi(candles, rsi_period)
+    if len(rsi_data) < lb * 2 + 1:
+        return {'type': 'signals', 'signals': []}
+
+    # Build aligned arrays (rsi_data starts later than candles)
+    rsi_by_time = {r['time']: r['value'] for r in rsi_data}
+    aligned = []
+    for c in candles:
+        rv = rsi_by_time.get(c['t'])
+        if rv is not None:
+            aligned.append({'t': c['t'], 'h': c['h'], 'l': c['l'], 'c': c['c'], 'rsi': rv})
+
+    n = len(aligned)
+    if n < lb * 2 + 1:
+        return {'type': 'signals', 'signals': []}
+
+    # Find pivot highs/lows in price and RSI
+    def pivots(series, key, lb):
+        pts = []
+        for i in range(lb, len(series) - lb):
+            window = [series[j][key] for j in range(i - lb, i + lb + 1)]
+            if series[i][key] == max(window):
+                pts.append(('high', i))
+            if series[i][key] == min(window):
+                pts.append(('low', i))
+        return pts
+
+    price_highs = [(i, aligned[i]) for t, i in pivots(aligned, 'h', lb) if t == 'high']
+    price_lows = [(i, aligned[i]) for t, i in pivots(aligned, 'l', lb) if t == 'low']
+
+    signals = []
+
+    # Bearish divergence: price higher high + RSI lower high in OB zone
+    ob_highs = [(i, d) for i, d in price_highs if d['rsi'] > ob]
+    for j in range(1, len(ob_highs)):
+        pi, pd = ob_highs[j - 1]
+        ci, cd = ob_highs[j]
+        if cd['h'] > pd['h'] and cd['rsi'] < pd['rsi']:
+            # Find swing low between the two highs
+            swing_low = min(aligned[k]['l'] for k in range(pi, ci + 1))
+            # Look for MSS: close below swing_low within max_age bars
+            for k in range(ci + 1, min(ci + max_age, n)):
+                if aligned[k]['c'] < swing_low:
+                    signals.append({
+                        'time': aligned[k]['t'], 'type': 'sell',
+                        'price': aligned[k]['c'],
+                        'sl': cd['h'],
+                        'tp1': aligned[k]['c'] - (cd['h'] - aligned[k]['c']),
+                    })
+                    break
+
+    # Bullish divergence: price lower low + RSI higher low in OS zone
+    os_lows = [(i, d) for i, d in price_lows if d['rsi'] < os_level]
+    for j in range(1, len(os_lows)):
+        pi, pd = os_lows[j - 1]
+        ci, cd = os_lows[j]
+        if cd['l'] < pd['l'] and cd['rsi'] > pd['rsi']:
+            swing_high = max(aligned[k]['h'] for k in range(pi, ci + 1))
+            for k in range(ci + 1, min(ci + max_age, n)):
+                if aligned[k]['c'] > swing_high:
+                    signals.append({
+                        'time': aligned[k]['t'], 'type': 'buy',
+                        'price': aligned[k]['c'],
+                        'sl': cd['l'],
+                        'tp1': aligned[k]['c'] + (aligned[k]['c'] - cd['l']),
+                    })
+                    break
+
+    return {'type': 'signals', 'signals': signals}
+
+
 INDICATOR_FNS = {
     'sma20': lambda c: {'type': 'overlay', 'data': calc_sma(c, 20), 'color': '#6366f1', 'label': 'SMA 20'},
     'sma50': lambda c: {'type': 'overlay', 'data': calc_sma(c, 50), 'color': '#f59e0b', 'label': 'SMA 50'},
@@ -283,6 +356,7 @@ INDICATOR_FNS = {
     'bb': lambda c: {**{'type': 'overlay', 'label': 'Bollinger Bands'}, **calc_bollinger(c, 20, 2)},
     'vwap': lambda c: {'type': 'overlay', 'data': calc_vwap(c), 'color': '#ec4899', 'label': 'VWAP'},
     'supertrend': lambda c: {'type': 'overlay_st', 'data': calc_supertrend(c, 10, 3), 'label': 'Supertrend'},
+    'rsi_div_mss': lambda c: calc_rsi_divergence_mss(c),
 }
 
 
