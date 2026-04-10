@@ -1,5 +1,5 @@
 import requests
-from config import BASE_URL
+import config
 from auth import get_headers
 
 
@@ -7,7 +7,7 @@ def get_product_details(product_id):
     path = '/v2/products'
     headers = get_headers('GET', path)
     try:
-        response = requests.get(f'{BASE_URL}{path}', headers=headers, timeout=(3, 27))
+        response = requests.get(f'{config.BASE_URL}{path}', headers=headers, timeout=(3, 27))
         response.raise_for_status()
         result = response.json()
         if result.get('success'):

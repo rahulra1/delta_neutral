@@ -1,6 +1,6 @@
 import json
 import requests
-from config import BASE_URL
+import config
 from auth import get_headers
 
 
@@ -16,7 +16,7 @@ def place_order(product_id, product_symbol, size, side):
     payload_str = json.dumps(payload)
     headers = get_headers('POST', path, '', payload_str)
     try:
-        response = requests.post(f'{BASE_URL}{path}', data=payload_str, headers=headers, timeout=(3, 27))
+        response = requests.post(f'{config.BASE_URL}{path}', data=payload_str, headers=headers, timeout=(3, 27))
         response.raise_for_status()
         result = response.json()
         if result.get('success'):

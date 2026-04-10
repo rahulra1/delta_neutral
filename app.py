@@ -17,6 +17,24 @@ init_db()
 # {sid: {thread, strategy, log_queue, running, params, user_id}}
 strategies = {}
 
+# Unified tracker for all strategies from any source
+# {sid: {source, name, status, user_id, pnl, started_at, details, ...}}
+all_tracked = {}
+
+def track_strategy(sid, source, name, user_id, details=None):
+    """Register a strategy in the unified tracker."""
+    from datetime import datetime
+    all_tracked[sid] = {
+        'sid': sid, 'source': source, 'name': name,
+        'user_id': user_id, 'status': 'running',
+        'started_at': datetime.now().isoformat(),
+        'pnl': 0, 'details': details or {},
+    }
+
+def update_tracked(sid, **kwargs):
+    if sid in all_tracked:
+        all_tracked[sid].update(kwargs)
+
 
 def login_required(f):
     @wraps(f)
@@ -66,7 +84,7 @@ def run_strategy(sid, params):
         if profile_id:
             p = get_profile(int(profile_id), entry['user_id'])
             if p:
-                set_thread_credentials(p['api_key'], p['api_secret'])
+                set_thread_credentials(p['api_key'], p['api_secret'], p.get('broker', 'demo'))
             else:
                 entry['log_queue'].put("❌ Profile not found.")
                 entry['running'] = False
@@ -77,7 +95,7 @@ def run_strategy(sid, params):
                 entry['log_queue'].put("❌ API keys not configured. Go to Profile to add them.")
                 entry['running'] = False
                 return
-            set_thread_credentials(user['api_key'], user['api_secret'])
+            set_thread_credentials(user['api_key'], user['api_secret'], 'demo')
 
         if not check_api_connection():
             entry['log_queue'].put("❌ Cannot proceed without proper API access")
@@ -114,6 +132,7 @@ def run_strategy(sid, params):
         pnl = entry['strategy'].cumulative_realized_pnl if entry.get('strategy') else 0
         adj = entry['strategy'].adjustment_count if entry.get('strategy') else 0
         record_end(sid, pnl, adj)
+        update_tracked(sid, status='completed', pnl=round(pnl, 2))
         if entry.get('strategy'):
             entry['strategy'].ws_manager.stop()
         LogCapture._local.log_queue = None
@@ -177,22 +196,32 @@ def profile():
 # ── Profile API ──
 
 def get_profile_creds(profile_id):
-    """Get API credentials from a profile, or fall back to user's default keys."""
+    """Get API credentials + broker from a profile, or fall back to user's default keys."""
     uid = current_user_id()
     if profile_id:
         p = get_profile(int(profile_id), uid)
         if p:
-            return p['api_key'], p['api_secret'], p['name']
+            return p['api_key'], p['api_secret'], p['name'], p.get('broker', 'demo')
     user = get_user(uid)
     if user and user.get('api_key') and user.get('api_secret'):
-        return user['api_key'], user['api_secret'], 'Default'
-    return None, None, None
+        return user['api_key'], user['api_secret'], 'Default', 'demo'
+    return None, None, None, None
 
 
 @app.route('/api/profiles')
 @login_required
 def api_profiles():
     return jsonify(profiles=get_profiles(current_user_id()))
+
+
+@app.route('/api/brokers')
+@login_required
+def api_brokers():
+    from config import BROKERS
+    return jsonify(brokers=[
+        {'id': k, 'name': mod.BROKER_NAME}
+        for k, mod in BROKERS.items()
+    ])
 
 
 @app.route('/api/profiles', methods=['POST'])
@@ -202,9 +231,10 @@ def api_create_profile():
     name = (d.get('name') or '').strip()
     api_key = (d.get('api_key') or '').strip()
     api_secret = (d.get('api_secret') or '').strip()
+    broker = (d.get('broker') or 'demo').strip()
     if not name or not api_key or not api_secret:
         return jsonify(error="Name, API key, and secret are required"), 400
-    create_profile(current_user_id(), name, api_key, api_secret)
+    create_profile(current_user_id(), name, api_key, api_secret, broker)
     return jsonify(status="created")
 
 
@@ -212,7 +242,7 @@ def api_create_profile():
 @login_required
 def api_update_profile(pid):
     d = request.json
-    update_profile(pid, current_user_id(), d.get('name',''), d.get('api_key',''), d.get('api_secret',''))
+    update_profile(pid, current_user_id(), d.get('name',''), d.get('api_key',''), d.get('api_secret',''), d.get('broker', 'demo'))
     return jsonify(status="updated")
 
 
@@ -240,10 +270,10 @@ def broker_setup_page():
 def api_test_connection():
     """Test if an API profile can connect to Delta Exchange."""
     from config import set_thread_credentials
-    api_key, api_secret, _ = get_profile_creds(request.args.get('profile_id'))
+    api_key, api_secret, _, broker = get_profile_creds(request.args.get('profile_id'))
     if not api_key:
         return jsonify(success=False, error="No keys")
-    set_thread_credentials(api_key, api_secret)
+    set_thread_credentials(api_key, api_secret, broker)
     try:
         ok = check_api_connection()
         return jsonify(success=ok)
@@ -315,6 +345,128 @@ def api_dashboard():
     )
 
 
+@app.route('/api/strategies')
+@login_required
+def api_all_strategies():
+    """Return all tracked strategies for the current user with live PnL."""
+    uid = current_user_id()
+    result = []
+    for sid, t in all_tracked.items():
+        if t['user_id'] != uid:
+            continue
+        entry = dict(t)
+        # Update live PnL for running strategies
+        if entry['status'] == 'running':
+            if sid in strategies and strategies[sid].get('strategy'):
+                s = strategies[sid]['strategy']
+                entry['pnl'] = round(getattr(s, 'total_pnl', 0), 2)
+            elif sid in active_monitors:
+                mon = active_monitors[sid]['monitor']
+                entry['pnl'] = round(mon.current_pnl, 2)
+                if not mon.running:
+                    entry['status'] = 'completed'
+        result.append(entry)
+    return jsonify(strategies=result)
+
+
+@app.route('/api/strategies/<sid>/close', methods=['POST'])
+@login_required
+def api_close_strategy(sid):
+    """Close a single strategy by sid."""
+    uid = current_user_id()
+    if sid not in all_tracked or all_tracked[sid]['user_id'] != uid:
+        return jsonify(error="Not found"), 404
+
+    from config import set_thread_credentials
+    from api.orders import place_order
+
+    # Resolve profile_id from whichever source has it
+    profile_id = None
+    if sid in strategies:
+        profile_id = strategies[sid].get('profile_id')
+    elif sid in active_monitors:
+        profile_id = active_monitors[sid].get('profile_id')
+    elif all_tracked[sid].get('details', {}).get('profile_id'):
+        profile_id = all_tracked[sid]['details']['profile_id']
+
+    api_key, api_secret, _, broker = get_profile_creds(profile_id)
+    if api_key:
+        set_thread_credentials(api_key, api_secret, broker)
+
+    closed = False
+    # Delta Neutral strategy
+    if sid in strategies:
+        e = strategies[sid]
+        if e.get('strategy'):
+            e['strategy'].running = False
+            e['strategy'].close_all_positions()
+            closed = True
+    # Option Chain monitor
+    if sid in active_monitors:
+        active_monitors[sid]['monitor'].stop()
+        closed = True
+    # Option Chain with no monitor — close positions by reversing each leg
+    if not closed and api_key:
+        details = all_tracked[sid].get('details', {})
+        placed_legs = details.get('legs', [])
+        if isinstance(placed_legs, list) and placed_legs:
+            for leg in placed_legs:
+                close_side = 'buy' if leg['side'] == 'sell' else 'sell'
+                place_order(leg['product_id'], leg['symbol'], int(leg['size']), close_side)
+            closed = True
+
+    update_tracked(sid, status='closed')
+    return jsonify(success=closed, status='closed')
+
+
+@app.route('/api/strategies/close-all', methods=['POST'])
+@login_required
+def api_close_all_strategies():
+    """Close all running strategies for the current user."""
+    uid = current_user_id()
+    from config import set_thread_credentials
+    closed_count = 0
+
+    for sid, t in list(all_tracked.items()):
+        if t['user_id'] != uid or t['status'] not in ('running', 'open (no monitor)'):
+            continue
+
+        # Resolve profile_id from all sources
+        profile_id = None
+        if sid in strategies:
+            profile_id = strategies[sid].get('profile_id')
+        elif sid in active_monitors:
+            profile_id = active_monitors[sid].get('profile_id')
+        elif t.get('details', {}).get('profile_id'):
+            profile_id = t['details']['profile_id']
+
+        api_key, api_secret, _, broker = get_profile_creds(profile_id)
+        if api_key:
+            set_thread_credentials(api_key, api_secret, broker)
+
+        closed = False
+        if sid in strategies and strategies[sid].get('strategy'):
+            strategies[sid]['strategy'].running = False
+            strategies[sid]['strategy'].close_all_positions()
+            closed = True
+        if sid in active_monitors:
+            active_monitors[sid]['monitor'].stop()
+            closed = True
+        # Option Chain with no monitor
+        if not closed and api_key:
+            from api.orders import place_order
+            placed_legs = t.get('details', {}).get('legs', [])
+            if isinstance(placed_legs, list):
+                for leg in placed_legs:
+                    close_side = 'buy' if leg['side'] == 'sell' else 'sell'
+                    place_order(leg['product_id'], leg['symbol'], int(leg['size']), close_side)
+
+        update_tracked(sid, status='closed')
+        closed_count += 1
+
+    return jsonify(closed=closed_count)
+
+
 @app.route('/strategy/new')
 @login_required
 def new_strategy():
@@ -365,7 +517,7 @@ def start():
     profile_id = params.pop('profile_id', None)
 
     # Validate credentials from profile or default
-    api_key, api_secret, _ = get_profile_creds(profile_id)
+    api_key, api_secret, _, broker = get_profile_creds(profile_id)
     if not api_key:
         return jsonify(error="No API profile selected or keys not configured."), 400
 
@@ -377,6 +529,7 @@ def start():
     entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     strategies[sid] = entry
     record_start(sid, params)
+    track_strategy(sid, 'Delta Neutral', f"{params.get('asset','BTC')} {params.get('expiry_date','')}", current_user_id(), details=params)
     entry['thread'] = threading.Thread(target=run_strategy, args=(sid, params), daemon=True)
     entry['thread'].start()
     return jsonify(status="started", sid=sid)
@@ -521,10 +674,10 @@ def api_place_legs():
     from api.orders import place_order
     from config import set_thread_credentials
     data = request.json
-    api_key, api_secret, pname = get_profile_creds(data.get('profile_id'))
+    api_key, api_secret, pname, broker = get_profile_creds(data.get('profile_id'))
     if not api_key:
         return jsonify(error="No API profile selected or keys not configured"), 400
-    set_thread_credentials(api_key, api_secret)
+    set_thread_credentials(api_key, api_secret, broker)
 
     legs = data.get('legs', [])
     max_profit = float(data.get('max_profit', 0))
@@ -544,19 +697,30 @@ def api_place_legs():
                 'entry_price': float(leg.get('mark', 0)),
             })
 
+    # Always track the strategy
+    asset = data.get('asset', 'BTC')
+    sid = str(uuid.uuid4())[:8]
+    if placed_legs:
+        leg_names = ', '.join(l['symbol'] for l in placed_legs[:3])
+        track_strategy(sid, 'Option Chain', f"{asset} {leg_names}", current_user_id(),
+                       details={'legs': placed_legs, 'max_profit': max_profit, 'max_loss': max_loss, 'asset': asset, 'profile_id': data.get('profile_id')})
+
     # Start monitor if targets are set and all orders succeeded
     monitor_id = None
     if max_profit > 0 and max_loss > 0 and placed_legs and all(r['success'] for r in results):
         from strategy.monitor import StrategyMonitor
-        asset = data.get('asset', 'BTC')
         lot_sizes = {'BTC': 0.001, 'ETH': 0.01}
         mon = StrategyMonitor(
             legs=placed_legs, max_profit=max_profit, max_loss=max_loss,
             asset=asset, lot_size=lot_sizes.get(asset, 0.001),
         )
-        monitor_id = str(uuid.uuid4())[:8]
-        active_monitors[monitor_id] = {'monitor': mon, 'user_id': current_user_id()}
+        monitor_id = sid
+        active_monitors[monitor_id] = {'monitor': mon, 'user_id': current_user_id(), 'profile_id': data.get('profile_id')}
+        mon.on_complete = lambda pnl, reason: update_tracked(sid, status='completed', pnl=round(pnl, 2))
         mon.start()
+    elif placed_legs and not (max_profit > 0 and max_loss > 0):
+        # No monitor — mark as completed immediately (manual trade)
+        update_tracked(sid, status='open (no monitor)')
 
     return jsonify(results=results, monitor_id=monitor_id)
 
@@ -568,10 +732,10 @@ def api_positions():
     import re
     from api.positions import get_positions
     from config import set_thread_credentials
-    api_key, api_secret, _ = get_profile_creds(request.args.get('profile_id'))
+    api_key, api_secret, _, broker = get_profile_creds(request.args.get('profile_id'))
     if not api_key:
         return jsonify(error="No API profile selected"), 400
-    set_thread_credentials(api_key, api_secret)
+    set_thread_credentials(api_key, api_secret, broker)
 
     positions = get_positions()
 
@@ -579,12 +743,12 @@ def api_positions():
     mark_prices = {}
     try:
         import requests as req
-        from config import BASE_URL
+        import config as cfg
         from auth import get_headers
         path = '/v2/tickers'
         qs = '?contract_types=call_options,put_options'
         headers = get_headers('GET', path, qs)
-        resp = req.get(f'{BASE_URL}{path}{qs}', headers=headers, timeout=10)
+        resp = req.get(f'{cfg.BASE_URL}{path}{qs}', headers=headers, timeout=10)
         if resp.ok:
             for t in resp.json().get('result', []):
                 mark_prices[t.get('product_id')] = float(t.get('mark_price', 0))
@@ -626,10 +790,10 @@ def api_close_position():
     from api.orders import place_order
     from config import set_thread_credentials
     data = request.json
-    api_key, api_secret, _ = get_profile_creds(data.get('profile_id'))
+    api_key, api_secret, _, broker = get_profile_creds(data.get('profile_id'))
     if not api_key:
         return jsonify(error="No API profile selected"), 400
-    set_thread_credentials(api_key, api_secret)
+    set_thread_credentials(api_key, api_secret, broker)
     # To close: buy back if short, sell if long
     close_side = 'buy' if data['side'] == 'sell' else 'sell'
     result = place_order(data['product_id'], data['symbol'], int(data['size']), close_side)
@@ -651,10 +815,51 @@ def api_monitor_stop(mid):
     if not entry or entry['user_id'] != current_user_id():
         return jsonify(error="Not found"), 404
     from config import set_thread_credentials
-    user = get_user(current_user_id())
-    set_thread_credentials(user['api_key'], user['api_secret'])
+    api_key, api_secret, _, broker = get_profile_creds(entry.get('profile_id'))
+    if api_key:
+        set_thread_credentials(api_key, api_secret, broker)
     entry['monitor'].stop()
     return jsonify(status="stopped")
+
+
+# ── Strategy Builder Routes ──
+
+@app.route('/strategy-builder')
+@login_required
+def strategy_builder_page():
+    return render_template('strategy_builder.html', username=session.get('username'))
+
+
+@app.route('/api/strategy-builder/save', methods=['POST'])
+@login_required
+def api_save_strategy_builder():
+    data = request.json
+    data['user_id'] = current_user_id()
+    sid = str(uuid.uuid4())[:8]
+    saved = getattr(app, '_saved_strategies', {})
+    saved[sid] = data
+    app._saved_strategies = saved
+    return jsonify(status='saved', sid=sid)
+
+
+@app.route('/api/strategy-builder/deploy', methods=['POST'])
+@login_required
+def api_deploy_strategy_builder():
+    data = request.json
+    sid = str(uuid.uuid4())[:8]
+    track_strategy(sid, 'Strategy Builder', data.get('name', 'Unnamed'), current_user_id(), details=data)
+    update_tracked(sid, status='running')
+    return jsonify(status='deployed', sid=sid)
+
+
+@app.route('/api/strategy-builder/paper-trade', methods=['POST'])
+@login_required
+def api_paper_trade_strategy_builder():
+    data = request.json
+    sid = str(uuid.uuid4())[:8]
+    track_strategy(sid, 'Strategy Builder (Paper)', data.get('name', 'Unnamed'), current_user_id(), details=data)
+    update_tracked(sid, status='paper')
+    return jsonify(status='paper', sid=sid)
 
 
 if __name__ == '__main__':

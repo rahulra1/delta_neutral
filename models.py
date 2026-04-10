@@ -24,6 +24,7 @@ def init_db():
         name TEXT NOT NULL,
         api_key TEXT NOT NULL,
         api_secret TEXT NOT NULL,
+        broker TEXT NOT NULL DEFAULT 'demo',
         FOREIGN KEY (user_id) REFERENCES users(id)
     )''')
     # migrate: add columns if table already exists without them
@@ -32,6 +33,9 @@ def init_db():
         conn.execute("ALTER TABLE users ADD COLUMN api_key TEXT DEFAULT ''")
     if 'api_secret' not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN api_secret TEXT DEFAULT ''")
+    pcols = [r['name'] for r in conn.execute("PRAGMA table_info(profiles)").fetchall()]
+    if 'broker' not in pcols:
+        conn.execute("ALTER TABLE profiles ADD COLUMN broker TEXT NOT NULL DEFAULT 'demo'")
     conn.commit()
     conn.close()
 
@@ -84,18 +88,18 @@ def get_profile(profile_id, user_id):
     return dict(row) if row else None
 
 
-def create_profile(user_id, name, api_key, api_secret):
+def create_profile(user_id, name, api_key, api_secret, broker='demo'):
     conn = get_db()
-    conn.execute('INSERT INTO profiles (user_id, name, api_key, api_secret) VALUES (?, ?, ?, ?)',
-                 (user_id, name, api_key, api_secret))
+    conn.execute('INSERT INTO profiles (user_id, name, api_key, api_secret, broker) VALUES (?, ?, ?, ?, ?)',
+                 (user_id, name, api_key, api_secret, broker))
     conn.commit()
     conn.close()
 
 
-def update_profile(profile_id, user_id, name, api_key, api_secret):
+def update_profile(profile_id, user_id, name, api_key, api_secret, broker='demo'):
     conn = get_db()
-    conn.execute('UPDATE profiles SET name = ?, api_key = ?, api_secret = ? WHERE id = ? AND user_id = ?',
-                 (name, api_key, api_secret, profile_id, user_id))
+    conn.execute('UPDATE profiles SET name = ?, api_key = ?, api_secret = ?, broker = ? WHERE id = ? AND user_id = ?',
+                 (name, api_key, api_secret, broker, profile_id, user_id))
     conn.commit()
     conn.close()
 

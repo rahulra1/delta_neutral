@@ -117,9 +117,9 @@ function loadConnections(){
     }
     list.innerHTML=profiles.map(p=>`
       <div class="api-card">
-        <div class="api-icon">Δ</div>
+        <div class="api-icon">${p.broker==='delta_exchange'?'Δ':'🧪'}</div>
         <div class="api-info">
-          <div class="api-name">${p.name}</div>
+          <div class="api-name">${p.name} <span style="font-size:.7rem;color:var(--muted);font-weight:400;margin-left:6px">${p.broker==='delta_exchange'?'Delta Exchange':'Demo (Testnet)'}</span></div>
           <div class="api-key">${p.api_key.slice(0,8)}••••••${p.api_key.slice(-4)}</div>
         </div>
         <div class="api-actions">

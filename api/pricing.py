@@ -1,5 +1,5 @@
 import requests
-from config import BASE_URL
+import config
 from auth import get_headers
 
 
@@ -8,7 +8,7 @@ def get_current_price(product_id, asset='BTC'):
     query_string = f'?contract_types=call_options,put_options&underlying_asset_symbols={asset}'
     headers = get_headers('GET', path, query_string)
     try:
-        response = requests.get(f'{BASE_URL}{path}{query_string}', headers=headers, timeout=(3, 27))
+        response = requests.get(f'{config.BASE_URL}{path}{query_string}', headers=headers, timeout=(3, 27))
         response.raise_for_status()
         tickers = response.json()
         if tickers.get('success'):

@@ -2,7 +2,7 @@ import json
 import time
 import threading
 import websocket
-from config import WS_URL
+import config
 
 
 class WebSocketManager:
@@ -50,7 +50,7 @@ class WebSocketManager:
     def connect(self):
         try:
             self.ws = websocket.WebSocketApp(
-                WS_URL,
+                config.WS_URL,
                 on_message=self.on_message,
                 on_error=self.on_error,
                 on_close=self.on_close,

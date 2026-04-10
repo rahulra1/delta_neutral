@@ -1,6 +1,7 @@
 import time
 import requests
-from config import BASE_URL, get_api_key, get_api_secret
+import config
+from config import get_api_key, get_api_secret
 from auth.signature import generate_signature
 
 
@@ -13,7 +14,7 @@ def check_api_connection():
     print("=" * 60)
 
     try:
-        response = requests.get(f'{BASE_URL}/v2/tickers/BTCUSD', timeout=(3, 27))
+        response = requests.get(f'{config.BASE_URL}/v2/tickers/BTCUSD', timeout=(3, 27))
         if response.status_code == 200:
             print("✓ Public API accessible")
         else:
@@ -34,7 +35,7 @@ def check_api_connection():
             'User-Agent': 'delta-neutral-bot',
             'Content-Type': 'application/json'
         }
-        response = requests.get(f'{BASE_URL}{path}', headers=headers, timeout=(3, 27))
+        response = requests.get(f'{config.BASE_URL}{path}', headers=headers, timeout=(3, 27))
 
         if response.status_code == 200:
             print("✓ API authentication successful")

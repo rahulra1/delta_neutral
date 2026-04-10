@@ -1,5 +1,5 @@
 import requests
-from config import BASE_URL
+import config
 from auth import get_headers
 
 
@@ -8,7 +8,7 @@ def get_positions():
     query_string = '?contract_types=call_options,put_options'
     headers = get_headers('GET', path, query_string)
     try:
-        response = requests.get(f'{BASE_URL}{path}{query_string}', headers=headers, timeout=(3, 27))
+        response = requests.get(f'{config.BASE_URL}{path}{query_string}', headers=headers, timeout=(3, 27))
         response.raise_for_status()
         result = response.json()
         return result.get('result', []) if result.get('success') else []

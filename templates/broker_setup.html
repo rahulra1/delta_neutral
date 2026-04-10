@@ -124,18 +124,22 @@
 
     <!-- Connection Form -->
     <div class="form-card">
-      <h3>🔗 Add Delta Exchange Connection</h3>
-      <div class="form-row">
+      <h3>🔗 Add Connection</h3>
+      <div class="form-row" style="grid-template-columns:1fr 1fr">
         <div class="field">
           <label>Connection Name</label>
           <input id="connName" placeholder="e.g. Main Account, Sub Account 1">
           <span class="hint">A friendly name to identify this connection</span>
         </div>
+        <div class="field">
+          <label>Broker</label>
+          <select id="connBroker"></select>
+        </div>
       </div>
       <div class="form-row" style="grid-template-columns:1fr 1fr">
         <div class="field">
           <label>API Key</label>
-          <input id="connKey" placeholder="Paste your Delta Exchange API key">
+          <input id="connKey" placeholder="Paste your API key">
         </div>
         <div class="field">
           <label>API Secret</label>
@@ -174,12 +178,13 @@ function saveConnection(){
   const name=document.getElementById('connName').value.trim();
   const key=document.getElementById('connKey').value.trim();
   const secret=document.getElementById('connSecret').value.trim();
+  const broker=document.getElementById('connBroker').value;
   const res=document.getElementById('testResult');
 
   if(!name||!key||!secret){showResult('All fields are required','fail');return}
   showResult('Saving...','');
 
-  fetch('/api/profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,api_key:key,api_secret:secret})})
+  fetch('/api/profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,api_key:key,api_secret:secret,broker:broker})})
     .then(r=>r.json()).then(d=>{
       if(d.error){showResult(d.error,'fail');return}
       showResult('✓ Connection saved! Redirecting...','ok');
@@ -190,15 +195,14 @@ function saveConnection(){
 function testOnly(){
   const key=document.getElementById('connKey').value.trim();
   const secret=document.getElementById('connSecret').value.trim();
+  const broker=document.getElementById('connBroker').value;
   if(!key||!secret){showResult('Enter API key and secret first','fail');return}
   showResult('Testing...','');
 
-  // Save temporarily, test, then we'll keep it
   const name=document.getElementById('connName').value.trim()||'Test';
-  fetch('/api/profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,api_key:key,api_secret:secret})})
+  fetch('/api/profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,api_key:key,api_secret:secret,broker:broker})})
     .then(r=>r.json()).then(d=>{
       if(d.error){showResult(d.error,'fail');return}
-      // Get the latest profile and test it
       fetch('/api/profiles').then(r=>r.json()).then(pd=>{
         const profiles=pd.profiles||[];
         const latest=profiles[profiles.length-1];
@@ -208,13 +212,23 @@ function testOnly(){
             showResult('✓ Connection successful! API keys are valid.','ok');
           } else {
             showResult('✗ Connection failed. Check your keys and IP whitelist.','fail');
-            // Remove the failed test profile
             fetch('/api/profiles/'+latest.id,{method:'DELETE'});
           }
         });
       });
     });
 }
+
+function loadBrokers(){
+  fetch('/api/brokers').then(r=>r.json()).then(d=>{
+    const sel=document.getElementById('connBroker');
+    (d.brokers||[]).forEach(b=>{
+      const o=document.createElement('option');o.value=b.id;o.textContent=b.name;sel.appendChild(o);
+    });
+  });
+}
+
+loadBrokers();
 
 function showResult(msg,type){
   const el=document.getElementById('testResult');

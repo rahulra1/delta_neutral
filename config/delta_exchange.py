@@ -1,0 +1,5 @@
+BASE_URL = 'https://api.india.delta.exchange'
+WS_URL = 'wss://socket.india.delta.exchange'
+BROKER_NAME = 'Delta Exchange'
+TESTNET_BASE_URL = 'https://cdn-ind.testnet.deltaex.org'
+TESTNET_WS_URL = 'wss://socket-ind.testnet.deltaex.org'

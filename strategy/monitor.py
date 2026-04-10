@@ -7,7 +7,7 @@ from api.orders import place_order
 class StrategyMonitor:
     """Monitors a multi-leg option strategy and closes at max profit or max loss."""
 
-    def __init__(self, legs, max_profit, max_loss, asset='BTC', lot_size=0.001, interval=10):
+    def __init__(self, legs, max_profit, max_loss, asset='BTC', lot_size=0.001, interval=10, on_complete=None):
         """
         legs: list of {product_id, symbol, type, strike, side, size, entry_price}
         max_profit / max_loss: absolute dollar thresholds (positive values)
@@ -18,6 +18,7 @@ class StrategyMonitor:
         self.asset = asset
         self.lot_size = lot_size
         self.interval = interval
+        self.on_complete = on_complete
 
         self.running = False
         self.current_pnl = 0
@@ -79,6 +80,8 @@ class StrategyMonitor:
             place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
         self.running = False
         self._log(f"✅ All legs closed. Final PnL: ${self.current_pnl:.2f} ({self.exit_reason})")
+        if self.on_complete:
+            self.on_complete(self.current_pnl, self.exit_reason)
 
     def stop(self):
         """Manual stop — close everything."""

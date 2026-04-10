@@ -1,7 +1,7 @@
 import re
 import requests
 from datetime import datetime, timedelta
-from config import BASE_URL
+import config
 from auth import get_headers
 
 
@@ -11,7 +11,7 @@ def get_expiries(asset='BTC', min_days=0):
     query_string = '?contract_types=call_options&states=live&page_size=500'
     headers = get_headers('GET', path, query_string)
     try:
-        resp = requests.get(f'{BASE_URL}{path}{query_string}', headers=headers, timeout=10)
+        resp = requests.get(f'{config.BASE_URL}{path}{query_string}', headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         if not data.get('success'):
@@ -37,13 +37,21 @@ def get_expiries(asset='BTC', min_days=0):
         return []
 
 
+def _f(v):
+    """Safe float conversion — returns 0 for None/empty."""
+    try:
+        return float(v) if v is not None else 0
+    except (ValueError, TypeError):
+        return 0
+
+
 def get_option_chain_full(expiry_date, asset='BTC'):
     """Fetch full option chain with OI, greeks, bid/ask for a given expiry."""
     path = '/v2/tickers'
     query_string = f'?contract_types=call_options,put_options&underlying_asset_symbols={asset}&expiry_date={expiry_date}'
     headers = get_headers('GET', path, query_string)
     try:
-        resp = requests.get(f'{BASE_URL}{path}{query_string}', headers=headers, timeout=10)
+        resp = requests.get(f'{config.BASE_URL}{path}{query_string}', headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         if not data.get('success'):
@@ -61,26 +69,26 @@ def get_option_chain_full(expiry_date, asset='BTC'):
             greeks = t.get('greeks') or {}
             quotes = t.get('quotes') or {}
             if spot_price is None and t.get('spot_price'):
-                spot_price = float(t['spot_price'])
+                spot_price = _f(t['spot_price'])
 
             row = {
                 'symbol': t.get('symbol', ''),
                 'product_id': t.get('product_id'),
                 'strike': strike,
-                'mark_price': float(t.get('mark_price', 0)),
-                'oi': t.get('oi', '0'),
-                'volume': t.get('volume', 0),
-                'iv': float(t.get('mark_vol', 0)),
-                'delta': float(greeks.get('delta', 0)),
-                'gamma': float(greeks.get('gamma', 0)),
-                'theta': float(greeks.get('theta', 0)),
-                'vega': float(greeks.get('vega', 0)),
-                'bid': float(quotes.get('best_bid', 0)),
-                'ask': float(quotes.get('best_ask', 0)),
-                'bid_size': quotes.get('bid_size', '0'),
-                'ask_size': quotes.get('ask_size', '0'),
-                'bid_iv': float(quotes.get('bid_iv', 0)),
-                'ask_iv': float(quotes.get('ask_iv', 0)),
+                'mark_price': _f(t.get('mark_price')),
+                'oi': t.get('oi') or '0',
+                'volume': t.get('volume') or 0,
+                'iv': _f(t.get('mark_vol')),
+                'delta': _f(greeks.get('delta')),
+                'gamma': _f(greeks.get('gamma')),
+                'theta': _f(greeks.get('theta')),
+                'vega': _f(greeks.get('vega')),
+                'bid': _f(quotes.get('best_bid')),
+                'ask': _f(quotes.get('best_ask')),
+                'bid_size': quotes.get('bid_size') or '0',
+                'ask_size': quotes.get('ask_size') or '0',
+                'bid_iv': _f(quotes.get('bid_iv')),
+                'ask_iv': _f(quotes.get('ask_iv')),
             }
 
             ct = t.get('contract_type', '')

@@ -95,6 +95,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .quick-actions a{display:inline-flex;align-items:center;gap:6px;padding:10px 20px;background:var(--card);border:1px solid var(--border);border-radius:10px;text-decoration:none;color:var(--text);font-size:.85rem;font-weight:600;transition:all .2s}
 .quick-actions a:hover{border-color:var(--accent);box-shadow:0 2px 8px rgba(0,0,0,.06)}
 .quick-actions a .icon{font-size:1.1rem}
+.source-badge{font-size:.7rem;padding:3px 10px;border-radius:4px;font-weight:700;display:inline-block}
+.source-dn{background:#ede9fe;color:#6366f1}
+.source-oc{background:#fef3c7;color:#d97706}
+.strat-row{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:var(--bg);border:1px solid var(--border);border-radius:8px;margin-bottom:8px}
+.strat-row .strat-left{display:flex;align-items:center;gap:12px}
+.strat-row .strat-name{font-weight:700;font-size:.9rem}
+.strat-row .strat-meta{font-size:.75rem;color:var(--muted)}
+.strat-row .strat-pnl{font-weight:700;font-size:1rem;text-align:right}
+.strat-row .strat-status{font-size:.75rem;text-align:right}
 </style>
 </head>
 <body>
@@ -217,26 +226,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     </div>
   </div>
 
-  <!-- Running Strategies -->
-  {% if strategies %}
+  <!-- All Strategies (unified) -->
   <div class="history-card" style="margin-bottom:20px">
-    <div class="card-header"><div class="card-title">🟢 Active Strategies</div></div>
-    <div style="display:grid;gap:10px">
-      {% for s in strategies %}
-      <a href="/strategy/{{ s.id }}" style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:var(--bg);border:1px solid var(--border);border-radius:8px;text-decoration:none;color:var(--text)">
-        <div>
-          <div style="font-weight:700">Expiry: {{ s.name }}</div>
-          <div style="font-size:.75rem;color:var(--muted)">ID: {{ s.id }}</div>
-        </div>
-        <div style="text-align:right">
-          <div style="font-weight:700" class="{{ 'val-green' if s.pnl >= 0 else 'val-red' }}">${{ '%.2f' % s.pnl }}</div>
-          <span class="{{ 'badge-running' if s.running else 'badge-sell' }}">{{ 'Running' if s.running else 'Stopped' }}</span>
-        </div>
-      </a>
-      {% endfor %}
+    <div class="card-header">
+      <div class="card-title">📋 All Strategies</div>
+      <div style="display:flex;gap:8px">
+        <button onclick="loadStrategies()" style="padding:4px 12px;border:1px solid var(--border);border-radius:6px;background:var(--card);cursor:pointer;font-size:.8rem">🔄 Refresh</button>
+        <button onclick="closeAllStrategies()" style="padding:4px 12px;border:1px solid var(--red);border-radius:6px;background:var(--light-red);color:var(--red);cursor:pointer;font-size:.8rem;font-weight:600">✕ Close All</button>
+      </div>
     </div>
+    <div id="stratList" style="color:var(--muted);font-size:.85rem;padding:10px">Loading...</div>
   </div>
-  {% endif %}
 
   <!-- Trade History -->
   <div class="history-card">
@@ -348,6 +348,63 @@ fetch('/api/profiles').then(r=>r.json()).then(d=>{
   const sel=document.getElementById('posProfile');
   (d.profiles||[]).forEach(p=>{const o=document.createElement('option');o.value=p.id;o.textContent=p.name;sel.appendChild(o)});
 });
+
+// Load all strategies
+loadStrategies();
+setInterval(loadStrategies,10000); // refresh every 10s
+
+function loadStrategies(){
+  fetch('/api/strategies').then(r=>r.json()).then(d=>{
+    const list=document.getElementById('stratList');
+    const strats=d.strategies||[];
+    if(!strats.length){list.innerHTML='<div style="color:var(--muted);font-size:.85rem;padding:10px">No strategies triggered yet</div>';return}
+
+    // Sort: running first, then by started_at desc
+    strats.sort((a,b)=>{
+      if(a.status==='running'&&b.status!=='running')return -1;
+      if(b.status==='running'&&a.status!=='running')return 1;
+      return (b.started_at||'').localeCompare(a.started_at||'');
+    });
+
+    list.innerHTML=strats.map(s=>{
+      const isRunning=s.status==='running'||s.status==='open (no monitor)';
+      const pnlColor=s.pnl>=0?'var(--green)':'var(--red)';
+      const sourceClass=s.source==='Delta Neutral'?'source-dn':'source-oc';
+      const statusBadge=isRunning?'<span class="badge badge-green">● '+s.status+'</span>':'<span class="badge" style="background:#f0f0f0;color:var(--muted)">'+s.status+'</span>';
+      const closeBtn=isRunning?`<button onclick="event.preventDefault();closeStrategy('${s.sid}')" style="padding:4px 12px;border:1px solid var(--red);background:var(--light-red);color:var(--red);border-radius:6px;font-size:.75rem;font-weight:600;cursor:pointer;margin-top:4px">✕ Close</button>`:'';
+      const link=s.source==='Delta Neutral'?'/strategy/'+s.sid:'#';
+      return `<div class="strat-row" onclick="if('${link}'!=='#')window.location='${link}'" style="cursor:${link!=='#'?'pointer':'default'}">
+        <div class="strat-left">
+          <div>
+            <span class="source-badge ${sourceClass}">${s.source}</span>
+            <div class="strat-name" style="margin-top:4px">${s.name}</div>
+            <div class="strat-meta">ID: ${s.sid} · ${(s.started_at||'').replace('T',' ').slice(0,16)}</div>
+          </div>
+        </div>
+        <div style="text-align:right">
+          <div class="strat-pnl" style="color:${pnlColor}">$${(s.pnl||0).toFixed(2)}</div>
+          <div class="strat-status">${statusBadge}</div>
+          ${closeBtn}
+        </div>
+      </div>`;
+    }).join('');
+  });
+}
+
+function closeStrategy(sid){
+  if(!confirm('Close this strategy and all its positions?'))return;
+  fetch('/api/strategies/'+sid+'/close',{method:'POST'}).then(r=>r.json()).then(d=>{
+    loadStrategies();
+  });
+}
+
+function closeAllStrategies(){
+  if(!confirm('Close ALL running strategies and their positions?'))return;
+  fetch('/api/strategies/close-all',{method:'POST'}).then(r=>r.json()).then(d=>{
+    alert('Closed '+d.closed+' strategy(s)');
+    loadStrategies();
+  });
+}
 
 function loadLivePositions(){
   const pid=document.getElementById('posProfile').value;
