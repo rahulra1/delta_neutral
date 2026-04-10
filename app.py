@@ -514,24 +514,64 @@ def new_strategy():
 @app.route('/strategy/<sid>')
 @login_required
 def view_strategy(sid):
+    uid = current_user_id()
+    # Delta Neutral strategy with live logs
     e = strategies.get(sid)
-    if not e or e.get('user_id') != current_user_id():
-        return redirect(url_for('dashboard'))
-    p = e['params']
-    return render_template('index.html',
-        sid=sid,
-        asset=p.get('asset', 'BTC'),
-        expiry_date=p.get('expiry_date', default_config.EXPIRY_DATE),
-        target_delta=p.get('target_delta', default_config.TARGET_DELTA),
-        delta_tolerance=p.get('delta_tolerance', default_config.DELTA_TOLERANCE),
-        lot_size=p.get('lot_size', default_config.LOT_SIZE),
-        premium_threshold=p.get('premium_threshold', int(default_config.PREMIUM_INCREASE_THRESHOLD * 100)),
-        target_pnl=p.get('target_pnl', default_config.TARGET_PNL),
-        monitoring_interval=p.get('monitoring_interval', default_config.MONITORING_INTERVAL),
-        max_adjustments=p.get('max_adjustments', default_config.MAX_ADJUSTMENTS),
-        running='true' if e['running'] else 'false',
-        username=session.get('username')
-    )
+    if e and e.get('user_id') == uid:
+        p = e['params']
+        return render_template('index.html',
+            sid=sid,
+            asset=p.get('asset', 'BTC'),
+            expiry_date=p.get('expiry_date', default_config.EXPIRY_DATE),
+            target_delta=p.get('target_delta', default_config.TARGET_DELTA),
+            delta_tolerance=p.get('delta_tolerance', default_config.DELTA_TOLERANCE),
+            lot_size=p.get('lot_size', default_config.LOT_SIZE),
+            premium_threshold=p.get('premium_threshold', int(default_config.PREMIUM_INCREASE_THRESHOLD * 100)),
+            target_pnl=p.get('target_pnl', default_config.TARGET_PNL),
+            monitoring_interval=p.get('monitoring_interval', default_config.MONITORING_INTERVAL),
+            max_adjustments=p.get('max_adjustments', default_config.MAX_ADJUSTMENTS),
+            running='true' if e['running'] else 'false',
+            username=session.get('username')
+        )
+    # Any tracked strategy (Option Chain, Strategy Builder, etc.)
+    t = all_tracked.get(sid)
+    if t and t['user_id'] == uid:
+        return render_template('strategy_detail.html', sid=sid, username=session.get('username'))
+    # Fallback: check trade_history.json
+    for h in get_history():
+        if h.get('sid') == sid:
+            return render_template('strategy_detail.html', sid=sid, username=session.get('username'))
+    return redirect(url_for('dashboard'))
+
+
+@app.route('/api/strategy-detail/<sid>')
+@login_required
+def api_strategy_detail(sid):
+    uid = current_user_id()
+    # Check in-memory tracked strategies
+    t = all_tracked.get(sid)
+    if t and t['user_id'] == uid:
+        entry = dict(t)
+        if sid in strategies and strategies[sid].get('strategy'):
+            entry['pnl'] = round(strategies[sid]['strategy'].total_pnl, 2)
+        elif sid in active_monitors:
+            mon = active_monitors[sid]['monitor']
+            entry['pnl'] = round(mon.current_pnl, 2)
+            entry['monitor'] = mon.get_status()
+            if not mon.running:
+                entry['status'] = 'completed'
+        return jsonify(**entry)
+    # Fallback: trade_history.json
+    for h in get_history():
+        if h.get('sid') == sid:
+            return jsonify(
+                sid=sid, source='Trade History', name=h.get('params', {}).get('asset', 'BTC') + ' ' + h.get('params', {}).get('expiry_date', ''),
+                status=h.get('status', 'completed'), pnl=h.get('pnl', 0),
+                started_at=h.get('started_at', ''), details=h.get('params', {}),
+                adjustments=h.get('adjustments', 0), ended_at=h.get('ended_at', ''),
+                user_id=uid,
+            )
+    return jsonify(error='Not found'), 404
 
 
 @app.route('/start', methods=['POST'])
@@ -870,6 +910,29 @@ def api_monitor_stop(mid):
         set_thread_credentials(api_key, api_secret, broker)
     entry['monitor'].stop()
     return jsonify(status="stopped")
+
+
+# ── Chart Routes ──
+
+@app.route('/chart')
+@login_required
+def chart_page():
+    return render_template('chart.html', username=session.get('username'))
+
+
+@app.route('/api/chart-data')
+@login_required
+def api_chart_data():
+    from api.chart import get_candles, detect_structure, calc_indicators
+    symbol = request.args.get('symbol', 'NIFTY')
+    interval = request.args.get('interval', '1h')
+    indicators = request.args.get('indicators', '').split(',') if request.args.get('indicators') else []
+    candles = get_candles(symbol, interval)
+    if not candles:
+        return jsonify(error='Failed to fetch data'), 500
+    structure = detect_structure(candles)
+    ind_data = calc_indicators(candles, indicators) if indicators else {}
+    return jsonify(candles=candles, indicators=ind_data, **structure)
 
 
 # ── Strategy Builder Routes ──

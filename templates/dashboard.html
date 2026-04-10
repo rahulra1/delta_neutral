@@ -89,6 +89,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .badge-sell{background:var(--light-red);color:var(--red);padding:2px 10px;border-radius:4px;font-size:.75rem;font-weight:600}
 .badge-running{background:#fef3c7;color:#d97706;padding:2px 10px;border-radius:4px;font-size:.75rem;font-weight:600}
 .pnl-total{text-align:right;padding:12px 10px;font-weight:800;font-size:.9rem}
+.trade-table tr[data-href]{cursor:pointer}
+.trade-table tr[data-href]:hover{background:rgba(99,102,241,.04)}
+.pagination{display:flex;justify-content:space-between;align-items:center;padding:10px 0;font-size:.8rem}
+.pagination .pg-info{color:var(--muted)}
+.pagination .pg-btns{display:flex;gap:4px}
+.pagination .pg-btn{padding:5px 12px;border:1px solid var(--border);border-radius:4px;background:var(--card);cursor:pointer;font-size:.78rem;font-family:inherit}
+.pagination .pg-btn:hover{border-color:var(--accent)}
+.pagination .pg-btn.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.pagination .pg-btn:disabled{opacity:.4;cursor:not-allowed}
 
 /* Quick actions */
 .quick-actions{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:24px}
@@ -115,7 +124,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   <a href="/strategy/new?asset=BTC">Strategies</a>
   <a href="/strategy-builder">Builder</a>
   <a href="/performance">Performance</a>
-  <a href="/profile">Profile</a><a href="/broker">Broker</a>
+  <a href="/chart">Chart</a><a href="/profile">Profile</a><a href="/broker">Broker</a>
   <div class="spacer"></div>
   <div id="creditsBadge" style="background:#fef3c7;color:#92400e;padding:4px 12px;border-radius:4px;font-size:.75rem;font-weight:700;cursor:pointer" onclick="window.location='/profile'" title="Credits remaining"></div>
   <div class="user">
@@ -135,7 +144,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <a href="/strategy/new?asset=ETH"><span class="icon">⟠</span> New ETH Strategy</a>
     <a href="/option-chain"><span class="icon">⛓</span> Option Chain</a>
     <a href="/strategy-builder"><span class="icon">🛠</span> Strategy Builder</a>
-    <a href="/profile"><span class="icon">🔑</span> API Profiles</a>
+    <a href="/chart">Chart</a><a href="/profile"><span class="icon">🔑</span> API Profiles</a>
   </div>
 
   <!-- Top Stats -->
@@ -251,6 +260,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
       <thead><tr><th>ID</th><th>Status</th><th>Expiry</th><th>Lot Size</th><th>Target Δ</th><th>P&L</th><th>Adj.</th><th>Started</th></tr></thead>
       <tbody id="tradeBody"><tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">Loading...</td></tr></tbody>
     </table>
+    <div class="pagination" id="tradePagination" style="display:none">
+      <div class="pg-info" id="tradePageInfo"></div>
+      <div class="pg-btns" id="tradePageBtns"></div>
+    </div>
     <div class="pnl-total" id="pnlTotal"></div>
   </div>
 </div>
@@ -322,30 +335,70 @@ fetch('/api/dashboard').then(r=>r.json()).then(d=>{
   // Trade History
   const trades=d.recent_trades||[];
   const tbody=document.getElementById('tradeBody');
+  window._allTrades=trades;
+  window._tradePage=1;
+  window._tradePerPage=10;
+  renderTradePage();
+});
+
+function renderTradePage(){
+  const trades=window._allTrades||[];
+  const page=window._tradePage||1;
+  const perPage=window._tradePerPage||10;
+  const total=trades.length;
+  const totalPages=Math.ceil(total/perPage)||1;
+  const start=(page-1)*perPage;
+  const slice=trades.slice(start,start+perPage);
+  const tbody=document.getElementById('tradeBody');
+
   if(!trades.length){
     tbody.innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">No trades yet</td></tr>';
-  } else {
-    let runningTotal=0;
-    tbody.innerHTML=trades.map(t=>{
-      const p=t.params||{};
-      const pnl=t.pnl||0;
-      runningTotal+=pnl;
-      const badge=t.status==='running'?'badge-running':pnl>=0?'badge-buy':'badge-sell';
-      const statusLabel=t.status==='running'?'Running':pnl>=0?'Profit':'Loss';
-      return `<tr>
-        <td style="font-weight:600">${t.sid}</td>
-        <td><span class="${badge}">${statusLabel}</span></td>
-        <td>${p.expiry_date||'—'}</td>
-        <td>${p.lot_size||'—'}</td>
-        <td>${p.target_delta||'—'}</td>
-        <td style="font-weight:700;color:${pnl>=0?'var(--green)':'var(--red)'}">$${pnl.toFixed(2)}</td>
-        <td>${t.adjustments||0}</td>
-        <td style="font-size:.75rem;color:var(--muted)">${(t.started_at||'').replace('T',' ').slice(0,16)}</td>
-      </tr>`;
-    }).join('');
-    document.getElementById('pnlTotal').innerHTML=`P&L: <span style="color:${runningTotal>=0?'var(--green)':'var(--red)'}">$${runningTotal.toFixed(2)}</span>`;
+    document.getElementById('tradePagination').style.display='none';
+    return;
   }
-});
+
+  let runningTotal=trades.reduce((s,t)=>s+(t.pnl||0),0);
+  tbody.innerHTML=slice.map(t=>{
+    const p=t.params||{};
+    const pnl=t.pnl||0;
+    const badge=t.status==='running'?'badge-running':pnl>=0?'badge-buy':'badge-sell';
+    const statusLabel=t.status==='running'?'Running':pnl>=0?'Profit':'Loss';
+    return `<tr data-href="/strategy/${t.sid}" onclick="window.location=this.dataset.href" style="cursor:pointer">
+      <td style="font-weight:600;color:var(--accent)">${t.sid}</td>
+      <td><span class="${badge}">${statusLabel}</span></td>
+      <td>${p.expiry_date||'—'}</td>
+      <td>${p.lot_size||'—'}</td>
+      <td>${p.target_delta||'—'}</td>
+      <td style="font-weight:700;color:${pnl>=0?'var(--green)':'var(--red)'}">$${pnl.toFixed(2)}</td>
+      <td>${t.adjustments||0}</td>
+      <td style="font-size:.75rem;color:var(--muted)">${(t.started_at||'').replace('T',' ').slice(0,16)}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('pnlTotal').innerHTML=`Total P&L: <span style="color:${runningTotal>=0?'var(--green)':'var(--red)'}">$${runningTotal.toFixed(2)}</span>`;
+
+  // Pagination
+  const pg=document.getElementById('tradePagination');
+  if(total<=perPage){pg.style.display='none';return}
+  pg.style.display='flex';
+  document.getElementById('tradePageInfo').textContent=`Showing ${start+1}–${Math.min(start+perPage,total)} of ${total}`;
+  let btns='<button class="pg-btn" onclick="goTradePage(1)" '+(page===1?'disabled':'')+'>«</button>';
+  btns+='<button class="pg-btn" onclick="goTradePage('+(page-1)+')" '+(page===1?'disabled':'')+'>‹</button>';
+  const maxBtns=5;
+  let s=Math.max(1,page-Math.floor(maxBtns/2)), e=Math.min(totalPages,s+maxBtns-1);
+  s=Math.max(1,e-maxBtns+1);
+  for(let i=s;i<=e;i++) btns+=`<button class="pg-btn ${i===page?'active':''}" onclick="goTradePage(${i})">${i}</button>`;
+  btns+='<button class="pg-btn" onclick="goTradePage('+(page+1)+')" '+(page===totalPages?'disabled':'')+'>›</button>';
+  btns+='<button class="pg-btn" onclick="goTradePage('+totalPages+')" '+(page===totalPages?'disabled':'')+'>»</button>';
+  document.getElementById('tradePageBtns').innerHTML=btns;
+}
+
+function goTradePage(p){
+  const total=window._allTrades?.length||0;
+  const totalPages=Math.ceil(total/(window._tradePerPage||10))||1;
+  window._tradePage=Math.max(1,Math.min(p,totalPages));
+  renderTradePage();
+}
 
 // Load profiles into position selector
 fetch('/api/profiles').then(r=>r.json()).then(d=>{
@@ -376,8 +429,8 @@ function loadStrategies(){
       const sourceClass=s.source==='AlgoX DN'?'source-dn':'source-oc';
       const statusBadge=isRunning?'<span class="badge badge-green">● '+s.status+'</span>':'<span class="badge" style="background:#f0f0f0;color:var(--muted)">'+s.status+'</span>';
       const closeBtn=isRunning?`<button onclick="event.preventDefault();closeStrategy('${s.sid}')" style="padding:4px 12px;border:1px solid var(--red);background:var(--light-red);color:var(--red);border-radius:6px;font-size:.75rem;font-weight:600;cursor:pointer;margin-top:4px">✕ Close</button>`:'';
-      const link=s.source==='AlgoX DN'?'/strategy/'+s.sid:'#';
-      return `<div class="strat-row" onclick="if('${link}'!=='#')window.location='${link}'" style="cursor:${link!=='#'?'pointer':'default'}">
+      const link='/strategy/'+s.sid;
+      return `<div class="strat-row" onclick="window.location='${link}'" style="cursor:pointer">
         <div class="strat-left">
           <div>
             <span class="source-badge ${sourceClass}">${s.source}</span>

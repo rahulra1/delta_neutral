@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Strategy {{ sid }} — AlgoX</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.detail-container{max-width:900px;margin:0 auto;padding:20px 16px}
+.back-link{font-size:.82rem;color:var(--muted);text-decoration:none;display:inline-flex;align-items:center;gap:4px;margin-bottom:16px}
+.back-link:hover{color:var(--text)}
+.detail-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}
+.detail-header h1{font-size:1.2rem;font-weight:800}
+.detail-header .sid{font-size:.8rem;color:var(--muted);font-weight:400}
+.status-badge{padding:4px 14px;border-radius:6px;font-size:.78rem;font-weight:700}
+.status-running{background:var(--light-green);color:var(--green)}
+.status-completed{background:#f0f0f0;color:var(--muted)}
+.status-paper{background:#fef3c7;color:#d97706}
+.d-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px;margin-bottom:14px}
+.d-card h2{font-size:.88rem;font-weight:700;margin-bottom:12px}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
+.stat-item{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center}
+.stat-item .lbl{font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.4px}
+.stat-item .val{font-size:1.1rem;font-weight:800;margin-top:2px}
+.legs-table{width:100%;border-collapse:collapse;font-size:.82rem;margin-top:8px}
+.legs-table th{text-align:left;padding:6px 8px;color:var(--muted);font-size:.7rem;text-transform:uppercase;border-bottom:1px solid var(--border)}
+.legs-table td{padding:6px 8px;border-bottom:1px solid var(--border)}
+.kv-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 20px;font-size:.82rem}
+.kv-grid .k{color:var(--muted)}.kv-grid .v{font-weight:600}
+.log-box{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;max-height:300px;overflow-y:auto;font-size:.78rem;font-family:'SF Mono','Fira Code',monospace;line-height:1.7}
+.btn-close{background:var(--red);color:#fff;border:none;padding:8px 20px;border-radius:6px;font-weight:700;cursor:pointer;font-family:inherit;font-size:.85rem}
+.btn-close:hover{opacity:.9}
+</style>
+</head>
+<body>
+<div class="nav">
+  <div class="logo">⚡ AlgoX</div>
+  <a href="/">Dashboard</a>
+  <a href="/option-chain">Option Chain</a>
+  <a href="/strategy-builder">Builder</a>
+  <a href="/profile">Profile</a>
+  <div class="spacer"></div>
+  <div class="user"><div class="avatar">{{ username[0]|upper }}</div><span>{{ username }}</span><a href="/logout" style="border:none;padding:0;font-size:.75rem">Logout</a></div>
+</div>
+
+<div class="detail-container">
+  <a href="/" class="back-link">← Back to Dashboard</a>
+  <div class="detail-header">
+    <h1 id="stratName">Strategy <span class="sid">{{ sid }}</span></h1>
+    <span class="status-badge" id="statusBadge">Loading...</span>
+  </div>
+
+  <!-- Stats -->
+  <div class="d-card">
+    <div class="stat-grid" id="statsGrid"></div>
+  </div>
+
+  <!-- Legs -->
+  <div class="d-card" id="legsCard" style="display:none">
+    <h2>📋 Legs</h2>
+    <table class="legs-table">
+      <thead><tr><th>Side</th><th>Type</th><th>Strike</th><th>Symbol</th><th>Size</th><th>Entry</th></tr></thead>
+      <tbody id="legsBody"></tbody>
+    </table>
+  </div>
+
+  <!-- Details -->
+  <div class="d-card">
+    <h2>⚙️ Configuration</h2>
+    <div class="kv-grid" id="configGrid"></div>
+  </div>
+
+  <!-- Monitor Logs -->
+  <div class="d-card" id="monitorCard" style="display:none">
+    <h2>📡 Monitor Logs</h2>
+    <div class="log-box" id="logBox"></div>
+  </div>
+
+  <!-- Actions -->
+  <div class="d-card" id="actionsCard" style="display:none">
+    <button class="btn-close" onclick="closeStrat()">✕ Close Strategy</button>
+  </div>
+</div>
+
+<script>
+const SID='{{ sid }}';
+function load(){
+  fetch('/api/strategy-detail/'+SID).then(r=>r.json()).then(d=>{
+    if(d.error){document.getElementById('statsGrid').innerHTML='<div style="color:var(--muted)">'+d.error+'</div>';return}
+
+    // Header
+    document.getElementById('stratName').innerHTML=d.name+' <span class="sid">#'+d.sid+'</span>';
+    const isRunning=d.status==='running'||d.status==='open (no monitor)';
+    const badge=document.getElementById('statusBadge');
+    badge.textContent=d.status;
+    badge.className='status-badge '+(isRunning?'status-running':d.status==='paper'?'status-paper':'status-completed');
+
+    // Stats
+    const pnlColor=(d.pnl||0)>=0?'var(--green)':'var(--red)';
+    document.getElementById('statsGrid').innerHTML=`
+      <div class="stat-item"><div class="lbl">Source</div><div class="val">${d.source}</div></div>
+      <div class="stat-item"><div class="lbl">P&L</div><div class="val" style="color:${pnlColor}">$${(d.pnl||0).toFixed(2)}</div></div>
+      <div class="stat-item"><div class="lbl">Status</div><div class="val">${d.status}</div></div>
+      <div class="stat-item"><div class="lbl">Started</div><div class="val" style="font-size:.78rem">${(d.started_at||'').replace('T',' ').slice(0,16)}</div></div>`;
+
+    // Legs
+    const details=d.details||{};
+    const legs=details.legs||d.monitor?.legs||[];
+    if(legs.length){
+      document.getElementById('legsCard').style.display='';
+      document.getElementById('legsBody').innerHTML=legs.map(l=>{
+        const ep=l.entry_price||l.mark||0;
+        return `<tr>
+        <td style="color:${l.side==='sell'?'var(--red)':'var(--green)'};font-weight:700">${(l.side||'').toUpperCase()}</td>
+        <td>${l.type||''}</td>
+        <td>${l.strike||''}</td>
+        <td style="font-size:.75rem">${l.symbol||''}</td>
+        <td>${l.size||''}</td>
+        <td>$${typeof ep==='number'?ep.toFixed(2):'—'}</td>
+      </tr>`}).join('');
+    }
+
+    // Config
+    const skip=new Set(['legs','nse_data','profile_id']);
+    const flat=Object.entries(details).filter(([k])=>!skip.has(k)&&typeof details[k]!=='object');
+    const nested=Object.entries(details).filter(([k,v])=>typeof v==='object'&&!skip.has(k)&&!Array.isArray(v));
+    let kvHtml=flat.map(([k,v])=>`<span class="k">${k.replace(/_/g,' ')}</span><span class="v">${v}</span>`).join('');
+    nested.forEach(([section,obj])=>{
+      Object.entries(obj).forEach(([k,v])=>{
+        kvHtml+=`<span class="k">${section}.${k.replace(/_/g,' ')}</span><span class="v">${v}</span>`;
+      });
+    });
+    document.getElementById('configGrid').innerHTML=kvHtml||'<span class="k">No config</span><span class="v">—</span>';
+
+    // Monitor logs
+    if(d.monitor&&d.monitor.logs&&d.monitor.logs.length){
+      document.getElementById('monitorCard').style.display='';
+      document.getElementById('logBox').innerHTML=d.monitor.logs.map(l=>'<div>'+l+'</div>').join('');
+      document.getElementById('logBox').scrollTop=99999;
+    }
+
+    // Actions
+    if(isRunning) document.getElementById('actionsCard').style.display='';
+  });
+}
+
+function closeStrat(){
+  if(!confirm('Close this strategy and all positions?'))return;
+  fetch('/api/strategies/'+SID+'/close',{method:'POST'}).then(r=>r.json()).then(()=>load());
+}
+
+load();
+setInterval(load,8000);
+</script>
+</body>
+</html>
