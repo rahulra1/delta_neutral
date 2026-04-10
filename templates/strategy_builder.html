@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Strategy Builder — Delta Neutral Bot</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/strategy_builder.css">
+</head>
+<body>
+
+<div class="nav">
+  <div class="logo">⚡ Delta Neutral</div>
+  <a href="/">Dashboard</a>
+  <a href="/option-chain">Option Chain</a>
+  <a href="/strategy/new?asset=BTC">Strategies</a>
+  <a href="/strategy-builder" class="active">Builder</a>
+  <a href="/performance">Performance</a>
+  <a href="/profile">Profile</a>
+  <a href="/broker">Broker</a>
+  <div class="spacer"></div>
+  <div class="user">
+    <div class="avatar">{{ username[0]|upper }}</div>
+    <span>{{ username }}</span>
+    <a href="/logout" style="border:none;padding:0;font-size:.75rem">Logout</a>
+  </div>
+</div>
+
+<div class="sb-container">
+  <!-- Header -->
+  <div class="sb-header">
+    <div>
+      <h1>🛠 Strategy Builder</h1>
+      <p class="sb-subtitle">Build, test and deploy automated options strategies</p>
+    </div>
+    <div class="sb-actions">
+      <button class="btn btn-outline" onclick="saveStrategy()">💾 Save</button>
+      <button class="btn" style="background:#f59e0b;color:#fff" onclick="paperTrade()">📝 Paper Trade</button>
+      <button class="btn btn-green" onclick="deployStrategy()">🚀 Deploy Live</button>
+    </div>
+  </div>
+
+  <div class="sb-grid">
+    <!-- LEFT COLUMN -->
+    <div class="sb-left">
+
+      <!-- Basic Info -->
+      <div class="sb-card">
+        <div class="sb-card-title">📋 Basic Info</div>
+        <div class="sb-row">
+          <div class="sb-field">
+            <label>Strategy Name</label>
+            <input id="sb_name" placeholder="My Strategy" value="Untitled Strategy">
+          </div>
+          <div class="sb-field">
+            <label>Underlying</label>
+            <select id="sb_underlying">
+              <option value="NIFTY">NIFTY</option>
+              <option value="BANKNIFTY">BANKNIFTY</option>
+              <option value="FINNIFTY">FINNIFTY</option>
+              <option value="MIDCPNIFTY">MIDCPNIFTY</option>
+              <option value="SENSEX">SENSEX</option>
+              <option value="BANKEX">BANKEX</option>
+              <option value="BTC" selected>BTC</option>
+              <option value="ETH">ETH</option>
+            </select>
+          </div>
+          <div class="sb-field">
+            <label>Expiry</label>
+            <select id="sb_expiry"><option value="">Loading…</option></select>
+          </div>
+          <div class="sb-field">
+            <label>API Profile</label>
+            <select id="sb_profile"><option value="">Default Keys</option></select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Legs Builder -->
+      <div class="sb-card">
+        <div class="sb-card-header">
+          <div class="sb-card-title">🦵 Position Legs</div>
+          <button class="btn-sm btn-add" onclick="addLeg()">+ Add Leg</button>
+        </div>
+        <div class="sb-presets">
+          <span onclick="loadPreset('straddle')">Short Straddle</span>
+          <span onclick="loadPreset('strangle')">Short Strangle</span>
+          <span onclick="loadPreset('iron_condor')">Iron Condor</span>
+          <span onclick="loadPreset('iron_fly')">Iron Butterfly</span>
+          <span onclick="loadPreset('bull_spread')">Bull Call Spread</span>
+          <span onclick="loadPreset('bear_spread')">Bear Put Spread</span>
+        </div>
+        <div id="legs_container"></div>
+        <div class="sb-leg-summary" id="leg_summary" style="display:none">
+          <div><span class="k">Total Legs:</span> <span id="sum_legs">0</span></div>
+          <div><span class="k">Net Premium:</span> <span id="sum_premium">—</span></div>
+          <div><span class="k">Max Profit:</span> <span id="sum_profit" class="val-green">—</span></div>
+          <div><span class="k">Max Loss:</span> <span id="sum_loss" class="val-red">—</span></div>
+        </div>
+      </div>
+
+      <!-- Live Market Data -->
+      <div class="sb-card" id="live_data_card" style="display:none">
+        <div class="sb-card-header">
+          <div class="sb-card-title">📡 Live Market Data</div>
+          <span class="live-dot" id="live_dot">●</span>
+        </div>
+        <div class="sb-spot-bar">
+          <span>Spot: <strong id="live_spot">—</strong></span>
+          <span>Expiry: <strong id="live_expiry_label">—</strong></span>
+        </div>
+        <table class="modal-table" id="live_legs_table">
+          <thead><tr><th>Leg</th><th>Strike</th><th>LTP</th><th>IV</th><th>Δ</th><th>Θ</th></tr></thead>
+          <tbody id="live_legs_body"></tbody>
+        </table>
+        <div class="sb-leg-summary" id="live_premium_bar" style="margin-top:10px">
+          <div><span class="k">Net Premium:</span> <strong id="live_net_prem">—</strong></div>
+          <div><span class="k">Max Profit:</span> <strong id="live_max_profit" class="val-green">—</strong></div>
+          <div><span class="k">Max Loss:</span> <strong id="live_max_loss" class="val-red">—</strong></div>
+        </div>
+      </div>
+
+      <!-- Payoff Chart -->
+      <div class="sb-card" id="payoff_card" style="display:none">
+        <div class="sb-card-title">📈 Payoff at Expiry</div>
+        <canvas id="payoff_canvas" height="200"></canvas>
+      </div>
+
+      <!-- Entry Conditions -->
+      <div class="sb-card">
+        <div class="sb-card-header">
+          <div class="sb-card-title">🟢 Entry Conditions</div>
+          <button class="btn-sm btn-add" onclick="addCondition('entry')">+ Add Condition</button>
+        </div>
+        <div class="sb-condition-group" id="entry_conditions">
+          <!-- Default: time-based entry -->
+          <div class="sb-condition" data-id="entry_0">
+            <div class="sb-cond-row">
+              <select class="cond-type" onchange="updateConditionUI(this)">
+                <option value="time" selected>⏰ Time Based</option>
+                <option value="indicator">📊 Indicator Based</option>
+                <option value="price">💰 Price Based</option>
+                <option value="pnl">📈 P&L Based</option>
+                <option value="premium">🏷 Premium Based</option>
+              </select>
+              <div class="cond-params">
+                <label>Entry Time</label>
+                <input type="time" value="09:20" class="cond-val">
+              </div>
+              <button class="btn-remove" onclick="removeCondition(this)">✕</button>
+            </div>
+          </div>
+        </div>
+        <div class="sb-logic-note">All conditions must be TRUE (AND logic) for entry to trigger</div>
+      </div>
+
+      <!-- Exit Conditions -->
+      <div class="sb-card">
+        <div class="sb-card-header">
+          <div class="sb-card-title">🔴 Exit Conditions</div>
+          <button class="btn-sm btn-add" onclick="addCondition('exit')">+ Add Condition</button>
+        </div>
+        <div class="sb-condition-group" id="exit_conditions">
+          <div class="sb-condition" data-id="exit_0">
+            <div class="sb-cond-row">
+              <select class="cond-type" onchange="updateConditionUI(this)">
+                <option value="time" selected>⏰ Time Based</option>
+                <option value="indicator">📊 Indicator Based</option>
+                <option value="price">💰 Price Based</option>
+                <option value="pnl">📈 P&L Based</option>
+                <option value="premium">🏷 Premium Based</option>
+              </select>
+              <div class="cond-params">
+                <label>Exit Time</label>
+                <input type="time" value="15:15" class="cond-val">
+              </div>
+              <button class="btn-remove" onclick="removeCondition(this)">✕</button>
+            </div>
+          </div>
+        </div>
+        <div class="sb-logic-note">ANY condition being TRUE (OR logic) will trigger exit</div>
+      </div>
+
+    </div>
+
+    <!-- RIGHT COLUMN -->
+    <div class="sb-right">
+
+      <!-- Risk Management -->
+      <div class="sb-card">
+        <div class="sb-card-title">🛡 Risk Management</div>
+        <div class="sb-field">
+          <label>Overall Stop Loss (%)</label>
+          <input id="sb_sl" type="number" value="30" min="0" step="1">
+          <span class="hint">% of premium collected</span>
+        </div>
+        <div class="sb-field">
+          <label>Overall Target (%)</label>
+          <input id="sb_target" type="number" value="50" min="0" step="1">
+          <span class="hint">% of premium collected</span>
+        </div>
+        <div class="sb-field">
+          <label>Per-Leg Stop Loss (%)</label>
+          <input id="sb_leg_sl" type="number" value="0" min="0" step="1">
+          <span class="hint">0 = disabled</span>
+        </div>
+        <div class="sb-field">
+          <label>Trailing SL (%)</label>
+          <input id="sb_trail" type="number" value="0" min="0" step="1">
+          <span class="hint">0 = disabled. Lock profits after X% gain</span>
+        </div>
+        <div class="sb-field">
+          <label>Max Loss (absolute $)</label>
+          <input id="sb_max_loss" type="number" value="0" min="0" step="1">
+          <span class="hint">0 = no absolute cap</span>
+        </div>
+        <div class="sb-field">
+          <label>Re-entry on SL</label>
+          <select id="sb_reentry">
+            <option value="none">No Re-entry</option>
+            <option value="once">Re-enter Once</option>
+            <option value="unlimited">Unlimited Re-entry</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Execution Settings -->
+      <div class="sb-card">
+        <div class="sb-card-title">⚙️ Execution</div>
+        <div class="sb-field">
+          <label>Order Type</label>
+          <select id="sb_order_type">
+            <option value="market">Market</option>
+            <option value="limit">Limit</option>
+          </select>
+        </div>
+        <div class="sb-field">
+          <label>Product Type</label>
+          <select id="sb_product">
+            <option value="intraday">Intraday (MIS)</option>
+            <option value="overnight" selected>Overnight (NRML)</option>
+          </select>
+        </div>
+        <div class="sb-field">
+          <label>Lots per Leg</label>
+          <input id="sb_lots" type="number" value="1" min="1">
+        </div>
+        <div class="sb-field">
+          <label>Square Off Time</label>
+          <input id="sb_sqoff" type="time" value="15:15">
+        </div>
+        <div class="sb-field">
+          <label>Days to Run</label>
+          <select id="sb_days">
+            <option value="all">All Days</option>
+            <option value="mon">Monday</option>
+            <option value="tue">Tuesday</option>
+            <option value="wed">Wednesday</option>
+            <option value="thu">Thursday</option>
+            <option value="fri">Friday</option>
+            <option value="expiry">Expiry Day Only</option>
+            <option value="non_expiry">Non-Expiry Days</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Adjustment Rules -->
+      <div class="sb-card">
+        <div class="sb-card-title">🔄 Adjustments</div>
+        <div class="sb-field">
+          <label>Adjustment Trigger</label>
+          <select id="sb_adj_trigger">
+            <option value="none">No Adjustment</option>
+            <option value="premium_pct">Premium % Increase</option>
+            <option value="delta_breach">Delta Breach</option>
+            <option value="mtm_loss">MTM Loss</option>
+          </select>
+        </div>
+        <div class="sb-field">
+          <label>Trigger Value</label>
+          <input id="sb_adj_value" type="number" value="40" min="0">
+          <span class="hint">% or absolute based on trigger type</span>
+        </div>
+        <div class="sb-field">
+          <label>Adjustment Action</label>
+          <select id="sb_adj_action">
+            <option value="shift">Shift to current ATM</option>
+            <option value="close_opposite">Close opposite leg & re-enter</option>
+            <option value="add_hedge">Add hedge</option>
+            <option value="exit_all">Exit all positions</option>
+          </select>
+        </div>
+        <div class="sb-field">
+          <label>Max Adjustments</label>
+          <input id="sb_max_adj" type="number" value="3" min="0">
+        </div>
+      </div>
+
+      <!-- Strategy Summary -->
+      <div class="sb-card sb-summary-card">
+        <div class="sb-card-title">📊 Strategy Summary</div>
+        <div id="sb_summary">
+          <div class="sum-row"><span class="k">Type</span><span class="v" id="sum_type">—</span></div>
+          <div class="sum-row"><span class="k">Underlying</span><span class="v" id="sum_under">—</span></div>
+          <div class="sum-row"><span class="k">Legs</span><span class="v" id="sum_leg_count">0</span></div>
+          <div class="sum-row"><span class="k">Entry</span><span class="v" id="sum_entry">—</span></div>
+          <div class="sum-row"><span class="k">Exit</span><span class="v" id="sum_exit">—</span></div>
+          <div class="sum-row"><span class="k">SL / Target</span><span class="v" id="sum_sl_tgt">—</span></div>
+          <div class="sum-row"><span class="k">Status</span><span class="v"><span class="badge badge-yellow">Draft</span></span></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- Deploy Confirmation Modal -->
+<div class="modal-overlay" id="deployModal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2>🚀 Deploy Strategy</h2>
+      <button class="btn-remove" onclick="closeDeployModal()">✕</button>
+    </div>
+    <div class="modal-body" id="deployModalBody"></div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeDeployModal()">Cancel</button>
+      <button class="btn btn-green" id="deployRunBtn" onclick="confirmDeploy()">▶ Run Strategy</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/strategy_builder.js"></script>
+</body>
+</html>

@@ -645,23 +645,32 @@ def option_chain_page():
     return render_template('option_chain.html', username=session.get('username'))
 
 
+DELTA_ASSETS = {'BTC', 'ETH'}
+
 @app.route('/api/expiries')
 @login_required
 def api_expiries():
-    from api.chain import get_expiries
     asset = request.args.get('asset', 'BTC')
-    return jsonify(expiries=get_expiries(asset))
+    if asset in DELTA_ASSETS:
+        from api.chain import get_expiries
+        return jsonify(expiries=get_expiries(asset))
+    from api.nse import get_nse_expiries
+    return jsonify(expiries=get_nse_expiries(asset))
 
 
 @app.route('/api/chain')
 @login_required
 def api_chain():
-    from api.chain import get_option_chain_full
     asset = request.args.get('asset', 'BTC')
     expiry = request.args.get('expiry', '')
     if not expiry:
         return jsonify(error="expiry required"), 400
-    chain, spot, exp = get_option_chain_full(expiry, asset)
+    if asset in DELTA_ASSETS:
+        from api.chain import get_option_chain_full
+        chain, spot, exp = get_option_chain_full(expiry, asset)
+    else:
+        from api.nse import get_nse_chain
+        chain, spot, exp = get_nse_chain(asset, expiry)
     if chain is None:
         return jsonify(error="Failed to fetch chain"), 500
     return jsonify(chain=chain, spot_price=spot, expiry=exp)
@@ -845,11 +854,104 @@ def api_save_strategy_builder():
 @app.route('/api/strategy-builder/deploy', methods=['POST'])
 @login_required
 def api_deploy_strategy_builder():
+    from api.chain import get_option_chain_full, get_expiries
+    from api.orders import place_order
+    from config import set_thread_credentials
+    from strategy.monitor import StrategyMonitor
+
     data = request.json
+    api_key, api_secret, pname, broker = get_profile_creds(data.get('profile_id'))
+    if not api_key:
+        return jsonify(error="No API profile selected or keys not configured"), 400
+    set_thread_credentials(api_key, api_secret, broker)
+
+    asset = data.get('underlying', 'BTC')
+    legs_cfg = data.get('legs', [])
+    if not legs_cfg:
+        return jsonify(error="No legs defined"), 400
+
+    # Resolve expiry
+    expiry_key = data.get('expiry', 'current_week')
+    expiries = get_expiries(asset)
+    if not expiries:
+        return jsonify(error="Could not fetch expiries"), 500
+    expiry_map = {'current_week': 0, 'next_week': 1, 'current_month': 0, 'next_month': 1}
+    expiry = expiries[min(expiry_map.get(expiry_key, 0), len(expiries) - 1)] if expiry_key != 'custom' else expiries[0]
+
+    # Fetch chain
+    chain, spot, _ = get_option_chain_full(expiry, asset)
+    if not chain or not spot:
+        return jsonify(error="Failed to fetch option chain"), 500
+
+    # Build sorted strike list and find ATM index
+    strikes = [float(row['strike']) for row in chain]
+    atm_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - spot))
+
+    # Resolve each leg to a real option
+    import re
+    results = []
+    placed_legs = []
+    lots_per_leg = int(data.get('execution', {}).get('lots', 1))
+    for leg in legs_cfg:
+        opt_type = 'call' if leg['type'] == 'CE' else 'put'
+        strike_key = leg.get('strike', 'ATM')
+        m = re.match(r'(ATM|OTM|ITM)(\d*)', strike_key)
+        offset = 0
+        if m:
+            offset = int(m.group(2)) if m.group(2) else 0
+            if m.group(1) == 'OTM':
+                offset = offset if opt_type == 'call' else -offset
+            elif m.group(1) == 'ITM':
+                offset = -offset if opt_type == 'call' else offset
+        idx = max(0, min(atm_idx + offset, len(chain) - 1))
+        opt = chain[idx].get(opt_type)
+        if not opt or not opt.get('product_id'):
+            results.append({'strike': strike_key, 'type': leg['type'], 'success': False, 'error': 'No option found'})
+            continue
+
+        size = int(leg.get('lots', 1)) * lots_per_leg
+        order = place_order(opt['product_id'], opt['symbol'], size, leg['side'])
+        ok = order is not None
+        results.append({'symbol': opt['symbol'], 'side': leg['side'], 'size': size, 'success': ok})
+        if ok:
+            placed_legs.append({
+                'product_id': opt['product_id'], 'symbol': opt['symbol'],
+                'type': leg['type'], 'strike': opt['strike'],
+                'side': leg['side'], 'size': size,
+                'entry_price': float(opt.get('mark_price', 0)),
+            })
+
+    if not placed_legs:
+        return jsonify(error="All orders failed", results=results), 500
+
     sid = str(uuid.uuid4())[:8]
     track_strategy(sid, 'Strategy Builder', data.get('name', 'Unnamed'), current_user_id(), details=data)
-    update_tracked(sid, status='running')
-    return jsonify(status='deployed', sid=sid)
+
+    # Start monitor if risk targets are set
+    risk = data.get('risk', {})
+    sl_pct = float(risk.get('sl_pct', 0))
+    tgt_pct = float(risk.get('target_pct', 0))
+    total_premium = sum(l['entry_price'] * l['size'] for l in placed_legs if l['side'] == 'sell')
+    lot_sizes = {'BTC': 0.001, 'ETH': 0.01}
+    lot_size = lot_sizes.get(asset, 0.001)
+    max_profit = total_premium * lot_size * tgt_pct / 100 if tgt_pct else 0
+    max_loss = total_premium * lot_size * sl_pct / 100 if sl_pct else 0
+
+    monitor_id = None
+    if max_profit > 0 and max_loss > 0:
+        mon = StrategyMonitor(
+            legs=placed_legs, max_profit=max_profit, max_loss=max_loss,
+            asset=asset, lot_size=lot_size,
+        )
+        monitor_id = sid
+        active_monitors[monitor_id] = {'monitor': mon, 'user_id': current_user_id(), 'profile_id': data.get('profile_id')}
+        mon.on_complete = lambda pnl, reason: update_tracked(sid, status='completed', pnl=round(pnl, 2))
+        mon.start()
+        update_tracked(sid, status='running')
+    else:
+        update_tracked(sid, status='open (no monitor)')
+
+    return jsonify(status='deployed', sid=sid, results=results, monitor_id=monitor_id)
 
 
 @app.route('/api/strategy-builder/paper-trade', methods=['POST'])

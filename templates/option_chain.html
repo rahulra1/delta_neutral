@@ -96,6 +96,7 @@ td.selected-sell{outline:1px solid var(--red);outline-offset:-1px;background:rgb
   <a href="/">Dashboard</a>
   <a href="/option-chain" class="active">Option Chain</a>
   <a href="/strategy/new?asset=BTC">Strategies</a>
+  <a href="/strategy-builder">Builder</a>
   <a href="/performance">Performance</a>
   <a href="/profile">Profile</a><a href="/broker">Broker</a>
   <div class="spacer"></div>
@@ -104,7 +105,7 @@ td.selected-sell{outline:1px solid var(--red);outline-offset:-1px;background:rgb
 <div class="container">
   <div class="controls">
     <h1 style="margin-right:12px">Options Chain</h1>
-    <select id="asset"><option value="BTC">BTC</option><option value="ETH">ETH</option></select>
+    <select id="asset"><option value="BTC">BTC</option><option value="ETH">ETH</option><option value="NIFTY">NIFTY</option><option value="BANKNIFTY">BANKNIFTY</option><option value="FINNIFTY">FINNIFTY</option><option value="MIDCPNIFTY">MIDCPNIFTY</option><option value="SENSEX">SENSEX</option><option value="BANKEX">BANKEX</option></select>
     <div class="spot-badge" id="spotBadge">Spot: —</div>
     <div style="background:var(--card);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-size:10px;color:var(--muted)" id="lotBadge">1 Lot = 0.001 BTC</div>
     <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
@@ -160,9 +161,13 @@ td.selected-sell{outline:1px solid var(--red);outline-offset:-1px;background:rgb
 
 <script>
 let chainData=[], spotPrice=0, legs=[], maxOI=1, payoffChart=null, selectedExpiry='';
-const LOT_SIZE = {BTC: 0.001, ETH: 0.01};
+const LOT_SIZE = {BTC: 0.001, ETH: 0.01, NIFTY: 75, BANKNIFTY: 30, FINNIFTY: 40, MIDCPNIFTY: 75, SENSEX: 20, BANKEX: 30};
+const CRYPTO = new Set(['BTC','ETH']);
 function getAsset(){ return document.getElementById('asset').value }
-function getLotSize(){ return LOT_SIZE[getAsset()] || 0.001 }
+function getLotSize(){ return LOT_SIZE[getAsset()] || 1 }
+function isCrypto(){ return CRYPTO.has(getAsset()) }
+function cur(v){ return (isCrypto()?'$':'₹')+(typeof v==='number'?v.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):'—') }
+function sym(){ return isCrypto()?'$':'₹' }
 function f2(v){ return (typeof v==='number' && !isNaN(v)) ? v.toFixed(2) : '—' }
 function f4(v){ return (typeof v==='number' && !isNaN(v)) ? v.toFixed(4) : '—' }
 
@@ -182,8 +187,8 @@ function loadProfiles(){
 function getProfileId(){ return document.getElementById('profileSelect').value || '' }
 
 function loadExpiries(){
-  const asset=getAsset();
-  document.getElementById('lotBadge').textContent='1 Lot = '+getLotSize()+' '+asset;
+  const asset=getAsset(), ls=getLotSize();
+  document.getElementById('lotBadge').textContent=isCrypto()?'1 Lot = '+ls+' '+asset:'Lot Size = '+ls;
   fetch('/api/expiries?asset='+asset).then(r=>r.json()).then(d=>{
     const tabs=document.getElementById('expiryTabs');
     tabs.innerHTML='';
@@ -210,7 +215,7 @@ function loadChain(){
   fetch(`/api/chain?asset=${asset}&expiry=${expiry}`).then(r=>r.json()).then(d=>{
     if(d.error){showToast(d.error,true);return}
     chainData=d.chain||[];spotPrice=d.spot_price||0;
-    document.getElementById('spotBadge').textContent='Spot: $'+(spotPrice?spotPrice.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):'—');
+    document.getElementById('spotBadge').textContent='Spot: '+cur(spotPrice);
     maxOI=1;
     chainData.forEach(r=>{if(r.call)maxOI=Math.max(maxOI,parseFloat(r.call.oi)||0);if(r.put)maxOI=Math.max(maxOI,parseFloat(r.put.oi)||0)});
     renderChain();
@@ -241,23 +246,25 @@ function renderChain(){
     const s=parseFloat(row.strike), c=row.call||{}, p=row.put||{};
     const cITM=spotPrice&&s<spotPrice, pITM=spotPrice&&s>spotPrice;
     const sel=(type,strike)=>`data-type="${type}" data-strike="${strike}" onclick="addLeg(this,'buy')" oncontextmenu="addLeg(this,'sell');return false"`;
-    const ls=getLotSize();
-    const cOI=Math.round((parseFloat(c.oi)||0)/ls), pOI=Math.round((parseFloat(p.oi)||0)/ls);
-    const cVol=Math.round((c.volume||0)/ls), pVol=Math.round((p.volume||0)/ls);
+    const ls=getLotSize(), crypto=isCrypto();
+    const cOI=crypto?Math.round((parseFloat(c.oi)||0)/ls):Math.round(parseFloat(c.oi)||0);
+    const pOI=crypto?Math.round((parseFloat(p.oi)||0)/ls):Math.round(parseFloat(p.oi)||0);
+    const cVol=crypto?Math.round((c.volume||0)/ls):Math.round(c.volume||0);
+    const pVol=crypto?Math.round((p.volume||0)/ls):Math.round(p.volume||0);
     html+=`<tr>
       <td class="call-side ${cITM?'itm':''}">${oiBar(c.oi,'call')}${fmtLots(cOI)}</td>
       <td class="call-side ${cITM?'itm':''}">${fmtLots(cVol)}</td>
-      <td class="call-side ${cITM?'itm':''} iv">${c.iv?c.iv.toFixed(1)+'%':'—'}</td>
+      <td class="call-side ${cITM?'itm':''} iv">${c.iv?(c.iv*100).toFixed(1)+'%':'—'}</td>
       <td class="call-side ${cITM?'itm':''} delta">${c.delta?c.delta.toFixed(4):'—'}</td>
-      <td class="call-side ${cITM?'itm':''} selectable" ${sel('call',row.strike)}>${c.bid?c.bid.toFixed(2):'—'}</td>
-      <td class="call-side ${cITM?'itm':''} selectable" ${sel('call',row.strike)}>${c.ask?c.ask.toFixed(2):'—'}</td>
-      <td class="call-side ${cITM?'itm':''} selectable" ${sel('call',row.strike)} style="font-weight:700;color:var(--green)">${c.mark_price?c.mark_price.toFixed(2):'—'}</td>
+      <td class="call-side ${cITM?'itm':''} selectable" ${sel('call',row.strike)}>${c.bid?f2(c.bid):'—'}</td>
+      <td class="call-side ${cITM?'itm':''} selectable" ${sel('call',row.strike)}>${c.ask?f2(c.ask):'—'}</td>
+      <td class="call-side ${cITM?'itm':''} selectable" ${sel('call',row.strike)} style="font-weight:700;color:var(--green)">${c.mark_price?f2(c.mark_price):'—'}</td>
       <td class="strike-col">${Number(row.strike).toLocaleString()}</td>
-      <td class="put-side ${pITM?'itm':''} selectable" ${sel('put',row.strike)} style="font-weight:700;color:var(--red)">${p.mark_price?p.mark_price.toFixed(2):'—'}</td>
-      <td class="put-side ${pITM?'itm':''} selectable" ${sel('put',row.strike)}>${p.bid?p.bid.toFixed(2):'—'}</td>
-      <td class="put-side ${pITM?'itm':''} selectable" ${sel('put',row.strike)}>${p.ask?p.ask.toFixed(2):'—'}</td>
+      <td class="put-side ${pITM?'itm':''} selectable" ${sel('put',row.strike)} style="font-weight:700;color:var(--red)">${p.mark_price?f2(p.mark_price):'—'}</td>
+      <td class="put-side ${pITM?'itm':''} selectable" ${sel('put',row.strike)}>${p.bid?f2(p.bid):'—'}</td>
+      <td class="put-side ${pITM?'itm':''} selectable" ${sel('put',row.strike)}>${p.ask?f2(p.ask):'—'}</td>
       <td class="put-side ${pITM?'itm':''} delta">${p.delta?p.delta.toFixed(4):'—'}</td>
-      <td class="put-side ${pITM?'itm':''} iv">${p.iv?p.iv.toFixed(1)+'%':'—'}</td>
+      <td class="put-side ${pITM?'itm':''} iv">${p.iv?(p.iv*100).toFixed(1)+'%':'—'}</td>
       <td class="put-side ${pITM?'itm':''}">${fmtLots(pVol)}</td>
       <td class="put-side ${pITM?'itm':''}">${oiBar(p.oi,'put')}${fmtLots(pOI)}</td>
     </tr>`;
@@ -313,10 +320,11 @@ function renderLegs(){
     <td>${Number(l.strike).toLocaleString()}</td>
     <td style="font-size:11px">${l.symbol}</td>
     <td class="delta">${l.delta.toFixed(2)}</td>
-    <td>$${l.mark.toFixed(2)}</td>
-    <td class="iv">${l.iv?l.iv.toFixed(2)+'%':'—'}</td>
+    <td>${sym()}${l.mark.toFixed(2)}</td>
+    <td class="iv">${l.iv?(l.iv*100).toFixed(1)+'%':'—'}</td>
     <td><input type="number" value="${l.size}" min="1" onchange="legs[${i}].size=+this.value;renderLegs()"></td>
-    <td style="color:${l.side==='sell'?'var(--green)':'var(--red)'}">$${lotVal}</td>
+    <td style="color:${l.side==='sell'?'var(--green)':'var(--red)'}">
+${sym()}${lotVal}</td>
     <td class="remove" onclick="removeLeg(${i})">✕</td>
   </tr>`}).join('');
   updateSummary();
@@ -352,10 +360,10 @@ function updateSummary(){
   const color=netCredit>=0?'var(--green)':'var(--red)';
   const asset=getAsset();
   document.getElementById('summaryRow').innerHTML=`
-    <div class="item"><div class="lbl">${label}</div><div class="val" style="color:${color}">$${Math.abs(netCredit).toFixed(2)}</div></div>
-    <div class="item"><div class="lbl">Max Profit</div><div class="val" style="color:var(--green)">${maxPnl>=1e6?'∞':'$'+maxPnl.toFixed(2)}</div></div>
-    <div class="item"><div class="lbl">Max Loss</div><div class="val" style="color:var(--red)">${Math.abs(minPnl)>=1e6?'∞':'$'+minPnl.toFixed(2)}</div></div>
-    <div class="item"><div class="lbl">Est. Margin</div><div class="val">$${marginReq.toFixed(2)}</div></div>
+    <div class="item"><div class="lbl">${label}</div><div class="val" style="color:${color}">${sym()}${Math.abs(netCredit).toFixed(2)}</div></div>
+    <div class="item"><div class="lbl">Max Profit</div><div class="val" style="color:var(--green)">${maxPnl>=1e6?'∞':sym()+maxPnl.toFixed(2)}</div></div>
+    <div class="item"><div class="lbl">Max Loss</div><div class="val" style="color:var(--red)">${Math.abs(minPnl)>=1e6?'∞':sym()+minPnl.toFixed(2)}</div></div>
+    <div class="item"><div class="lbl">Est. Margin</div><div class="val">${sym()}${marginReq.toFixed(2)}</div></div>
     <div class="item"><div class="lbl">Lot Size</div><div class="val">${ls} ${asset}</div></div>
     <div class="item"><div class="lbl">Legs</div><div class="val">${legs.length}</div></div>`;
 
@@ -386,7 +394,7 @@ function updateSummary(){
       responsive:true,animation:false,
       plugins:{
         legend:{display:false},
-        tooltip:{callbacks:{label:ctx=>'P&L: $'+ctx.parsed.y.toFixed(2)}}
+        tooltip:{callbacks:{label:ctx=>'P&L: '+sym()+ctx.parsed.y.toFixed(2)}}
       },
       scales:{
         x:{title:{display:true,text:'Spot Price at Expiry',color:'#848e9c',font:{size:10}},ticks:{color:'#848e9c',maxTicksLimit:10,font:{size:10}},grid:{color:'rgba(0,0,0,0.06)'}},
@@ -430,7 +438,7 @@ function executeTrade(){
   const maxLoss=parseFloat(document.getElementById('maxLoss').value)||0;
   const desc=legs.map(l=>`${l.side.toUpperCase()} ${l.size}x ${l.type.toUpperCase()} ${Number(l.strike).toLocaleString()}`).join('\n');
   let msg='Execute strategy?\n\n'+desc;
-  if(maxProfit>0&&maxLoss>0) msg+=`\n\nAuto-close at: +$${maxProfit.toFixed(2)} / -$${maxLoss.toFixed(2)}`;
+  if(maxProfit>0&&maxLoss>0) msg+=`\n\nAuto-close at: +${sym()}${maxProfit.toFixed(2)} / -${sym()}${maxLoss.toFixed(2)}`;
   if(!confirm(msg))return;
 
   const payload={
@@ -460,9 +468,9 @@ function pollMonitor(){
     const pnlColor=d.current_pnl>=0?'var(--green)':'var(--red)';
     const pct=d.max_profit?(d.current_pnl/d.max_profit*100).toFixed(1):0;
     document.getElementById('monitorSummary').innerHTML=`
-      <div class="item"><div class="lbl">Current PnL</div><div class="val" style="color:${pnlColor}">$${d.current_pnl.toFixed(2)}</div></div>
-      <div class="item"><div class="lbl">Target Profit</div><div class="val" style="color:var(--green)">$${d.max_profit.toFixed(2)}</div></div>
-      <div class="item"><div class="lbl">Max Loss</div><div class="val" style="color:var(--red)">-$${d.max_loss.toFixed(2)}</div></div>
+      <div class="item"><div class="lbl">Current PnL</div><div class="val" style="color:${pnlColor}">${sym()}${d.current_pnl.toFixed(2)}</div></div>
+      <div class="item"><div class="lbl">Target Profit</div><div class="val" style="color:var(--green)">${sym()}${d.max_profit.toFixed(2)}</div></div>
+      <div class="item"><div class="lbl">Max Loss</div><div class="val" style="color:var(--red)">-${sym()}${d.max_loss.toFixed(2)}</div></div>
       <div class="item"><div class="lbl">Status</div><div class="val">${d.running?'🟢 Live':'⚫ '+(d.exit_reason||'Stopped')}</div></div>
       <div class="item"><div class="lbl">Legs</div><div class="val">${(d.legs||[]).length}</div></div>`;
 
@@ -529,8 +537,9 @@ function renderPositions(){
       <div class="pos-row"><span>Strike</span><span class="v">${Number(p.strike).toLocaleString()}</span></div>
       <div class="pos-row"><span>Type</span><span class="v">${p.type.toUpperCase()}</span></div>
       <div class="pos-row"><span>Lots</span><span class="v">${lots}</span></div>
-      <div class="pos-row"><span>Entry</span><span class="v">$${p.entry_price.toFixed(2)}</span></div>
-      <div class="pos-row"><span>Value</span><span class="v" style="color:${p.side==='sell'?'var(--green)':'var(--red)'}">$${val}</span></div>
+      <div class="pos-row"><span>Entry</span><span class="v">${sym()}${p.entry_price.toFixed(2)}</span></div>
+      <div class="pos-row"><span>Value</span><span class="v" style="color:${p.side==='sell'?'var(--green)':'var(--red)'}">
+${sym()}${val}</span></div>
     </div>`;
   }).join('')+`<div class="pos-card" onclick="selectAllPos()" style="display:flex;align-items:center;justify-content:center;min-height:80px;border-style:dashed;color:var(--muted)">
     ${selectedPosIdx.size===openPositions.length?'Deselect All':'Select All'}
@@ -572,10 +581,10 @@ function renderPosPayoff(){
     }]},
     options:{
       responsive:true,animation:false,
-      plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>'P&L: $'+ctx.parsed.y.toFixed(2)}}},
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>'P&L: '+sym()+ctx.parsed.y.toFixed(2)}}},
       scales:{
         x:{title:{display:true,text:'Spot at Expiry',color:'#848e9c',font:{size:10}},ticks:{color:'#848e9c',maxTicksLimit:10,font:{size:10}},grid:{color:'rgba(0,0,0,0.06)'}},
-        y:{title:{display:true,text:'P&L ($)',color:'#848e9c',font:{size:10}},ticks:{color:'#848e9c',font:{size:10}},grid:{color:'rgba(0,0,0,0.06)'},
+        y:{title:{display:true,text:'P&L ('+sym()+')',color:'#848e9c',font:{size:10}},ticks:{color:'#848e9c',font:{size:10}},grid:{color:'rgba(0,0,0,0.06)'},
           afterDataLimits:s=>{if(s.min>0)s.min=-s.max*0.1;if(s.max<0)s.max=-s.min*0.1}}
       }
     },

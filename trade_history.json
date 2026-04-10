@@ -669,5 +669,43 @@
     "pnl": -0.14,
     "adjustments": 0,
     "status": "completed"
+  },
+  {
+    "sid": "44e62f51",
+    "started_at": "2026-04-10T12:15:20.908913",
+    "ended_at": "2026-04-10T12:15:21.274999",
+    "params": {
+      "asset": "BTC",
+      "expiry_date": "01-04-2026",
+      "lot_size": "100",
+      "target_delta": "0.2",
+      "delta_tolerance": "0.05",
+      "premium_threshold": "40",
+      "target_pnl": "25",
+      "monitoring_interval": "5",
+      "max_adjustments": "5"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "completed"
+  },
+  {
+    "sid": "44e62f51",
+    "started_at": "2026-04-10T12:15:26.961371",
+    "ended_at": "2026-04-10T12:15:27.728761",
+    "params": {
+      "asset": "BTC",
+      "expiry_date": "01-04-2026",
+      "lot_size": "100",
+      "target_delta": "0.2",
+      "delta_tolerance": "0.05",
+      "premium_threshold": "40",
+      "target_pnl": "25",
+      "monitoring_interval": "5",
+      "max_adjustments": "5"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "completed"
   }
 ]
