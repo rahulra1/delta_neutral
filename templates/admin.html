@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin — AlgoX</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.admin-container{max-width:1100px;margin:0 auto;padding:20px 16px}
+.admin-header{margin-bottom:20px}
+.admin-header h1{font-size:1.3rem;font-weight:800}
+.admin-grid{display:grid;grid-template-columns:1fr 360px;gap:16px;align-items:start}
+.a-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px;margin-bottom:16px}
+.a-card h2{font-size:.9rem;font-weight:700;margin-bottom:12px}
+table.a-table{width:100%;border-collapse:collapse;font-size:.8rem}
+.a-table th{text-align:left;color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;padding:6px 8px;border-bottom:1px solid var(--border)}
+.a-table td{padding:6px 8px;border-bottom:1px solid var(--border)}
+.a-table tr:hover td{background:rgba(26,26,46,.02)}
+.a-btn{padding:4px 12px;border:1px solid var(--border);border-radius:4px;font-size:.75rem;cursor:pointer;font-family:inherit;background:var(--card)}
+.a-btn:hover{border-color:var(--accent)}
+.a-btn-primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.a-input{padding:5px 10px;border:1px solid var(--border);border-radius:4px;font-size:.8rem;font-family:inherit;background:var(--bg)}
+.a-input:focus{outline:none;border-color:var(--purple)}
+.badge-admin{background:var(--accent);color:#fff;font-size:.65rem;padding:2px 8px;border-radius:3px;font-weight:700}
+.badge-plan{font-size:.7rem;padding:2px 8px;border-radius:3px;font-weight:600}
+.badge-free{background:#fef3c7;color:#d97706}
+.badge-basic{background:rgba(99,102,241,.1);color:#6366f1}
+.badge-pro{background:rgba(34,197,94,.1);color:#22c55e}
+.stat-row{display:flex;gap:12px;margin-bottom:16px}
+.stat-box{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;text-align:center}
+.stat-box .num{font-size:1.4rem;font-weight:800}
+.stat-box .lbl{font-size:.7rem;color:var(--muted);text-transform:uppercase;margin-top:2px}
+.history-log{max-height:300px;overflow-y:auto;font-size:.78rem}
+.history-log .h-row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border)}
+.h-row .h-amt{font-weight:700}
+.h-amt.pos{color:var(--green)}.h-amt.neg{color:var(--red)}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);display:none;align-items:center;justify-content:center;z-index:100}
+.modal-overlay.active{display:flex}
+.modal-box{background:var(--card);border-radius:10px;padding:24px;width:400px;max-width:90vw}
+.modal-box h3{font-size:.95rem;font-weight:700;margin-bottom:14px}
+.field{display:flex;flex-direction:column;gap:4px;margin-bottom:12px}
+.field label{font-size:.7rem;color:var(--muted);text-transform:uppercase;font-weight:600}
+</style>
+</head>
+<body>
+<div class="nav">
+  <div class="logo">⚡ AlgoX</div>
+  <a href="/">Dashboard</a>
+  <a href="/option-chain">Option Chain</a>
+  <a href="/strategy-builder">Builder</a>
+  <a href="/profile">Profile</a>
+  <a href="/admin" class="active">Admin</a>
+  <div class="spacer"></div>
+  <div class="user">
+    <div class="avatar">{{ username[0]|upper }}</div>
+    <span>{{ username }}</span>
+    <a href="/logout" style="border:none;padding:0;font-size:.75rem">Logout</a>
+  </div>
+</div>
+
+<div class="admin-container">
+  <div class="admin-header"><h1>🔧 Admin Panel</h1></div>
+
+  <div class="stat-row" id="stats"></div>
+
+  <div class="admin-grid">
+    <div>
+      <!-- Users Table -->
+      <div class="a-card">
+        <h2>👥 Users</h2>
+        <table class="a-table">
+          <thead><tr><th>ID</th><th>Username</th><th>Plan</th><th>Credits</th><th>Used</th><th>Role</th><th>Actions</th></tr></thead>
+          <tbody id="usersBody"></tbody>
+        </table>
+      </div>
+
+      <!-- Plans -->
+      <div class="a-card">
+        <h2>📋 Plans</h2>
+        <table class="a-table">
+          <thead><tr><th>ID</th><th>Name</th><th>Price</th><th>Credits/mo</th><th>Max Strategies</th><th>Max Brokers</th></tr></thead>
+          <tbody id="plansBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div>
+      <!-- Quick Actions -->
+      <div class="a-card">
+        <h2>⚡ Quick Actions</h2>
+        <div class="field">
+          <label>User ID</label>
+          <input class="a-input" id="qa_uid" type="number" placeholder="User ID">
+        </div>
+        <div class="field">
+          <label>Add Credits</label>
+          <div style="display:flex;gap:6px">
+            <input class="a-input" id="qa_credits" type="number" placeholder="Amount" style="flex:1">
+            <button class="a-btn a-btn-primary" onclick="addCredits()">Add</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>Set Plan</label>
+          <div style="display:flex;gap:6px">
+            <select class="a-input" id="qa_plan" style="flex:1"></select>
+            <button class="a-btn a-btn-primary" onclick="setPlan()">Set</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>Toggle Admin</label>
+          <button class="a-btn" onclick="toggleAdmin()">Toggle Admin for User</button>
+        </div>
+      </div>
+
+      <!-- Credit History -->
+      <div class="a-card">
+        <h2>📜 Credit History</h2>
+        <div style="display:flex;gap:6px;margin-bottom:10px">
+          <input class="a-input" id="hist_uid" type="number" placeholder="User ID" style="flex:1">
+          <button class="a-btn" onclick="loadHistory()">Load</button>
+        </div>
+        <div class="history-log" id="historyLog"></div>
+      </div>
+
+      <!-- Credit Costs -->
+      <div class="a-card">
+        <h2>💰 Credit Costs</h2>
+        <div id="costsInfo"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let allUsers=[], allPlans=[];
+
+function toast(msg,err){const t=document.getElementById('toast');t.textContent=msg;t.className='toast'+(err?' error':'');t.style.display='block';setTimeout(()=>t.style.display='none',3000)}
+function api(url,opts){return fetch(url,opts).then(r=>r.json())}
+
+function load(){
+  Promise.all([api('/api/admin/users'),api('/api/admin/plans'),api('/api/credits/costs')]).then(([u,p,c])=>{
+    allUsers=u.users||[];allPlans=p.plans||[];
+    renderUsers();renderPlans();renderCosts(c.costs||{});renderStats();
+    const sel=document.getElementById('qa_plan');
+    sel.innerHTML=allPlans.map(p=>`<option value="${p.id}">${p.name} (₹${p.price})</option>`).join('');
+  });
+}
+
+function renderStats(){
+  const total=allUsers.length;
+  const totalCredits=allUsers.reduce((s,u)=>s+(u.credits_remaining||0),0);
+  const totalUsed=allUsers.reduce((s,u)=>s+(u.credits_used||0),0);
+  document.getElementById('stats').innerHTML=`
+    <div class="stat-box"><div class="num">${total}</div><div class="lbl">Users</div></div>
+    <div class="stat-box"><div class="num">${totalCredits}</div><div class="lbl">Credits Available</div></div>
+    <div class="stat-box"><div class="num">${totalUsed}</div><div class="lbl">Credits Used</div></div>
+    <div class="stat-box"><div class="num">${allPlans.length}</div><div class="lbl">Plans</div></div>`;
+}
+
+function renderUsers(){
+  document.getElementById('usersBody').innerHTML=allUsers.map(u=>{
+    const planCls=({'Free':'badge-free','Basic':'badge-basic','Pro':'badge-pro'})[u.plan_name]||'badge-free';
+    return `<tr>
+      <td>${u.id}</td>
+      <td>${u.username} ${u.is_admin?'<span class="badge-admin">ADMIN</span>':''}</td>
+      <td><span class="badge-plan ${planCls}">${u.plan_name||'Free'}</span></td>
+      <td style="font-weight:700">${u.credits_remaining??0}</td>
+      <td>${u.credits_used??0}</td>
+      <td>${u.is_admin?'Admin':'User'}</td>
+      <td><button class="a-btn" onclick="document.getElementById('qa_uid').value=${u.id};document.getElementById('hist_uid').value=${u.id}">Select</button></td>
+    </tr>`}).join('');
+}
+
+function renderPlans(){
+  document.getElementById('plansBody').innerHTML=allPlans.map(p=>`<tr>
+    <td>${p.id}</td><td>${p.name}</td><td>₹${p.price}</td>
+    <td>${p.credits_per_month>=99999?'∞':p.credits_per_month}</td>
+    <td>${p.max_live_strategies>=99?'∞':p.max_live_strategies}</td>
+    <td>${p.max_brokers>=99?'∞':p.max_brokers}</td>
+  </tr>`).join('');
+}
+
+function renderCosts(costs){
+  document.getElementById('costsInfo').innerHTML=Object.entries(costs).map(([k,v])=>
+    `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:.8rem;border-bottom:1px solid var(--border)"><span>${k.replace(/_/g,' ')}</span><span style="font-weight:700">${v} credits</span></div>`
+  ).join('');
+}
+
+function addCredits(){
+  const uid=document.getElementById('qa_uid').value, amt=document.getElementById('qa_credits').value;
+  if(!uid||!amt){toast('Enter user ID and amount',true);return}
+  api('/api/admin/add-credits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:+uid,amount:+amt,description:'Admin grant'})})
+    .then(d=>{if(d.error)toast(d.error,true);else{toast(`Added ${amt} credits to user ${uid}`);load()}});
+}
+
+function setPlan(){
+  const uid=document.getElementById('qa_uid').value, pid=document.getElementById('qa_plan').value;
+  if(!uid){toast('Enter user ID',true);return}
+  api('/api/admin/set-plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:+uid,plan_id:+pid})})
+    .then(d=>{if(d.error)toast(d.error,true);else{toast('Plan updated');load()}});
+}
+
+function toggleAdmin(){
+  const uid=document.getElementById('qa_uid').value;
+  if(!uid){toast('Enter user ID',true);return}
+  const u=allUsers.find(u=>u.id==uid);
+  api('/api/admin/set-admin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:+uid,is_admin:!(u&&u.is_admin)})})
+    .then(d=>{if(d.error)toast(d.error,true);else{toast('Admin toggled');load()}});
+}
+
+function loadHistory(){
+  const uid=document.getElementById('hist_uid').value;
+  if(!uid){toast('Enter user ID',true);return}
+  api('/api/admin/user-history/'+uid).then(d=>{
+    document.getElementById('historyLog').innerHTML=(d.history||[]).map(h=>
+      `<div class="h-row"><span>${h.action.replace(/_/g,' ')} — ${h.description||''}</span><span class="h-amt ${h.amount>0?'pos':'neg'}">${h.amount>0?'+':''}${h.amount}</span><span style="color:var(--muted);font-size:.7rem">${h.created_at||''}</span></div>`
+    ).join('')||'<div style="color:var(--muted);padding:10px">No history</div>';
+  });
+}
+
+window.addEventListener('load', load);
+</script>
+</body>
+</html>

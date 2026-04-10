@@ -7,7 +7,7 @@ from functools import wraps
 from auth import check_api_connection
 from strategy import DeltaNeutralStrategy
 from trade_history import record_start, record_end, get_history
-from models import init_db, create_user, verify_user, get_user, update_api_keys, get_profiles, get_profile, create_profile, update_profile, delete_profile
+from models import init_db, create_user, verify_user, get_user, update_api_keys, get_profiles, get_profile, create_profile, update_profile, delete_profile, get_user_credits, deduct_credits, add_credits, set_user_plan, get_credit_history, is_admin, set_admin, get_all_users, get_all_plans, CREDIT_COSTS
 
 app = Flask(__name__)
 app.secret_key = 'delta-neutral-bot-secret-key-change-me'
@@ -43,6 +43,30 @@ def login_required(f):
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated
+
+
+def admin_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get('user_id') or not is_admin(session['user_id']):
+            return jsonify(error='Admin access required'), 403
+        return f(*args, **kwargs)
+    return decorated
+
+
+def credits_required(action):
+    """Decorator that checks and deducts credits before running the endpoint."""
+    def wrapper(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            uid = current_user_id()
+            ok, cost = deduct_credits(uid, action, f.__name__)
+            if not ok:
+                creds = get_user_credits(uid)
+                return jsonify(error=f'Insufficient credits. Need {cost}, have {creds["credits_remaining"] if creds else 0}. Upgrade your plan.'), 402
+            return f(*args, **kwargs)
+        return decorated
+    return wrapper
 
 
 def current_user_id():
@@ -149,18 +173,18 @@ def register():
         password = request.form.get('password', '')
         confirm = request.form.get('confirm_password', '')
         if not username or not password:
-            return render_template('register.html', error='Username and password required')
+            return render_template('login.html', error='Username and password required')
         if len(password) < 6:
-            return render_template('register.html', error='Password must be at least 6 characters')
+            return render_template('login.html', error='Password must be at least 6 characters')
         if password != confirm:
-            return render_template('register.html', error='Passwords do not match')
+            return render_template('login.html', error='Passwords do not match')
         if create_user(username, password):
             user = verify_user(username, password)
             session['user_id'] = user['id']
             session['username'] = user['username']
             return redirect(url_for('dashboard'))
-        return render_template('register.html', error='Username already taken')
-    return render_template('register.html', error=None)
+        return render_template('login.html', error='Username already taken')
+    return redirect(url_for('login'))
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -512,6 +536,7 @@ def view_strategy(sid):
 
 @app.route('/start', methods=['POST'])
 @login_required
+@credits_required('deploy_live')
 def start():
     params = request.json
     profile_id = params.pop('profile_id', None)
@@ -529,7 +554,7 @@ def start():
     entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     strategies[sid] = entry
     record_start(sid, params)
-    track_strategy(sid, 'Delta Neutral', f"{params.get('asset','BTC')} {params.get('expiry_date','')}", current_user_id(), details=params)
+    track_strategy(sid, 'AlgoX DN', f"{params.get('asset','BTC')} {params.get('expiry_date','')}", current_user_id(), details=params)
     entry['thread'] = threading.Thread(target=run_strategy, args=(sid, params), daemon=True)
     entry['thread'].start()
     return jsonify(status="started", sid=sid)
@@ -653,6 +678,14 @@ def api_expiries():
     asset = request.args.get('asset', 'BTC')
     if asset in DELTA_ASSETS:
         from api.chain import get_expiries
+        from config import set_thread_credentials
+        profile_id = request.args.get('profile_id')
+        api_key, api_secret, _, broker = get_profile_creds(profile_id)
+        if api_key:
+            set_thread_credentials(api_key, api_secret, broker)
+        elif not profile_id:
+            # No profile and no default keys — still set broker based on what we have
+            set_thread_credentials('', '', 'demo')
         return jsonify(expiries=get_expiries(asset))
     from api.nse import get_nse_expiries
     return jsonify(expiries=get_nse_expiries(asset))
@@ -667,6 +700,13 @@ def api_chain():
         return jsonify(error="expiry required"), 400
     if asset in DELTA_ASSETS:
         from api.chain import get_option_chain_full
+        from config import set_thread_credentials
+        profile_id = request.args.get('profile_id')
+        api_key, api_secret, _, broker = get_profile_creds(profile_id)
+        if api_key:
+            set_thread_credentials(api_key, api_secret, broker)
+        elif not profile_id:
+            set_thread_credentials('', '', 'demo')
         chain, spot, exp = get_option_chain_full(expiry, asset)
     else:
         from api.nse import get_nse_chain
@@ -678,6 +718,7 @@ def api_chain():
 
 @app.route('/api/place-legs', methods=['POST'])
 @login_required
+@credits_required('place_legs')
 def api_place_legs():
     """Place multiple option legs and optionally start monitoring."""
     from api.orders import place_order
@@ -853,6 +894,7 @@ def api_save_strategy_builder():
 
 @app.route('/api/strategy-builder/deploy', methods=['POST'])
 @login_required
+@credits_required('deploy_builder')
 def api_deploy_strategy_builder():
     from api.chain import get_option_chain_full, get_expiries
     from api.orders import place_order
@@ -956,12 +998,98 @@ def api_deploy_strategy_builder():
 
 @app.route('/api/strategy-builder/paper-trade', methods=['POST'])
 @login_required
+@credits_required('paper_trade')
 def api_paper_trade_strategy_builder():
     data = request.json
     sid = str(uuid.uuid4())[:8]
     track_strategy(sid, 'Strategy Builder (Paper)', data.get('name', 'Unnamed'), current_user_id(), details=data)
     update_tracked(sid, status='paper')
     return jsonify(status='paper', sid=sid)
+
+
+# ── Credits API ──
+
+@app.route('/api/credits')
+@login_required
+def api_credits():
+    creds = get_user_credits(current_user_id())
+    return jsonify(creds or {})
+
+
+@app.route('/api/credits/history')
+@login_required
+def api_credits_history():
+    return jsonify(history=get_credit_history(current_user_id()))
+
+
+@app.route('/api/credits/costs')
+@login_required
+def api_credit_costs():
+    return jsonify(costs=CREDIT_COSTS)
+
+
+# ── Admin Routes ──
+
+@app.route('/admin')
+@login_required
+def admin_page():
+    if not is_admin(current_user_id()):
+        return redirect('/')
+    return render_template('admin.html', username=session.get('username'))
+
+
+@app.route('/api/admin/users')
+@login_required
+@admin_required
+def api_admin_users():
+    return jsonify(users=get_all_users())
+
+
+@app.route('/api/admin/plans')
+@login_required
+@admin_required
+def api_admin_plans():
+    return jsonify(plans=get_all_plans())
+
+
+@app.route('/api/admin/add-credits', methods=['POST'])
+@login_required
+@admin_required
+def api_admin_add_credits():
+    d = request.json
+    uid = d.get('user_id')
+    amount = int(d.get('amount', 0))
+    desc = d.get('description', 'Admin grant')
+    if not uid or amount == 0:
+        return jsonify(error='user_id and amount required'), 400
+    add_credits(uid, amount, desc)
+    return jsonify(status='ok')
+
+
+@app.route('/api/admin/set-plan', methods=['POST'])
+@login_required
+@admin_required
+def api_admin_set_plan():
+    d = request.json
+    if not set_user_plan(d.get('user_id'), d.get('plan_id')):
+        return jsonify(error='Invalid plan'), 400
+    return jsonify(status='ok')
+
+
+@app.route('/api/admin/set-admin', methods=['POST'])
+@login_required
+@admin_required
+def api_admin_set_admin():
+    d = request.json
+    set_admin(d.get('user_id'), d.get('is_admin', False))
+    return jsonify(status='ok')
+
+
+@app.route('/api/admin/user-history/<int:uid>')
+@login_required
+@admin_required
+def api_admin_user_history(uid):
+    return jsonify(history=get_credit_history(uid, 100))
 
 
 if __name__ == '__main__':

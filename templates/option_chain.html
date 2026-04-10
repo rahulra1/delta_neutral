@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Option Chain — Delta Neutral Bot</title>
+<title>Option Chain — AlgoX</title>
 <link rel="stylesheet" href="/static/style.css">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
@@ -88,11 +88,16 @@ td.selected-sell{outline:1px solid var(--red);outline-offset:-1px;background:rgb
 .expiry-tab{padding:5px 14px;border-radius:3px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;background:var(--card);border:1px solid var(--border);color:var(--muted);transition:all .15s}
 .expiry-tab:hover{border-color:var(--accent);color:var(--text)}
 .expiry-tab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.mode-switch{display:flex;background:var(--card);border:1px solid var(--border);border-radius:4px;overflow:hidden;font-size:11px}
+.mode-opt{padding:5px 14px;cursor:pointer;font-weight:600;color:var(--muted);transition:all .15s;user-select:none}
+.mode-opt:hover{color:var(--text)}
+.mode-opt.active[data-mode="live"]{background:var(--green);color:#fff}
+.mode-opt.active[data-mode="demo"]{background:#f59e0b;color:#fff}
 </style>
 </head>
 <body>
 <div class="nav">
-  <div class="logo">⚡ Delta Neutral</div>
+  <div class="logo">⚡ AlgoX</div>
   <a href="/">Dashboard</a>
   <a href="/option-chain" class="active">Option Chain</a>
   <a href="/strategy/new?asset=BTC">Strategies</a>
@@ -100,14 +105,20 @@ td.selected-sell{outline:1px solid var(--red);outline-offset:-1px;background:rgb
   <a href="/performance">Performance</a>
   <a href="/profile">Profile</a><a href="/broker">Broker</a>
   <div class="spacer"></div>
+  <div id="creditsBadge" style="background:#fef3c7;color:#92400e;padding:4px 12px;border-radius:4px;font-size:.75rem;font-weight:700;cursor:pointer" onclick="window.location='/profile'" title="Credits remaining"></div>
   <div class="user"><div class="avatar">U</div><a href="/logout" style="border:none;padding:0;font-size:.75rem">Logout</a></div>
 </div>
+<script>fetch('/api/credits').then(r=>r.json()).then(d=>{document.getElementById('creditsBadge').textContent='🪙 '+((d.credits_remaining??0))+' credits'})</script>
 <div class="container">
   <div class="controls">
     <h1 style="margin-right:12px">Options Chain</h1>
     <select id="asset"><option value="BTC">BTC</option><option value="ETH">ETH</option><option value="NIFTY">NIFTY</option><option value="BANKNIFTY">BANKNIFTY</option><option value="FINNIFTY">FINNIFTY</option><option value="MIDCPNIFTY">MIDCPNIFTY</option><option value="SENSEX">SENSEX</option><option value="BANKEX">BANKEX</option></select>
     <div class="spot-badge" id="spotBadge">Spot: —</div>
     <div style="background:var(--card);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-size:10px;color:var(--muted)" id="lotBadge">1 Lot = 0.001 BTC</div>
+    <div class="mode-switch" id="modeSwitch">
+      <span class="mode-opt active" data-mode="live" onclick="switchMode('live')">🟢 Live</span>
+      <span class="mode-opt" data-mode="demo" onclick="switchMode('demo')">🟡 Demo</span>
+    </div>
     <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
       <span style="color:var(--muted);font-size:10px">Click = BUY · Right-click = SELL</span>
       <button onclick="loadPositions()" style="background:var(--card);border:1px solid var(--border);color:var(--text);padding:5px 12px;border-radius:4px;font-size:11px;cursor:pointer">Positions</button>
@@ -160,7 +171,7 @@ td.selected-sell{outline:1px solid var(--red);outline-offset:-1px;background:rgb
 <div class="toast" id="toast"></div>
 
 <script>
-let chainData=[], spotPrice=0, legs=[], maxOI=1, payoffChart=null, selectedExpiry='';
+let chainData=[], spotPrice=0, legs=[], maxOI=1, payoffChart=null, selectedExpiry='', currentMode='live';
 const LOT_SIZE = {BTC: 0.001, ETH: 0.01, NIFTY: 75, BANKNIFTY: 30, FINNIFTY: 40, MIDCPNIFTY: 75, SENSEX: 20, BANKEX: 30};
 const CRYPTO = new Set(['BTC','ETH']);
 function getAsset(){ return document.getElementById('asset').value }
@@ -171,25 +182,48 @@ function sym(){ return isCrypto()?'$':'₹' }
 function f2(v){ return (typeof v==='number' && !isNaN(v)) ? v.toFixed(2) : '—' }
 function f4(v){ return (typeof v==='number' && !isNaN(v)) ? v.toFixed(4) : '—' }
 
-document.getElementById('asset').addEventListener('change', loadExpiries);
-window.addEventListener('load', ()=>{ loadExpiries(); loadProfiles(); });
+function getProfileId(){
+  return document.getElementById('profileSelect').value || '';
+}
+
+function switchMode(mode){
+  currentMode=mode;
+  document.querySelectorAll('.mode-opt').forEach(el=>{el.classList.toggle('active',el.dataset.mode===mode)});
+  document.getElementById('modeSwitch').style.display=isCrypto()?'flex':'none';
+  // Auto-select matching profile
+  const sel=document.getElementById('profileSelect');
+  const target=mode==='live'?'delta_exchange':'demo';
+  let found=false;
+  for(const opt of sel.options){
+    if(opt.dataset.broker===target){sel.value=opt.value;found=true;break}
+  }
+  if(!found) sel.value='';
+  loadExpiries();
+}
+
+document.getElementById('asset').addEventListener('change', ()=>{
+  document.getElementById('modeSwitch').style.display=isCrypto()?'flex':'none';
+  loadExpiries();
+});
+document.getElementById('profileSelect').addEventListener('change', loadExpiries);
+window.addEventListener('load', ()=>{ loadProfiles(); });
 
 function loadProfiles(){
   fetch('/api/profiles').then(r=>r.json()).then(d=>{
     const sel=document.getElementById('profileSelect');
-    sel.innerHTML='<option value="">Default Keys</option>';
+    sel.innerHTML='<option value="" data-broker="demo">Default Keys</option>';
     (d.profiles||[]).forEach(p=>{
-      const o=document.createElement('option');o.value=p.id;o.textContent=p.name;sel.appendChild(o);
+      const o=document.createElement('option');o.value=p.id;o.textContent=p.name+(p.broker==='demo'?' (Demo)':' (Live)');o.dataset.broker=p.broker||'demo';sel.appendChild(o);
     });
+    // Auto-select based on current mode
+    switchMode(currentMode);
   });
 }
-
-function getProfileId(){ return document.getElementById('profileSelect').value || '' }
 
 function loadExpiries(){
   const asset=getAsset(), ls=getLotSize();
   document.getElementById('lotBadge').textContent=isCrypto()?'1 Lot = '+ls+' '+asset:'Lot Size = '+ls;
-  fetch('/api/expiries?asset='+asset).then(r=>r.json()).then(d=>{
+  fetch('/api/expiries?asset='+asset+'&profile_id='+getProfileId()).then(r=>r.json()).then(d=>{
     const tabs=document.getElementById('expiryTabs');
     tabs.innerHTML='';
     (d.expiries||[]).forEach((e,i)=>{
@@ -212,7 +246,7 @@ function loadChain(){
   const asset=getAsset(), expiry=selectedExpiry;
   if(!expiry) return;
   document.getElementById('chainBody').innerHTML='<tr><td colspan="15" style="padding:40px;color:var(--muted);text-align:center">Loading chain...</td></tr>';
-  fetch(`/api/chain?asset=${asset}&expiry=${expiry}`).then(r=>r.json()).then(d=>{
+  fetch(`/api/chain?asset=${asset}&expiry=${expiry}&profile_id=${getProfileId()}`).then(r=>r.json()).then(d=>{
     if(d.error){showToast(d.error,true);return}
     chainData=d.chain||[];spotPrice=d.spot_price||0;
     document.getElementById('spotBadge').textContent='Spot: '+cur(spotPrice);
