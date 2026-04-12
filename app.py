@@ -328,8 +328,11 @@ def dashboard():
 @login_required
 def api_dashboard():
     """Compute dashboard stats from trade history."""
+    uid = current_user_id()
     all_history = get_history()
-    trades = all_history  # show all trades
+    user_sids = {sid for sid, e in strategies.items() if e.get('user_id') == uid}
+    user_sids.update(sid for sid, t in all_tracked.items() if t.get('user_id') == uid)
+    trades = [t for t in all_history if t.get('sid') in user_sids or t.get('user_id') == uid]
 
     completed = [t for t in trades if t.get('status') == 'completed']
     running_count = sum(1 for sid, e in strategies.items() if e.get('user_id') == current_user_id() and e.get('running'))
@@ -593,7 +596,7 @@ def start():
 
     entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     strategies[sid] = entry
-    record_start(sid, params)
+    record_start(sid, params, user_id=current_user_id())
     track_strategy(sid, 'AlgoX DN', f"{params.get('asset','BTC')} {params.get('expiry_date','')}", current_user_id(), details=params)
     entry['thread'] = threading.Thread(target=run_strategy, args=(sid, params), daemon=True)
     entry['thread'].start()
@@ -694,9 +697,9 @@ def performance():
 def api_history():
     uid = current_user_id()
     all_history = get_history()
-    # Filter to only show history for strategies owned by this user
     user_sids = {sid for sid, e in strategies.items() if e.get('user_id') == uid}
-    user_history = [h for h in all_history if h.get('sid') in user_sids]
+    user_sids.update(sid for sid, t in all_tracked.items() if t.get('user_id') == uid)
+    user_history = [h for h in all_history if h.get('sid') in user_sids or h.get('user_id') == uid]
     return jsonify(user_history)
 
 

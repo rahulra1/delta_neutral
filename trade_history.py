@@ -17,10 +17,11 @@ def _save(data):
         json.dump(data, f, indent=2)
 
 
-def record_start(sid, params):
+def record_start(sid, params, user_id=None):
     history = _load()
     history.append({
         'sid': sid,
+        'user_id': user_id,
         'started_at': datetime.now().isoformat(),
         'ended_at': None,
         'params': params,
