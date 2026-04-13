@@ -14,6 +14,7 @@ import Broker from './pages/Broker';
 import BrokerSetup from './pages/BrokerSetup';
 import ChartPage from './pages/ChartPage';
 import Admin from './pages/Admin';
+import StrategyLogs from './pages/StrategyLogs';
 
 function PrivateRoute({ children }) {
   const { user } = useAuth();
@@ -30,6 +31,7 @@ export default function App() {
         <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
         <Route path="/strategy/new" element={<PrivateRoute><Strategy /></PrivateRoute>} />
         <Route path="/strategy/:sid" element={<PrivateRoute><StrategyDetail /></PrivateRoute>} />
+        <Route path="/strategy/:sid/logs" element={<PrivateRoute><StrategyLogs /></PrivateRoute>} />
         <Route path="/option-chain" element={<PrivateRoute><OptionChain /></PrivateRoute>} />
         <Route path="/strategy-builder" element={<PrivateRoute><StrategyBuilder /></PrivateRoute>} />
         <Route path="/performance" element={<PrivateRoute><Performance /></PrivateRoute>} />

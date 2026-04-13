@@ -113,7 +113,7 @@ export default function Strategy() {
   const start = async () => {
     setError('');
     try {
-      const { data } = await api.post('/start', { ...form, asset, premium_threshold: form.premium_threshold / 100 });
+      const { data } = await api.post('/start', { ...form, asset });
       setSid(data.sid);
       setRunning(true);
       setLogs([]);
@@ -147,14 +147,14 @@ export default function Strategy() {
       try {
         const { data } = await api.get(`/status/${id}`);
         setStatus(data);
-        if (data.status !== 'running') { setRunning(false); clearInterval(pollRef.current); esRef.current?.close(); }
+        if (!data.running) { setRunning(false); clearInterval(pollRef.current); esRef.current?.close(); }
       } catch {}
     }, 3000);
   };
 
   const s = status || {};
-  const call = s.call_leg || {};
-  const put = s.put_leg || {};
+  const call = s.call || {};
+  const put = s.put || {};
 
   return (
     <div className="container">
@@ -304,28 +304,82 @@ export default function Strategy() {
       {status && (
         <>
           <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)' }}>
-            <div className="stat-card"><div className="label">Total P&L</div><div className="value" style={{ color: s.total_pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.total_pnl || 0).toFixed(2)}</div></div>
-            <div className="stat-card"><div className="label">Realized</div><div className="value">${(s.realized_pnl || 0).toFixed(2)}</div></div>
-            <div className="stat-card"><div className="label">Unrealized</div><div className="value">${(s.unrealized_pnl || 0).toFixed(2)}</div></div>
-            <div className="stat-card"><div className="label">Adjustments</div><div className="value">{s.adjustment_count || 0}</div></div>
+            <div className="stat-card"><div className="label">Total P&L</div><div className="value" style={{ color: (s.total_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.total_pnl || 0).toFixed(2)}</div></div>
+            <div className="stat-card"><div className="label">Realized</div><div className="value" style={{ color: (s.realized_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.realized_pnl || 0).toFixed(2)}</div></div>
+            <div className="stat-card"><div className="label">Unrealized</div><div className="value" style={{ color: (s.unrealized_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.unrealized_pnl || 0).toFixed(2)}</div></div>
+            <div className="stat-card"><div className="label">Adjustments</div><div className="value">{s.adjustment_count || 0}<span style={{ fontSize: '.7rem', color: 'var(--muted)' }}>/{form.max_adjustments}</span></div></div>
           </div>
 
-          <div className="grid-2">
-            {[['CALL', call], ['PUT', put]].map(([label, leg]) => (
-              <div className="card" key={label}>
-                <div style={{ fontWeight: 700, marginBottom: 10 }}>{label} Leg</div>
-                {leg.symbol ? (
+          <div className="grid-2" style={{ marginBottom: 16 }}>
+            {[['📈 Short Call', call], ['📉 Short Put', put]].map(([label, leg]) => {
+              if (!leg || !leg.symbol) return <div className="card" key={label}><div style={{ fontWeight: 700, marginBottom: 10 }}>{label}</div><div style={{ color: 'var(--muted)', fontSize: '.85rem' }}>No position</div></div>;
+              const premChg = leg.entry ? ((leg.mark - leg.entry) / leg.entry * 100) : 0;
+              const premColor = premChg > 0 ? 'var(--red)' : 'var(--green)'; // premium up = bad for seller
+              return (
+                <div className="card" key={label}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                    <span style={{ fontWeight: 700 }}>{label}</span>
+                    <span style={{ fontSize: '1.1rem', fontWeight: 800, color: (leg.payoff || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(leg.payoff || 0).toFixed(2)}</span>
+                  </div>
                   <table style={{ width: '100%', fontSize: '.85rem' }}>
                     <tbody>
-                      {[['Symbol', leg.symbol], ['Strike', leg.strike], ['Entry', `$${(leg.entry_price || 0).toFixed(2)}`], ['Mark', `$${(leg.mark_price || 0).toFixed(2)}`], ['Delta', leg.delta], ['Size', leg.size], ['Payoff', <span style={{ color: (leg.payoff || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(leg.payoff || 0).toFixed(2)}</span>]].map(([k, v]) => (
-                        <tr key={k}><td style={{ padding: '4px 0', color: 'var(--muted)' }}>{k}</td><td style={{ padding: '4px 0', fontWeight: 600, textAlign: 'right' }}>{v}</td></tr>
+                      {[
+                        ['Symbol', leg.symbol],
+                        ['Strike', leg.strike],
+                        ['Entry Price', `$${(leg.entry || 0).toFixed(2)}`],
+                        ['Mark Price', <span style={{ fontWeight: 700 }}>${(leg.mark || 0).toFixed(2)}</span>],
+                        ['Premium Δ', <span style={{ color: premColor, fontWeight: 600 }}>{premChg >= 0 ? '+' : ''}{premChg.toFixed(2)}%</span>],
+                        ['Delta', (leg.delta || 0).toFixed(4)],
+                        ['Size', `${leg.size} lots`],
+                        ['Payoff', <span style={{ fontWeight: 700, color: (leg.payoff || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(leg.payoff || 0).toFixed(2)}</span>],
+                      ].map(([k, v]) => (
+                        <tr key={k} style={{ borderBottom: '1px solid var(--border)' }}>
+                          <td style={{ padding: '6px 0', color: 'var(--muted)' }}>{k}</td>
+                          <td style={{ padding: '6px 0', fontWeight: 600, textAlign: 'right' }}>{v}</td>
+                        </tr>
                       ))}
                     </tbody>
                   </table>
-                ) : <div style={{ color: 'var(--muted)', fontSize: '.85rem' }}>No position</div>}
-              </div>
-            ))}
+                  {/* Premium threshold bar */}
+                  <div style={{ marginTop: 8 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '.7rem', color: 'var(--muted)' }}>
+                      <span>Premium Change</span>
+                      <span>Threshold: {form.premium_threshold}%</span>
+                    </div>
+                    <div style={{ height: 6, borderRadius: 3, background: 'var(--border)', marginTop: 4, overflow: 'hidden' }}>
+                      <div style={{ height: '100%', borderRadius: 3, width: `${Math.min(100, Math.abs(premChg) / form.premium_threshold * 100)}%`, background: Math.abs(premChg) >= form.premium_threshold ? 'var(--red)' : '#f59e0b', transition: 'width 0.3s' }} />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
+
+          {/* Adjustment History */}
+          {(s.adjustment_history || []).length > 0 && (
+            <div className="card" style={{ marginBottom: 16 }}>
+              <div style={{ fontWeight: 700, marginBottom: 10 }}>🔄 Adjustment History ({s.adjustment_history.length})</div>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.82rem' }}>
+                <thead><tr>{['#', 'Leg', 'Symbol', 'Entry', 'Exit', 'P&L', 'Time'].map(h => <th key={h} style={{ textAlign: 'left', padding: '6px 8px', color: 'var(--muted)', fontSize: '.72rem', textTransform: 'uppercase', borderBottom: '2px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {s.adjustment_history.map((a, i) => (
+                    <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                      <td style={{ padding: '6px 8px', fontWeight: 700 }}>{a.adjustment}</td>
+                      <td style={{ padding: '6px 8px' }}><span className={`badge ${a.leg === 'call' ? 'badge-green' : 'badge-red'}`}>{a.leg.toUpperCase()}</span></td>
+                      <td style={{ padding: '6px 8px', fontSize: '.8rem' }}>{a.symbol}</td>
+                      <td style={{ padding: '6px 8px' }}>${a.entry.toFixed(2)}</td>
+                      <td style={{ padding: '6px 8px' }}>${a.exit.toFixed(2)}</td>
+                      <td style={{ padding: '6px 8px', fontWeight: 700, color: a.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${a.pnl.toFixed(2)}</td>
+                      <td style={{ padding: '6px 8px', fontSize: '.75rem', color: 'var(--muted)' }}>{(a.timestamp || '').replace('T', ' ').slice(11, 19)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{ textAlign: 'right', padding: '8px', fontWeight: 700, fontSize: '.85rem' }}>
+                Realized from adjustments: <span style={{ color: s.adjustment_history.reduce((sum, a) => sum + a.pnl, 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${s.adjustment_history.reduce((sum, a) => sum + a.pnl, 0).toFixed(2)}</span>
+              </div>
+            </div>
+          )}
         </>
       )}
 

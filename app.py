@@ -11,6 +11,7 @@ from auth import check_api_connection
 from strategy import DeltaNeutralStrategy
 from trade_history import record_start, record_end, get_history
 from models import init_db, create_user, verify_user, get_user, update_api_keys, get_profiles, get_profile, create_profile, update_profile, delete_profile, get_user_credits, deduct_credits, add_credits, set_user_plan, get_credit_history, is_admin, set_admin, get_all_users, get_all_plans, CREDIT_COSTS
+from strategy.tracker import TrackedStrategy, registry
 
 app = Flask(__name__, static_folder=None)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'delta-neutral-bot-secret-key-change-me')
@@ -148,6 +149,11 @@ class LogCapture:
         q = getattr(LogCapture._local, 'log_queue', None)
         if q and text.strip():
             q.put(text.strip())
+        h = getattr(LogCapture._local, 'log_history', None)
+        if h is not None and text.strip():
+            h.append(text.strip())
+            if len(h) > 500:
+                del h[:len(h)-500]
 
     def flush(self):
         self.original.flush()
@@ -161,8 +167,9 @@ sys.stdout = LogCapture(sys.stdout)
 def run_strategy(sid, params):
     entry = strategies[sid]
 
-    # Route this thread's print() to this strategy's log queue
+    # Route this thread's print() to this strategy's log queue and history
     LogCapture._local.log_queue = entry['log_queue']
+    LogCapture._local.log_history = entry['log_history']
 
     try:
         # Set per-thread API keys from profile or default
@@ -223,6 +230,7 @@ def run_strategy(sid, params):
         if entry.get('strategy'):
             entry['strategy'].ws_manager.stop()
         LogCapture._local.log_queue = None
+        LogCapture._local.log_history = None
         entry['running'] = False
         entry['log_queue'].put("__STOPPED__")
 
@@ -316,11 +324,32 @@ def api_dashboard():
     all_history = get_history()
     user_sids = {sid for sid, e in strategies.items() if e.get('user_id') == uid}
     user_sids.update(sid for sid, t in all_tracked.items() if t.get('user_id') == uid)
+    user_sids.update(s.sid for s in registry.get_user_strategies(uid))
     # Include trades that belong to this user
     trades = [t for t in all_history if t.get('sid') in user_sids or t.get('user_id') == uid]
 
+    # Inject live PnL for running strategies into trade list
+    for t in trades:
+        sid = t.get('sid')
+        if t.get('status') == 'running':
+            # Check active monitors (Option Chain / Strategy Builder)
+            if sid in active_monitors and active_monitors[sid].get('user_id') == uid:
+                mon = active_monitors[sid]['monitor']
+                t['pnl'] = round(mon.current_pnl, 2)
+                if not mon.running:
+                    t['status'] = 'completed'
+            # Check old strategies dict (Delta Neutral)
+            elif sid in strategies and strategies[sid].get('strategy'):
+                t['pnl'] = round(strategies[sid]['strategy'].total_pnl, 2)
+            # Check unified tracker
+            rs = registry.get(sid)
+            if rs and rs.running:
+                t['pnl'] = rs.current_pnl
+
     completed = [t for t in trades if t.get('status') == 'completed']
-    running_count = sum(1 for sid, e in strategies.items() if e.get('user_id') == current_user_id() and e.get('running'))
+    running_count = sum(1 for sid, e in strategies.items() if e.get('user_id') == uid and e.get('running'))
+    running_count += sum(1 for sid, e in active_monitors.items() if e.get('user_id') == uid and e['monitor'].running)
+    running_count += len(registry.get_running(uid))
     pnls = [t.get('pnl', 0) for t in completed]
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p < 0]
@@ -381,12 +410,13 @@ def _fetch_peer_strategies(uid, token):
 def api_all_strategies():
     """Return all tracked strategies for the current user with live PnL."""
     uid = current_user_id()
+    from api.live_pnl import compute_live_legs
     result = []
     for sid, t in all_tracked.items():
         if t['user_id'] != uid:
             continue
         entry = dict(t)
-        if entry['status'] == 'running':
+        if entry['status'] in ('running', 'open (no monitor)'):
             if sid in strategies and strategies[sid].get('strategy'):
                 s = strategies[sid]['strategy']
                 entry['pnl'] = round(getattr(s, 'total_pnl', 0), 2)
@@ -395,7 +425,21 @@ def api_all_strategies():
                 entry['pnl'] = round(mon.current_pnl, 2)
                 if not mon.running:
                     entry['status'] = 'completed'
+            else:
+                # No monitor — compute live P&L from legs
+                raw_legs = entry.get('details', {}).get('legs', [])
+                asset = entry.get('details', {}).get('asset', 'BTC')
+                if raw_legs:
+                    _, pnl = compute_live_legs(raw_legs, asset)
+                    entry['pnl'] = pnl
         result.append(entry)
+
+    # Merge strategies from unified tracker
+    for ts in registry.get_user_strategies(uid):
+        if ts.sid not in {s['sid'] for s in result}:
+            st = ts.get_status()
+            st.pop('logs', None)
+            result.append(st)
 
     # Merge running strategies from peer (old) instance
     token = request.headers.get('Authorization', '').replace('Bearer ', '')
@@ -403,7 +447,7 @@ def api_all_strategies():
     local_sids = {s['sid'] for s in result}
     for ps in peer:
         if ps['sid'] not in local_sids:
-            ps['_peer'] = True  # mark as running on old instance
+            ps['_peer'] = True
             result.append(ps)
 
     return jsonify(strategies=result)
@@ -523,18 +567,58 @@ def api_close_all_strategies():
 @login_required
 def api_strategy_detail(sid):
     uid = current_user_id()
+    from api.live_pnl import compute_live_legs
+
     # Check in-memory tracked strategies
     t = all_tracked.get(sid)
     if t and t['user_id'] == uid:
         entry = dict(t)
+        asset = entry.get('details', {}).get('asset', 'BTC')
+        live_legs = []
+        logs = []
+
         if sid in strategies and strategies[sid].get('strategy'):
-            entry['pnl'] = round(strategies[sid]['strategy'].total_pnl, 2)
-        elif sid in active_monitors:
-            mon = active_monitors[sid]['monitor']
-            entry['pnl'] = round(mon.current_pnl, 2)
-            entry['monitor'] = mon.get_status()
-            if not mon.running:
-                entry['status'] = 'completed'
+            strat = strategies[sid]['strategy']
+            entry['pnl'] = round(strat.total_pnl, 2)
+            entry['realized_pnl'] = round(getattr(strat, 'realized_pnl', 0), 2)
+            entry['unrealized_pnl'] = round(getattr(strat, 'unrealized_pnl', 0), 2)
+            entry['adjustment_count'] = getattr(strat, 'adjustment_count', 0)
+            entry['adjustment_history'] = getattr(strat, 'adjustment_history', [])
+            entry['running'] = strategies[sid].get('running', False)
+            logs = strategies[sid].get('log_history', [])
+            for leg_name in ['call', 'put']:
+                info = _leg_info(strat, leg_name)
+                if info:
+                    live_legs.append({
+                        'symbol': info['symbol'], 'type': leg_name, 'strike': info['strike'],
+                        'side': 'sell', 'size': info['size'], 'product_id': None,
+                        'entry_price': info['entry'], 'current_mark': info['mark'],
+                        'current_pnl': info['payoff'], 'delta': info['delta'],
+                    })
+        else:
+            # Option Chain / Strategy Builder / Tracker — use common P&L calculator
+            raw_legs = []
+            if sid in active_monitors:
+                mon = active_monitors[sid]['monitor']
+                raw_legs = mon.legs
+                logs = mon.get_status().get('logs', [])
+                entry['running'] = mon.running
+                if not mon.running:
+                    entry['status'] = 'completed'
+            rs = registry.get(sid)
+            if rs:
+                raw_legs = rs.legs
+                logs = rs.get_logs(200)
+                entry['running'] = rs.running
+            if not raw_legs:
+                raw_legs = entry.get('details', {}).get('legs', [])
+
+            if raw_legs:
+                live_legs, total_pnl = compute_live_legs(raw_legs, asset)
+                entry['pnl'] = total_pnl
+
+        entry['legs'] = live_legs
+        entry['logs'] = logs
         return jsonify(**entry)
     # Try peer instance
     if PEER_PORT:
@@ -578,7 +662,7 @@ def start():
     if sid in strategies and strategies[sid]['running']:
         return jsonify(error="Strategy already running"), 400
 
-    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [], 'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     strategies[sid] = entry
     record_start(sid, params, user_id=current_user_id())
     track_strategy(sid, 'AlgoX DN', f"{params.get('asset','BTC')} {params.get('expiry_date','')}", current_user_id(), details=params)
@@ -638,6 +722,7 @@ def status(sid):
     return jsonify(
         running=True,
         adjustment_count=s.adjustment_count,
+        adjustment_history=s.adjustment_history,
         total_pnl=round(s.total_pnl, 2),
         realized_pnl=round(s.realized_pnl, 2),
         unrealized_pnl=round(s.unrealized_pnl, 2),
@@ -651,11 +736,26 @@ def _leg_info(s, leg):
     if not pos:
         return None
     cv = getattr(s, f'{leg}_contract_value')
-    ws_data = s.ws_manager.get_latest_price(pos['symbol'])
-    mark = ws_data['mark_price'] if ws_data else getattr(s, f'{leg}_actual_entry_price')
-    delta = ws_data.get('delta', 0) if ws_data else 0
 
-    # Use real position data from exchange for accurate P&L
+    # Try WebSocket first, then REST API for live price
+    ws_data = s.ws_manager.get_latest_price(pos['symbol'])
+    mark = None
+    delta = 0
+    if ws_data:
+        mark = ws_data['mark_price']
+        delta = ws_data.get('delta', 0)
+    if not mark:
+        try:
+            from api.pricing import get_current_price
+            rest_data = get_current_price(pos['product_id'], getattr(s, 'asset', 'BTC'))
+            if rest_data:
+                mark = rest_data.get('mark_price', 0)
+                delta = rest_data.get('delta', 0)
+        except Exception:
+            pass
+    if not mark:
+        mark = getattr(s, f'{leg}_actual_entry_price')
+
     from api import get_position_entry_price
     real_entry, real_size = get_position_entry_price(pos['product_id'])
     entry = real_entry if real_entry else getattr(s, f'{leg}_actual_entry_price')
@@ -772,6 +872,13 @@ def api_place_legs():
         leg_names = ', '.join(l['symbol'] for l in placed_legs[:3])
         track_strategy(sid, 'Option Chain', f"{asset} {leg_names}", current_user_id(),
                        details={'legs': placed_legs, 'max_profit': max_profit, 'max_loss': max_loss, 'asset': asset, 'profile_id': data.get('profile_id')})
+        record_start(sid, {
+            'asset': asset, 'source': 'Option Chain',
+            'legs': len(placed_legs), 'max_profit': max_profit, 'max_loss': max_loss,
+            'expiry_date': data.get('expiry', ''),
+            'lot_size': placed_legs[0]['size'] if placed_legs else 0,
+            'leg_details': ', '.join(f"{l['side'].upper()} {l.get('type','')} {l.get('strike','')}" for l in placed_legs[:4]),
+        }, user_id=current_user_id())
 
     # Start monitor if targets are set and all orders succeeded
     monitor_id = None
@@ -784,7 +891,7 @@ def api_place_legs():
         )
         monitor_id = sid
         active_monitors[monitor_id] = {'monitor': mon, 'user_id': current_user_id(), 'profile_id': data.get('profile_id')}
-        mon.on_complete = lambda pnl, reason: update_tracked(sid, status='completed', pnl=round(pnl, 2))
+        mon.on_complete = lambda pnl, reason: (update_tracked(sid, status='completed', pnl=round(pnl, 2)), record_end(sid, pnl, 0))
         mon.start()
     elif placed_legs and not (max_profit > 0 and max_loss > 0):
         # No monitor — mark as completed immediately (manual trade)
@@ -997,6 +1104,13 @@ def api_deploy_strategy_builder():
 
     sid = str(uuid.uuid4())[:8]
     track_strategy(sid, 'Strategy Builder', data.get('name', 'Unnamed'), current_user_id(), details=data)
+    record_start(sid, {
+        'asset': asset, 'source': 'Strategy Builder',
+        'name': data.get('name', 'Unnamed'), 'legs': len(placed_legs),
+        'expiry_date': expiry,
+        'lot_size': lots_per_leg,
+        'leg_details': ', '.join(f"{l['side'].upper()} {l.get('type','')} {l.get('strike','')}" for l in placed_legs[:4]),
+    }, user_id=current_user_id())
 
     # Start monitor if risk targets are set
     risk = data.get('risk', {})
@@ -1016,7 +1130,7 @@ def api_deploy_strategy_builder():
         )
         monitor_id = sid
         active_monitors[monitor_id] = {'monitor': mon, 'user_id': current_user_id(), 'profile_id': data.get('profile_id')}
-        mon.on_complete = lambda pnl, reason: update_tracked(sid, status='completed', pnl=round(pnl, 2))
+        mon.on_complete = lambda pnl, reason: (update_tracked(sid, status='completed', pnl=round(pnl, 2)), record_end(sid, pnl, 0))
         mon.start()
         update_tracked(sid, status='running')
     else:
@@ -1111,6 +1225,114 @@ def api_admin_set_admin():
 @admin_required
 def api_admin_user_history(uid):
     return jsonify(history=get_credit_history(uid, 100))
+
+
+# ── Unified Strategy Tracker API ──
+
+@app.route('/api/tracker/strategies')
+@login_required
+def api_tracker_list():
+    return jsonify(strategies=registry.all_statuses(current_user_id()))
+
+@app.route('/api/tracker/<sid>')
+@login_required
+def api_tracker_detail(sid):
+    s = registry.get(sid)
+    if s and s.user_id == current_user_id():
+        return jsonify(**s.get_status())
+    # Fallback: old strategies dict
+    e = strategies.get(sid)
+    if e and e.get('user_id') == current_user_id():
+        strat = e.get('strategy')
+        return jsonify(sid=sid, source='AlgoX DN', name=e.get('params', {}).get('asset', 'BTC'),
+            user_id=e['user_id'], status='running' if e.get('running') else 'completed',
+            running=e.get('running', False), pnl=round(strat.total_pnl, 2) if strat else 0,
+            legs=[], logs=[], details=e.get('params', {}))
+    return jsonify(error='Not found'), 404
+
+@app.route('/api/tracker/<sid>/logs')
+@login_required
+def api_tracker_logs(sid):
+    last = int(request.args.get('last', 100))
+    # Check unified tracker first
+    s = registry.get(sid)
+    if s and s.user_id == current_user_id():
+        return jsonify(sid=sid, logs=s.get_logs(last), running=s.running, pnl=s.current_pnl, status=s.status)
+    # Fallback: check old strategies dict (Delta Neutral strategies)
+    e = strategies.get(sid)
+    if e and e.get('user_id') == current_user_id():
+        logs = list(e.get('log_history', []))
+        strat = e.get('strategy')
+        pnl = round(strat.total_pnl, 2) if strat else 0
+        return jsonify(sid=sid, logs=logs[-last:], running=e.get('running', False), pnl=pnl, status='running' if e.get('running') else 'completed')
+    # Check active monitors (Option Chain / Strategy Builder)
+    m = active_monitors.get(sid)
+    if m and m.get('user_id') == current_user_id():
+        mon = m['monitor']
+        st = mon.get_status()
+        return jsonify(sid=sid, logs=st.get('logs', [])[-last:], running=mon.running, pnl=round(mon.current_pnl, 2), status='running' if mon.running else 'completed')
+    return jsonify(error='Not found'), 404
+
+@app.route('/api/tracker/<sid>/close', methods=['POST'])
+@login_required
+def api_tracker_close(sid):
+    s = registry.get(sid)
+    if s and s.user_id == current_user_id():
+        s.close()
+        return jsonify(status='closed', pnl=s.current_pnl)
+    # Fallback: old strategies dict
+    e = strategies.get(sid)
+    if e and e.get('user_id') == current_user_id() and e.get('strategy'):
+        e['strategy'].running = False
+        e['strategy'].close_all_positions()
+        return jsonify(status='closed')
+    return jsonify(error='Not found'), 404
+
+@app.route('/api/tracker/close-all', methods=['POST'])
+@login_required
+def api_tracker_close_all():
+    count = registry.close_all(current_user_id())
+    return jsonify(closed=count)
+
+@app.route('/api/tracker/deploy', methods=['POST'])
+@login_required
+def api_tracker_deploy():
+    """Create and start monitoring a strategy from any source."""
+    from config import set_thread_credentials
+    data = request.json or {}
+    api_key, api_secret, _, broker = get_profile_creds(data.get('profile_id'))
+    if not api_key:
+        return jsonify(error='No API profile selected'), 400
+    set_thread_credentials(api_key, api_secret, broker)
+
+    lot_sizes = {'BTC': 0.001, 'ETH': 0.01}
+    asset = data.get('asset', 'BTC')
+
+    strat = TrackedStrategy(
+        source=data.get('source', 'Manual'),
+        name=data.get('name', f"{asset} Strategy"),
+        user_id=current_user_id(),
+        legs=data.get('legs', []),
+        asset=asset,
+        lot_size=lot_sizes.get(asset, 0.001),
+        max_profit=float(data.get('max_profit', 0)),
+        max_loss=float(data.get('max_loss', 0)),
+        profile_id=data.get('profile_id'),
+        interval=int(data.get('interval', 10)),
+        details=data.get('details', {}),
+    )
+
+    def on_done(pnl, reason):
+        update_tracked(strat.sid, status='completed', pnl=round(pnl, 2))
+        record_end(strat.sid, pnl, strat.adjustment_count)
+
+    strat.on_complete = on_done
+    registry.register(strat)
+    track_strategy(strat.sid, strat.source, strat.name, current_user_id(), details=strat.details)
+    record_start(strat.sid, data, user_id=current_user_id())
+    strat.start_monitoring()
+
+    return jsonify(sid=strat.sid, status='running')
 
 
 # ── Serve React Frontend (catch-all — must be last) ──

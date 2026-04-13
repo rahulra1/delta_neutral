@@ -34,6 +34,7 @@ class DeltaNeutralStrategy:
         self.cumulative_realized_pnl = 0
         self.realized_pnl_snapshot = 0
         self.adjustment_count = 0
+        self.adjustment_history = []  # [{leg, symbol, entry, exit, pnl, timestamp}]
         self.call_actual_entry_price = 0
         self.put_actual_entry_price = 0
         self.running = True
@@ -72,11 +73,15 @@ class DeltaNeutralStrategy:
     def check_adjustment(self, leg, current_price, current_delta):
         ts = datetime.now().strftime("%H:%M:%S")
         entry = self.call_entry_price if leg == 'call' else self.put_entry_price
+        if entry <= 0 or current_price <= 0:
+            return
+        if self.adjustment_count >= self.max_adjustments:
+            return
         change = (current_price - entry) / entry
         if change < self.premium_threshold:
             return
         other_price = self._get_other_leg_price(leg)
-        print(f"[{ts}] ⚠ ALERT: {leg.upper()} premium increased by {change:.2%}!")
+        print(f"[{ts}] ⚠ ALERT: {leg.upper()} premium increased by {change:.2%}! (threshold: {self.premium_threshold:.2%})")
         print(f"  Entry: ${entry:.2f} → Current: ${current_price:.2f}")
         if leg == 'call':
             print("  Action: Closing put position and re-entering NEW put with matching delta")
@@ -174,8 +179,8 @@ class DeltaNeutralStrategy:
                         continue
                     call_price, put_price, source = cd['mark_price'], pd['mark_price'], "REST"
 
-                call_chg = (call_price - self.call_entry_price) / self.call_entry_price
-                put_chg = (put_price - self.put_entry_price) / self.put_entry_price
+                call_chg = (call_price - self.call_entry_price) / self.call_entry_price if self.call_entry_price > 0 else 0
+                put_chg = (put_price - self.put_entry_price) / self.put_entry_price if self.put_entry_price > 0 else 0
 
                 if call_chg >= self.premium_threshold:
                     call_delta = call_ws['delta'] if call_ws else 0
@@ -245,6 +250,15 @@ class DeltaNeutralStrategy:
         realized = (entry_from_pos - close_current) * abs(size) * close_cv
         print(f"  [1/3] Closing {close_leg.upper()}: Entry=${entry_from_pos:.2f} Current=${close_current:.2f} PnL=${realized:+.2f}")
 
+        self.adjustment_history.append({
+            'leg': close_leg, 'symbol': close_pos['symbol'],
+            'strike': close_pos.get('strike_price', ''),
+            'entry': round(entry_from_pos, 2), 'exit': round(close_current, 2),
+            'pnl': round(realized, 2), 'size': abs(size),
+            'timestamp': datetime.now().isoformat(),
+            'adjustment': self.adjustment_count + 1,
+        })
+
         self.ws_manager.unsubscribe([close_pos['symbol']])
         place_order(close_pos['product_id'], close_pos['symbol'], self.lot_size, 'buy')
         self.cumulative_realized_pnl += realized
@@ -296,6 +310,9 @@ class DeltaNeutralStrategy:
         self.realized_pnl_snapshot = self.cumulative_realized_pnl
         self.adjustment_count += 1
         self.ws_manager.subscribe([new_opt['symbol']])
+        # Cooldown: prevent immediate re-trigger after adjustment
+        self.last_check_time_call = time.time() + 30
+        self.last_check_time_put = time.time() + 30
 
         print(f"  ✓ Adjustment #{self.adjustment_count} done | Cumulative PnL: ${self.cumulative_realized_pnl:.2f}")
         print(f"  ✓ New baselines — Call: ${self.call_entry_price:.2f} | Put: ${self.put_entry_price:.2f}")
