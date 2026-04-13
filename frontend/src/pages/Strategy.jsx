@@ -80,7 +80,13 @@ export default function Strategy() {
 
   return (
     <div className="container">
-      <div className="page-title">Delta Neutral — {asset}</div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+        <div className="page-title" style={{ marginBottom: 0 }}>Delta Neutral — {asset}</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <a href="/strategy/new?asset=BTC" className="btn btn-outline">₿ New BTC Strategy</a>
+          <a href="/strategy/new?asset=ETH" className="btn btn-outline">⟠ New ETH Strategy</a>
+        </div>
+      </div>
 
       {error && <div className="error-msg">{error}</div>}
 

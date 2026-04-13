@@ -55,14 +55,6 @@ export default function Dashboard() {
     <div className="container">
       <div className="page-title">Hello, {JSON.parse(localStorage.getItem('user'))?.username} 👋</div>
 
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 24 }}>
-        <button className="btn btn-outline" onClick={() => nav('/strategy/new?asset=BTC')}>₿ New BTC Strategy</button>
-        <button className="btn btn-outline" onClick={() => nav('/strategy/new?asset=ETH')}>⟠ New ETH Strategy</button>
-        <button className="btn btn-outline" onClick={() => nav('/option-chain')}>⛓ Option Chain</button>
-        <button className="btn btn-outline" onClick={() => nav('/strategy-builder')}>🛠 Strategy Builder</button>
-        <button className="btn btn-outline" onClick={() => nav('/chart')}>Chart</button>
-      </div>
-
       <div className="top-stats">
         <div className="stat-card"><div className="label">💰 Total P&L</div><div className="value" style={{ color: data.total_pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${data.total_pnl.toFixed(2)}</div><div className="sub">All time</div></div>
         <div className="stat-card"><div className="label">📊 Open Positions</div><div className="value">{data.open_positions}</div><div className="sub">Active</div></div>
