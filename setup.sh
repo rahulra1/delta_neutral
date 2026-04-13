@@ -10,7 +10,7 @@ apt update && apt install -y python3 python3-pip python3-venv nginx certbot pyth
 cd /root/delta_neutral
 python3 -m venv venv
 source venv/bin/activate
-pip install flask requests websocket-client python-dotenv gunicorn
+pip install -r requirements.txt
 
 # Create systemd service
 cat > /etc/systemd/system/algox.service << 'EOF'

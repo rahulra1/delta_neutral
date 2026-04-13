@@ -1,0 +1,7 @@
+flask
+requests
+websocket-client
+python-dotenv
+gunicorn
+bcrypt
+PyJWT

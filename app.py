@@ -1,16 +1,20 @@
 import threading
 import queue
 import uuid
+import os
+import jwt as pyjwt
+from datetime import datetime, timedelta
 import config as default_config
-from flask import Flask, render_template, request, jsonify, Response, redirect, session, url_for
+from flask import Flask, request, jsonify, Response, session, g, send_from_directory
 from functools import wraps
 from auth import check_api_connection
 from strategy import DeltaNeutralStrategy
 from trade_history import record_start, record_end, get_history
 from models import init_db, create_user, verify_user, get_user, update_api_keys, get_profiles, get_profile, create_profile, update_profile, delete_profile, get_user_credits, deduct_credits, add_credits, set_user_plan, get_credit_history, is_admin, set_admin, get_all_users, get_all_plans, CREDIT_COSTS
 
-app = Flask(__name__)
-app.secret_key = 'delta-neutral-bot-secret-key-change-me'
+app = Flask(__name__, static_folder=None)
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'delta-neutral-bot-secret-key-change-me')
+JWT_SECRET = app.secret_key
 
 init_db()
 
@@ -23,7 +27,6 @@ all_tracked = {}
 
 def track_strategy(sid, source, name, user_id, details=None):
     """Register a strategy in the unified tracker."""
-    from datetime import datetime
     all_tracked[sid] = {
         'sid': sid, 'source': source, 'name': name,
         'user_id': user_id, 'status': 'running',
@@ -36,11 +39,41 @@ def update_tracked(sid, **kwargs):
         all_tracked[sid].update(kwargs)
 
 
+def _get_jwt_user_id():
+    """Extract user_id from JWT Bearer token or query param."""
+    token = None
+    auth = request.headers.get('Authorization', '')
+    if auth.startswith('Bearer '):
+        token = auth[7:]
+    if not token:
+        token = request.args.get('token')
+    if token:
+        try:
+            payload = pyjwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+            return payload.get('user_id')
+        except pyjwt.ExpiredSignatureError:
+            return None
+        except pyjwt.InvalidTokenError:
+            return None
+    return None
+
+
+def current_user_id():
+    uid = _get_jwt_user_id()
+    if uid:
+        return uid
+    return session.get('user_id')
+
+
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get('user_id'):
-            return redirect(url_for('login'))
+        uid = current_user_id()
+        if not uid:
+            if request.path.startswith('/api/'):
+                return jsonify(error='Unauthorized'), 401
+            return jsonify(error='Unauthorized'), 401
+        g.user_id = uid
         return f(*args, **kwargs)
     return decorated
 
@@ -48,7 +81,8 @@ def login_required(f):
 def admin_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get('user_id') or not is_admin(session['user_id']):
+        uid = current_user_id()
+        if not uid or not is_admin(uid):
             return jsonify(error='Admin access required'), 403
         return f(*args, **kwargs)
     return decorated
@@ -69,8 +103,37 @@ def credits_required(action):
     return wrapper
 
 
-def current_user_id():
-    return session.get('user_id')
+def _make_token(user_id):
+    return pyjwt.encode({'user_id': user_id, 'exp': datetime.now(tz=None) + timedelta(days=7)}, JWT_SECRET, algorithm='HS256')
+
+
+# ── JWT Auth API ──
+
+@app.route('/api/auth/login', methods=['POST'])
+def api_auth_login():
+    d = request.json or {}
+    user = verify_user(d.get('username', ''), d.get('password', ''))
+    if not user:
+        return jsonify(error='Invalid credentials'), 401
+    return jsonify(token=_make_token(user['id']), user={'id': user['id'], 'username': user['username'], 'is_admin': bool(user.get('is_admin'))})
+
+
+@app.route('/api/auth/register', methods=['POST'])
+def api_auth_register():
+    d = request.json or {}
+    username = (d.get('username') or '').strip()
+    password = d.get('password', '')
+    if not username or len(password) < 6:
+        return jsonify(error='Username required, password min 6 chars'), 400
+    if not create_user(username, password):
+        return jsonify(error='Username already taken'), 400
+    user = verify_user(username, password)
+    return jsonify(token=_make_token(user['id']), user={'id': user['id'], 'username': user['username'], 'is_admin': False})
+
+
+# ── Serve React frontend ──
+
+# React catch-all moved to end of file
 
 
 class LogCapture:
@@ -164,57 +227,7 @@ def run_strategy(sid, params):
         entry['log_queue'].put("__STOPPED__")
 
 
-# ── Auth Routes ──
-
-@app.route('/register', methods=['GET', 'POST'])
-def register():
-    if request.method == 'POST':
-        username = request.form.get('username', '').strip()
-        password = request.form.get('password', '')
-        confirm = request.form.get('confirm_password', '')
-        if not username or not password:
-            return render_template('login.html', error='Username and password required')
-        if len(password) < 6:
-            return render_template('login.html', error='Password must be at least 6 characters')
-        if password != confirm:
-            return render_template('login.html', error='Passwords do not match')
-        if create_user(username, password):
-            user = verify_user(username, password)
-            session['user_id'] = user['id']
-            session['username'] = user['username']
-            return redirect(url_for('dashboard'))
-        return render_template('login.html', error='Username already taken')
-    return redirect(url_for('login'))
-
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if request.method == 'POST':
-        user = verify_user(request.form.get('username', ''), request.form.get('password', ''))
-        if user:
-            session['user_id'] = user['id']
-            session['username'] = user['username']
-            return redirect(url_for('dashboard'))
-        return render_template('login.html', error='Invalid credentials')
-    return render_template('login.html', error=None)
-
-
-@app.route('/logout')
-def logout():
-    session.clear()
-    return redirect(url_for('login'))
-
-
-@app.route('/profile', methods=['GET', 'POST'])
-@login_required
-def profile():
-    user = get_user(current_user_id())
-    if request.method == 'POST':
-        api_key = request.form.get('api_key', '').strip()
-        api_secret = request.form.get('api_secret', '').strip()
-        update_api_keys(current_user_id(), api_key, api_secret)
-        return render_template('profile.html', username=user['username'], api_key=api_key, api_secret=api_secret, success='API keys saved successfully', profiles=get_profiles(current_user_id()))
-    return render_template('profile.html', username=user['username'], api_key=user['api_key'] or '', api_secret=user['api_secret'] or '', success=None, profiles=get_profiles(current_user_id()))
+# ── Old template routes removed — React frontend serves all pages ──
 
 
 # ── Profile API ──
@@ -277,18 +290,6 @@ def api_delete_profile(pid):
     return jsonify(status="deleted")
 
 
-@app.route('/broker')
-@login_required
-def broker_page():
-    return render_template('broker.html', username=session.get('username'))
-
-
-@app.route('/broker/setup')
-@login_required
-def broker_setup_page():
-    return render_template('broker_setup.html', username=session.get('username'))
-
-
 @app.route('/api/test-connection')
 @login_required
 def api_test_connection():
@@ -306,23 +307,6 @@ def api_test_connection():
 
 
 # ── Strategy Routes (per-user isolated) ──
-
-@app.route('/')
-@login_required
-def dashboard():
-    uid = current_user_id()
-    strats = []
-    for sid, e in strategies.items():
-        if e.get('user_id') != uid:
-            continue
-        strats.append(dict(
-            id=sid,
-            name=e['params'].get('expiry_date', '?'),
-            running=e['running'],
-            pnl=round(e['strategy'].total_pnl, 2) if e.get('strategy') else 0,
-        ))
-    return render_template('dashboard.html', strategies=strats, username=session.get('username'))
-
 
 @app.route('/api/dashboard')
 @login_required
@@ -494,59 +478,6 @@ def api_close_all_strategies():
     return jsonify(closed=closed_count)
 
 
-@app.route('/strategy/new')
-@login_required
-def new_strategy():
-    asset = request.args.get('asset', 'BTC')
-    return render_template('index.html',
-        sid='',
-        asset=asset,
-        expiry_date=default_config.EXPIRY_DATE,
-        target_delta=default_config.TARGET_DELTA,
-        delta_tolerance=default_config.DELTA_TOLERANCE,
-        lot_size=default_config.LOT_SIZE,
-        premium_threshold=int(default_config.PREMIUM_INCREASE_THRESHOLD * 100),
-        target_pnl=default_config.TARGET_PNL,
-        monitoring_interval=default_config.MONITORING_INTERVAL,
-        max_adjustments=default_config.MAX_ADJUSTMENTS,
-        running='false',
-        username=session.get('username')
-    )
-
-
-@app.route('/strategy/<sid>')
-@login_required
-def view_strategy(sid):
-    uid = current_user_id()
-    # Delta Neutral strategy with live logs
-    e = strategies.get(sid)
-    if e and e.get('user_id') == uid:
-        p = e['params']
-        return render_template('index.html',
-            sid=sid,
-            asset=p.get('asset', 'BTC'),
-            expiry_date=p.get('expiry_date', default_config.EXPIRY_DATE),
-            target_delta=p.get('target_delta', default_config.TARGET_DELTA),
-            delta_tolerance=p.get('delta_tolerance', default_config.DELTA_TOLERANCE),
-            lot_size=p.get('lot_size', default_config.LOT_SIZE),
-            premium_threshold=p.get('premium_threshold', int(default_config.PREMIUM_INCREASE_THRESHOLD * 100)),
-            target_pnl=p.get('target_pnl', default_config.TARGET_PNL),
-            monitoring_interval=p.get('monitoring_interval', default_config.MONITORING_INTERVAL),
-            max_adjustments=p.get('max_adjustments', default_config.MAX_ADJUSTMENTS),
-            running='true' if e['running'] else 'false',
-            username=session.get('username')
-        )
-    # Any tracked strategy (Option Chain, Strategy Builder, etc.)
-    t = all_tracked.get(sid)
-    if t and t['user_id'] == uid:
-        return render_template('strategy_detail.html', sid=sid, username=session.get('username'))
-    # Fallback: check trade_history.json
-    for h in get_history():
-        if h.get('sid') == sid:
-            return render_template('strategy_detail.html', sid=sid, username=session.get('username'))
-    return redirect(url_for('dashboard'))
-
-
 @app.route('/api/strategy-detail/<sid>')
 @login_required
 def api_strategy_detail(sid):
@@ -578,6 +509,7 @@ def api_strategy_detail(sid):
 
 
 @app.route('/start', methods=['POST'])
+@app.route('/api/start', methods=['POST'])
 @login_required
 @credits_required('deploy_live')
 def start():
@@ -604,6 +536,7 @@ def start():
 
 
 @app.route('/stop', methods=['POST'])
+@app.route('/api/stop', methods=['POST'])
 @login_required
 def stop():
     sid = request.json.get('sid')
@@ -618,6 +551,7 @@ def stop():
 
 
 @app.route('/stream/<sid>')
+@app.route('/api/stream/<sid>')
 @login_required
 def stream(sid):
     e = strategies.get(sid)
@@ -640,6 +574,7 @@ def stream(sid):
 
 
 @app.route('/status/<sid>')
+@app.route('/api/status/<sid>')
 @login_required
 def status(sid):
     e = strategies.get(sid)
@@ -686,12 +621,6 @@ def _leg_info(s, leg):
     )
 
 
-@app.route('/performance')
-@login_required
-def performance():
-    return render_template('performance.html', username=session.get('username'))
-
-
 @app.route('/api/history')
 @login_required
 def api_history():
@@ -706,12 +635,6 @@ def api_history():
 # ── Option Chain Routes ──
 
 active_monitors = {}  # {monitor_id: {monitor, user_id}}
-
-@app.route('/option-chain')
-@login_required
-def option_chain_page():
-    return render_template('option_chain.html', username=session.get('username'))
-
 
 DELTA_ASSETS = {'BTC', 'ETH'}
 
@@ -917,12 +840,6 @@ def api_monitor_stop(mid):
 
 # ── Chart Routes ──
 
-@app.route('/chart')
-@login_required
-def chart_page():
-    return render_template('chart.html', username=session.get('username'))
-
-
 @app.route('/api/chart-data')
 @login_required
 def api_chart_data():
@@ -939,12 +856,6 @@ def api_chart_data():
 
 
 # ── Strategy Builder Routes ──
-
-@app.route('/strategy-builder')
-@login_required
-def strategy_builder_page():
-    return render_template('strategy_builder.html', username=session.get('username'))
-
 
 @app.route('/api/strategy-builder/save', methods=['POST'])
 @login_required
@@ -1096,14 +1007,6 @@ def api_credit_costs():
 
 # ── Admin Routes ──
 
-@app.route('/admin')
-@login_required
-def admin_page():
-    if not is_admin(current_user_id()):
-        return redirect('/')
-    return render_template('admin.html', username=session.get('username'))
-
-
 @app.route('/api/admin/users')
 @login_required
 @admin_required
@@ -1156,6 +1059,17 @@ def api_admin_set_admin():
 @admin_required
 def api_admin_user_history(uid):
     return jsonify(history=get_credit_history(uid, 100))
+
+
+# ── Serve React Frontend (catch-all — must be last) ──
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_react(path):
+    dist = os.path.join(app.root_path, 'frontend', 'dist')
+    if path and os.path.exists(os.path.join(dist, path)):
+        return send_from_directory(dist, path)
+    return send_from_directory(dist, 'index.html')
 
 
 if __name__ == '__main__':
