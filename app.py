@@ -316,6 +316,7 @@ def api_dashboard():
     all_history = get_history()
     user_sids = {sid for sid, e in strategies.items() if e.get('user_id') == uid}
     user_sids.update(sid for sid, t in all_tracked.items() if t.get('user_id') == uid)
+    # Include trades that belong to this user
     trades = [t for t in all_history if t.get('sid') in user_sids or t.get('user_id') == uid]
 
     completed = [t for t in trades if t.get('status') == 'completed']
@@ -356,6 +357,25 @@ def api_dashboard():
     )
 
 
+PEER_PORT = os.environ.get('ALGOX_PEER_PORT', '')  # Set by deploy script to old instance port
+
+
+def _fetch_peer_strategies(uid, token):
+    """Fetch running strategies from the peer (old) instance."""
+    if not PEER_PORT:
+        return []
+    try:
+        import requests as req
+        r = req.get(f'http://127.0.0.1:{PEER_PORT}/api/strategies',
+                     headers={'Authorization': f'Bearer {token}'}, timeout=3)
+        if r.ok:
+            return [s for s in r.json().get('strategies', [])
+                    if s.get('status') in ('running', 'open (no monitor)') and s.get('user_id') == uid]
+    except Exception:
+        pass
+    return []
+
+
 @app.route('/api/strategies')
 @login_required
 def api_all_strategies():
@@ -366,7 +386,6 @@ def api_all_strategies():
         if t['user_id'] != uid:
             continue
         entry = dict(t)
-        # Update live PnL for running strategies
         if entry['status'] == 'running':
             if sid in strategies and strategies[sid].get('strategy'):
                 s = strategies[sid]['strategy']
@@ -377,6 +396,16 @@ def api_all_strategies():
                 if not mon.running:
                     entry['status'] = 'completed'
         result.append(entry)
+
+    # Merge running strategies from peer (old) instance
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    peer = _fetch_peer_strategies(uid, token)
+    local_sids = {s['sid'] for s in result}
+    for ps in peer:
+        if ps['sid'] not in local_sids:
+            ps['_peer'] = True  # mark as running on old instance
+            result.append(ps)
+
     return jsonify(strategies=result)
 
 
@@ -385,6 +414,18 @@ def api_all_strategies():
 def api_close_strategy(sid):
     """Close a single strategy by sid."""
     uid = current_user_id()
+
+    # If not local, proxy to peer
+    if sid not in all_tracked and PEER_PORT:
+        try:
+            import requests as req
+            token = request.headers.get('Authorization', '').replace('Bearer ', '')
+            r = req.post(f'http://127.0.0.1:{PEER_PORT}/api/strategies/{sid}/close',
+                         headers={'Authorization': f'Bearer {token}'}, timeout=10)
+            return jsonify(r.json()), r.status_code
+        except Exception:
+            return jsonify(error="Not found"), 404
+
     if sid not in all_tracked or all_tracked[sid]['user_id'] != uid:
         return jsonify(error="Not found"), 404
 
@@ -495,6 +536,17 @@ def api_strategy_detail(sid):
             if not mon.running:
                 entry['status'] = 'completed'
         return jsonify(**entry)
+    # Try peer instance
+    if PEER_PORT:
+        try:
+            import requests as req
+            token = request.headers.get('Authorization', '').replace('Bearer ', '')
+            r = req.get(f'http://127.0.0.1:{PEER_PORT}/api/strategy-detail/{sid}',
+                        headers={'Authorization': f'Bearer {token}'}, timeout=3)
+            if r.ok:
+                return jsonify(r.json())
+        except Exception:
+            pass
     # Fallback: trade_history.json
     for h in get_history():
         if h.get('sid') == sid:
