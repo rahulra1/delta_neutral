@@ -19,11 +19,12 @@ else
   echo "🔵 Deploying to BLUE (port 5000)..."
 fi
 
-# Pull latest code
-cd "$DEPLOY_DIR"
-git pull
+# Pull latest code into both directories
+cd /root/delta_neutral && git pull
+cd /root/delta_neutral-green && git pull
 
-# Install deps
+# Install deps for the deploy target
+cd "$DEPLOY_DIR"
 source venv/bin/activate
 pip install -r requirements.txt -q
 deactivate
@@ -57,7 +58,7 @@ echo "✅ New traffic → port $DEPLOY_PORT"
 # Check if old instance has running strategies
 check_running() {
   curl -s "http://127.0.0.1:$OLD_PORT/api/strategies" \
-    -H "Authorization: Bearer $(cd /root/delta_neutral-blue && source venv/bin/activate && python3 -c "from app import _make_token; print(_make_token(1))" 2>/dev/null)" 2>/dev/null \
+    -H "Authorization: Bearer $(cd $DEPLOY_DIR && source venv/bin/activate && python3 -c "from app import _make_token; print(_make_token(1))" 2>/dev/null)" 2>/dev/null \
     | python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(1 for s in d.get('strategies',[]) if s.get('status') in ('running','open (no monitor)')))" 2>/dev/null || echo "0"
 }
 
@@ -79,7 +80,7 @@ else
     while true; do
       sleep 30
       R=\$(curl -s 'http://127.0.0.1:$OLD_PORT/api/strategies' \
-        -H 'Authorization: Bearer \$(cd /root/delta_neutral-blue && source venv/bin/activate && python3 -c \"from app import _make_token; print(_make_token(1))\" 2>/dev/null)' 2>/dev/null \
+        -H 'Authorization: Bearer \$(cd $DEPLOY_DIR && source venv/bin/activate && python3 -c \"from app import _make_token; print(_make_token(1))\" 2>/dev/null)' 2>/dev/null \
         | python3 -c 'import sys,json; d=json.load(sys.stdin); print(sum(1 for s in d.get(\"strategies\",[]) if s.get(\"status\") in (\"running\",\"open (no monitor)\")))' 2>/dev/null || echo '0')
       if [ \"\$R\" = '0' ] || [ \"\$R\" = '' ]; then
         systemctl stop $OLD_SVC 2>/dev/null || true
