@@ -50,7 +50,7 @@ fi
 echo "✅ Health check passed"
 
 # Switch new traffic to new instance
-sed -i "s/server 127.0.0.1:[0-9]*/server 127.0.0.1:$DEPLOY_PORT/" /etc/nginx/sites-available/algox
+sed -i "s/127.0.0.1:[0-9]*/127.0.0.1:$DEPLOY_PORT/" /etc/nginx/sites-available/algox
 nginx -t && systemctl reload nginx
 echo "✅ New traffic → port $DEPLOY_PORT"
 
