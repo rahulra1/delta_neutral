@@ -980,15 +980,32 @@ def api_close_position():
     result = place_order(data['product_id'], data['symbol'], int(data['size']), close_side)
     if result is not None:
         position_tracker.close(current_user_id(), data['product_id'])
+        # Also try closing on peer
+        if PEER_PORT:
+            try:
+                import requests as req
+                token = request.headers.get('Authorization', '').replace('Bearer ', '')
+                req.post(f'http://127.0.0.1:{PEER_PORT}/api/close-position',
+                         json=data, headers={'Authorization': f'Bearer {token}'}, timeout=5)
+            except Exception:
+                pass
     return jsonify(success=result is not None)
 
 @app.route('/api/monitor/<mid>')
 @login_required
 def api_monitor_status(mid):
     entry = active_monitors.get(mid)
-    if not entry or entry['user_id'] != current_user_id():
-        return jsonify(error="Not found"), 404
-    return jsonify(**entry['monitor'].get_status())
+    if entry and entry['user_id'] == current_user_id():
+        return jsonify(**entry['monitor'].get_status())
+    if PEER_PORT:
+        try:
+            import requests as req
+            token = request.headers.get('Authorization', '').replace('Bearer ', '')
+            r = req.get(f'http://127.0.0.1:{PEER_PORT}/api/monitor/{mid}',
+                        headers={'Authorization': f'Bearer {token}'}, timeout=3)
+            if r.ok: return jsonify(r.json())
+        except Exception: pass
+    return jsonify(error="Not found"), 404
 
 
 @app.route('/api/monitor/<mid>/stop', methods=['POST'])
@@ -996,6 +1013,14 @@ def api_monitor_status(mid):
 def api_monitor_stop(mid):
     entry = active_monitors.get(mid)
     if not entry or entry['user_id'] != current_user_id():
+        if PEER_PORT:
+            try:
+                import requests as req
+                token = request.headers.get('Authorization', '').replace('Bearer ', '')
+                r = req.post(f'http://127.0.0.1:{PEER_PORT}/api/monitor/{mid}/stop',
+                             headers={'Authorization': f'Bearer {token}'}, timeout=10)
+                if r.ok: return jsonify(r.json())
+            except Exception: pass
         return jsonify(error="Not found"), 404
     from config import set_thread_credentials
     api_key, api_secret, _, broker = get_profile_creds(entry.get('profile_id'))
@@ -1292,6 +1317,23 @@ def api_tracked_positions():
         if p.get('product_id') not in seen:
             merged.append(p)
 
+    # 3b. Merge positions from peer (old) instance
+    if PEER_PORT:
+        try:
+            import requests as req
+            token = request.headers.get('Authorization', '').replace('Bearer ', '')
+            r = req.get(f'http://127.0.0.1:{PEER_PORT}/api/tracked-positions',
+                        headers={'Authorization': f'Bearer {token}'}, params={'profile_id': profile_id}, timeout=3)
+            if r.ok:
+                for p in r.json().get('positions', []):
+                    pid = p.get('product_id')
+                    if pid and pid not in seen:
+                        seen.add(pid)
+                        p['_peer'] = True
+                        merged.append(p)
+        except Exception:
+            pass
+
     # 4. Compute live prices for all
     if merged:
         from api.pricing import get_current_price
@@ -1360,6 +1402,17 @@ def api_tracker_logs(sid):
         mon = m['monitor']
         st = mon.get_status()
         return jsonify(sid=sid, logs=st.get('logs', [])[-last:], running=mon.running, pnl=round(mon.current_pnl, 2), status='running' if mon.running else 'completed')
+    # Proxy to peer
+    if PEER_PORT:
+        try:
+            import requests as req
+            token = request.headers.get('Authorization', '').replace('Bearer ', '')
+            r = req.get(f'http://127.0.0.1:{PEER_PORT}/api/tracker/{sid}/logs',
+                        headers={'Authorization': f'Bearer {token}'}, params={'last': last}, timeout=3)
+            if r.ok:
+                return jsonify(r.json())
+        except Exception:
+            pass
     return jsonify(error='Not found'), 404
 
 @app.route('/api/tracker/<sid>/close', methods=['POST'])
@@ -1375,6 +1428,17 @@ def api_tracker_close(sid):
         e['strategy'].running = False
         e['strategy'].close_all_positions()
         return jsonify(status='closed')
+    # Proxy to peer
+    if PEER_PORT:
+        try:
+            import requests as req
+            token = request.headers.get('Authorization', '').replace('Bearer ', '')
+            r = req.post(f'http://127.0.0.1:{PEER_PORT}/api/tracker/{sid}/close',
+                         headers={'Authorization': f'Bearer {token}'}, timeout=10)
+            if r.ok:
+                return jsonify(r.json())
+        except Exception:
+            pass
     return jsonify(error='Not found'), 404
 
 @app.route('/api/tracker/close-all', methods=['POST'])
