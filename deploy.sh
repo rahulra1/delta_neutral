@@ -57,9 +57,18 @@ echo "✅ New traffic → port $DEPLOY_PORT"
 
 # Check if old instance has running strategies
 check_running() {
-  curl -s "http://127.0.0.1:$OLD_PORT/api/strategies" \
-    -H "Authorization: Bearer $(cd $DEPLOY_DIR && source venv/bin/activate && python3 -c "from app import _make_token; print(_make_token(1))" 2>/dev/null)" 2>/dev/null \
-    | python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(1 for s in d.get('strategies',[]) if s.get('status') in ('running','open (no monitor)')))" 2>/dev/null || echo "0"
+  # Generate token from the deploy dir (has latest code)
+  TOKEN=$(cd "$DEPLOY_DIR" && source venv/bin/activate && python3 -c 'from app import _make_token; print(_make_token(1))' 2>/dev/null)
+  if [ -z "$TOKEN" ]; then
+    echo "0"
+    return
+  fi
+  RESP=$(curl -s "http://127.0.0.1:$OLD_PORT/api/strategies" -H "Authorization: Bearer $TOKEN" 2>/dev/null)
+  if [ -z "$RESP" ]; then
+    echo "0"
+    return
+  fi
+  echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(1 for s in d.get('strategies',[]) if s.get('status') in ('running','open (no monitor)')))" 2>/dev/null || echo "0"
 }
 
 RUNNING=$(check_running)
@@ -77,11 +86,11 @@ else
   echo ""
   # Start background watcher that stops old instance when strategies finish
   nohup bash -c "
+    TOKEN=\$(cd $DEPLOY_DIR && source venv/bin/activate && python3 -c 'from app import _make_token; print(_make_token(1))' 2>/dev/null)
     while true; do
       sleep 30
-      R=\$(curl -s 'http://127.0.0.1:$OLD_PORT/api/strategies' \
-        -H 'Authorization: Bearer \$(cd $DEPLOY_DIR && source venv/bin/activate && python3 -c \"from app import _make_token; print(_make_token(1))\" 2>/dev/null)' 2>/dev/null \
-        | python3 -c 'import sys,json; d=json.load(sys.stdin); print(sum(1 for s in d.get(\"strategies\",[]) if s.get(\"status\") in (\"running\",\"open (no monitor)\")))' 2>/dev/null || echo '0')
+      RESP=\$(curl -s 'http://127.0.0.1:$OLD_PORT/api/strategies' -H \"Authorization: Bearer \$TOKEN\" 2>/dev/null)
+      R=\$(echo \"\$RESP\" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(sum(1 for s in d.get(\"strategies\",[]) if s.get(\"status\") in (\"running\",\"open (no monitor)\")))' 2>/dev/null || echo '0')
       if [ \"\$R\" = '0' ] || [ \"\$R\" = '' ]; then
         systemctl stop $OLD_SVC 2>/dev/null || true
         systemctl stop algox 2>/dev/null || true
