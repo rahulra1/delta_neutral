@@ -1,7 +1,7 @@
 import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './context/AuthContext';
-import Navbar from './components/Navbar';
+import Sidebar from './components/Sidebar';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Strategy from './pages/Strategy';
@@ -23,25 +23,31 @@ function PrivateRoute({ children }) {
 
 export default function App() {
   const { user } = useAuth();
-  return (
-    <>
-      {user && <Navbar />}
-      <Routes>
-        <Route path="/login" element={user ? <Navigate to="/" /> : <Login />} />
-        <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
-        <Route path="/strategy/new" element={<PrivateRoute><Strategy /></PrivateRoute>} />
-        <Route path="/strategy/:sid" element={<PrivateRoute><StrategyDetail /></PrivateRoute>} />
-        <Route path="/strategy/:sid/logs" element={<PrivateRoute><StrategyLogs /></PrivateRoute>} />
-        <Route path="/option-chain" element={<PrivateRoute><OptionChain /></PrivateRoute>} />
-        <Route path="/strategy-builder" element={<PrivateRoute><StrategyBuilder /></PrivateRoute>} />
-        <Route path="/performance" element={<PrivateRoute><Performance /></PrivateRoute>} />
-        <Route path="/profile" element={<PrivateRoute><Profile /></PrivateRoute>} />
-        <Route path="/broker" element={<PrivateRoute><Broker /></PrivateRoute>} />
-        <Route path="/broker/setup" element={<PrivateRoute><BrokerSetup /></PrivateRoute>} />
-        <Route path="/chart" element={<PrivateRoute><ChartPage /></PrivateRoute>} />
-        <Route path="/admin" element={<PrivateRoute><Admin /></PrivateRoute>} />
-        <Route path="*" element={<Navigate to="/" />} />
-      </Routes>
-    </>
+  return user ? (
+    <div className="app-layout">
+      <Sidebar />
+      <main className="app-main">
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/strategy/new" element={<Strategy />} />
+          <Route path="/strategy/:sid" element={<StrategyDetail />} />
+          <Route path="/strategy/:sid/logs" element={<StrategyLogs />} />
+          <Route path="/option-chain" element={<OptionChain />} />
+          <Route path="/strategy-builder" element={<StrategyBuilder />} />
+          <Route path="/performance" element={<Performance />} />
+          <Route path="/profile" element={<Profile />} />
+          <Route path="/broker" element={<Broker />} />
+          <Route path="/broker/setup" element={<BrokerSetup />} />
+          <Route path="/chart" element={<ChartPage />} />
+          <Route path="/admin" element={<Admin />} />
+          <Route path="*" element={<Navigate to="/" />} />
+        </Routes>
+      </main>
+    </div>
+  ) : (
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route path="*" element={<Navigate to="/login" />} />
+    </Routes>
   );
 }
