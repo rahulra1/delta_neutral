@@ -63,7 +63,8 @@ check_running() {
 
 RUNNING=$(check_running)
 if [ "$RUNNING" = "0" ] || [ "$RUNNING" = "" ]; then
-  systemctl stop "$OLD_SVC"
+  systemctl stop "$OLD_SVC" 2>/dev/null || true
+  systemctl stop algox 2>/dev/null || true
   echo "✅ Old instance stopped (no running strategies)"
 else
   echo "⏳ Old instance has $RUNNING running strategy(s) — keeping alive"
@@ -81,7 +82,8 @@ else
         -H 'Authorization: Bearer \$(cd /root/delta_neutral-blue && source venv/bin/activate && python3 -c \"from app import _make_token; print(_make_token(1))\" 2>/dev/null)' 2>/dev/null \
         | python3 -c 'import sys,json; d=json.load(sys.stdin); print(sum(1 for s in d.get(\"strategies\",[]) if s.get(\"status\") in (\"running\",\"open (no monitor)\")))' 2>/dev/null || echo '0')
       if [ \"\$R\" = '0' ] || [ \"\$R\" = '' ]; then
-        systemctl stop $OLD_SVC
+        systemctl stop $OLD_SVC 2>/dev/null || true
+        systemctl stop algox 2>/dev/null || true
         rm -f /etc/systemd/system/${DEPLOY_SVC}.service.d/peer.conf
         systemctl daemon-reload
         systemctl restart $DEPLOY_SVC
