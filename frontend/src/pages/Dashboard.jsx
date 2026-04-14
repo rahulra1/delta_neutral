@@ -181,30 +181,6 @@ export default function Dashboard() {
         onRefresh={loadStrats}
         onCloseAll={closeAll}
       />
-
-      <div className="card">
-        <div style={{ fontWeight: 700, marginBottom: 16 }}>Trade History</div>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.82rem' }}>
-          <thead><tr>{['ID', 'Source', 'Status', 'Asset', 'Expiry', 'Lots', 'Details', 'P&L', 'Started'].map(h => <th key={h} style={{ textAlign: 'left', padding: '8px 10px', color: 'var(--muted)', fontSize: '.75rem', borderBottom: '2px solid var(--border)' }}>{h}</th>)}</tr></thead>
-          <tbody>
-            {(data.recent_trades || []).map(t => {
-              const p = t.params || {};
-              return (
-              <tr key={t.sid + t.started_at} onClick={() => nav(`/strategy/${t.sid}`)} style={{ cursor: 'pointer' }}>
-                <td style={{ padding: '10px', fontWeight: 600, borderBottom: '1px solid var(--border)' }}>{t.sid}</td>
-                <td style={{ padding: '10px', borderBottom: '1px solid var(--border)' }}><span className="badge" style={{ background: '#ede9fe', color: '#6366f1', fontSize: '.7rem' }}>{p.source || 'DN'}</span></td>
-                <td style={{ padding: '10px', borderBottom: '1px solid var(--border)' }}><span className={t.status === 'running' ? 'badge badge-yellow' : (t.pnl || 0) >= 0 ? 'badge badge-green' : 'badge badge-red'}>{t.status === 'running' ? 'Running' : (t.pnl || 0) >= 0 ? 'Profit' : 'Loss'}</span></td>
-                <td style={{ padding: '10px', borderBottom: '1px solid var(--border)', fontWeight: 600 }}>{p.asset || 'BTC'}</td>
-                <td style={{ padding: '10px', borderBottom: '1px solid var(--border)' }}>{p.expiry_date || '—'}</td>
-                <td style={{ padding: '10px', borderBottom: '1px solid var(--border)' }}>{p.lot_size || p.legs || '—'}</td>
-                <td style={{ padding: '10px', borderBottom: '1px solid var(--border)', fontSize: '.75rem', color: 'var(--muted)' }}>{p.leg_details || (p.target_delta ? `Δ${p.target_delta}` : p.name || '—')}</td>
-                <td style={{ padding: '10px', fontWeight: 700, color: (t.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)', borderBottom: '1px solid var(--border)' }}>${(t.pnl || 0).toFixed(2)}</td>
-                <td style={{ padding: '10px', fontSize: '.75rem', color: 'var(--muted)', borderBottom: '1px solid var(--border)' }}>{(t.started_at || '').replace('T', ' ').slice(0, 16)}</td>
-              </tr>
-            );})}
-          </tbody>
-        </table>
-      </div>
     </div>
   );
 }
