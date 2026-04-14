@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-CURRENT=$(grep -oP 'server 127\.0\.0\.1:\K\d+' /etc/nginx/sites-available/algox | head -1)
+CURRENT=$(grep -oP '127\.0\.0\.1:\K\d+' /etc/nginx/sites-available/algox | head -1)
 
 if [ "$CURRENT" = "5000" ]; then
   DEPLOY_DIR="/root/delta_neutral-green"
