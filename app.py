@@ -399,8 +399,7 @@ def _fetch_peer_strategies(uid, token):
         r = req.get(f'http://127.0.0.1:{PEER_PORT}/api/strategies',
                      headers={'Authorization': f'Bearer {token}'}, timeout=3)
         if r.ok:
-            return [s for s in r.json().get('strategies', [])
-                    if s.get('status') in ('running', 'open (no monitor)') and s.get('user_id') == uid]
+            return r.json().get('strategies', [])
     except Exception:
         pass
     return []
