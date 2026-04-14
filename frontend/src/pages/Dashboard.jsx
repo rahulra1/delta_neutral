@@ -3,6 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Filler, ArcElement, Tooltip } from 'chart.js';
 import { Line, Doughnut } from 'react-chartjs-2';
 import api from '../api';
+import { PositionTable } from '../components/PositionCard';
+import PositionCard from '../components/PositionCard';
+import PayoffChart from '../components/PayoffChart';
+import { StrategyGrid } from '../components/StrategyCard';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, ArcElement, Tooltip);
 
@@ -12,6 +16,7 @@ export default function Dashboard() {
   const [profiles, setProfiles] = useState([]);
   const [positions, setPositions] = useState([]);
   const [posProfile, setPosProfile] = useState('');
+  const [selectedPos, setSelectedPos] = useState(new Set());
   const nav = useNavigate();
 
   useEffect(() => {
@@ -32,9 +37,10 @@ export default function Dashboard() {
   const closeAll = () => { if (window.confirm('Close ALL running strategies?')) api.post('/strategies/close-all').then(loadStrats); };
 
   const loadPositions = () => {
-    api.get('/positions', { params: { profile_id: posProfile } }).then(r => {
+    api.get('/tracked-positions', { params: { profile_id: posProfile } }).then(r => {
       if (r.data.error) { setPositions([]); return; }
       setPositions(r.data.positions || []);
+      setSelectedPos(new Set());
     }).catch(() => setPositions([]));
   };
   const closeLeg = (p) => {
@@ -110,65 +116,71 @@ export default function Dashboard() {
               {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
             <button className="btn btn-outline" onClick={loadPositions} style={{ padding: '6px 14px', fontSize: '.8rem' }}>🔄 Load</button>
+            {positions.length > 0 && (
+              <button className="btn btn-outline" onClick={() => setSelectedPos(prev => prev.size === positions.length ? new Set() : new Set(positions.map((_, i) => i)))} style={{ padding: '6px 14px', fontSize: '.8rem' }}>
+                {selectedPos.size === positions.length ? 'Deselect All' : 'Select All'}
+              </button>
+            )}
           </div>
         </div>
         {positions.length === 0 ? (
           <div style={{ color: 'var(--muted)', fontSize: '.85rem', padding: 10 }}>Click "Load" to fetch positions from broker</div>
         ) : (
           <>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.82rem' }}>
-              <thead><tr>{['Symbol', 'Side', 'Type', 'Strike', 'Size', 'Entry', 'Mark', 'P&L', 'Action'].map(h => <th key={h} style={{ textAlign: 'left', padding: '8px', color: 'var(--muted)', fontSize: '.75rem', textTransform: 'uppercase', borderBottom: '2px solid var(--border)' }}>{h}</th>)}</tr></thead>
-              <tbody>
-                {positions.map((p, i) => (
-                  <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
-                    <td style={{ padding: 8, fontWeight: 600, fontSize: '.8rem' }}>{p.symbol}</td>
-                    <td style={{ padding: 8 }}><span className={`badge ${p.side === 'buy' ? 'badge-green' : 'badge-red'}`}>{p.side.toUpperCase()}</span></td>
-                    <td style={{ padding: 8 }}>{p.type.toUpperCase()}</td>
-                    <td style={{ padding: 8, textAlign: 'right' }}>{Number(p.strike).toLocaleString()}</td>
-                    <td style={{ padding: 8, textAlign: 'right' }}>{p.size}</td>
-                    <td style={{ padding: 8, textAlign: 'right' }}>${p.entry_price.toFixed(2)}</td>
-                    <td style={{ padding: 8, textAlign: 'right', fontWeight: 600 }}>${p.mark_price.toFixed(2)}</td>
-                    <td style={{ padding: 8, textAlign: 'right', fontWeight: 700, color: p.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${p.pnl.toFixed(2)}</td>
-                    <td style={{ padding: 8, textAlign: 'center' }}><button className="btn btn-red" onClick={() => closeLeg(p)} style={{ padding: '4px 12px', fontSize: '.75rem' }}>Close</button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <div style={{ textAlign: 'right', padding: '10px', fontWeight: 800, fontSize: '.9rem' }}>
-              Total P&L: <span style={{ color: positions.reduce((s, p) => s + p.pnl, 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${positions.reduce((s, p) => s + p.pnl, 0).toFixed(2)}</span>
+            {/* Position Cards */}
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+              {positions.map((p, i) => (
+                <div key={i} style={{ position: 'relative', cursor: 'pointer' }} onClick={() => setSelectedPos(prev => { const n = new Set(prev); n.has(i) ? n.delete(i) : n.add(i); return n; })}>
+                  <div style={{ position: 'absolute', top: 8, left: 8, zIndex: 1 }}>
+                    <input type="checkbox" checked={selectedPos.has(i)} readOnly style={{ accentColor: '#6366f1' }} />
+                  </div>
+                  <div style={{ paddingLeft: 8, border: selectedPos.has(i) ? '2px solid #6366f1' : '2px solid transparent', borderRadius: 10, transition: 'border-color .15s' }}>
+                    <PositionCard position={p} sym="$" onClose={() => closeLeg(p)} />
+                  </div>
+                </div>
+              ))}
             </div>
+
+            {/* Total P&L */}
+            <div style={{ textAlign: 'right', padding: '8px', fontWeight: 800, fontSize: '.9rem', borderTop: '1px solid var(--border)' }}>
+              Total P&L: <span style={{ color: positions.reduce((s, p) => s + (p.pnl || p.current_pnl || 0), 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                ${positions.reduce((s, p) => s + (p.pnl || p.current_pnl || 0), 0).toFixed(2)}
+              </span>
+            </div>
+
+            {/* Payoff Chart for selected positions */}
+            {selectedPos.size > 0 && (
+              <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+                <div style={{ fontSize: '.85rem', fontWeight: 700, marginBottom: 8 }}>📈 Payoff at Expiry ({selectedPos.size} leg{selectedPos.size > 1 ? 's' : ''} selected)</div>
+                <PayoffChart
+                  legs={[...selectedPos].map(i => {
+                    const p = positions[i];
+                    return {
+                      side: p.side, type: p.type,
+                      strike: parseFloat(p.strike),
+                      mark: p.entry_price || p.mark_price || 0,
+                      size: p.size, iv: 0.5,
+                    };
+                  })}
+                  lotSize={positions[0]?.asset === 'ETH' ? 0.01 : 0.001}
+                  spot={0}
+                  sym="$"
+                  daysToExpiry={30}
+                />
+              </div>
+            )}
           </>
         )}
       </div>
 
-      <div className="card" style={{ marginBottom: 20 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <div style={{ fontWeight: 700 }}>📋 All Strategies</div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn btn-outline" onClick={loadStrats} style={{ padding: '4px 12px', fontSize: '.8rem' }}>🔄 Refresh</button>
-            <button className="btn btn-red" onClick={closeAll} style={{ padding: '4px 12px', fontSize: '.8rem' }}>✕ Close All</button>
-          </div>
-        </div>
-        {strats.length === 0 && <div style={{ color: 'var(--muted)', fontSize: '.85rem', padding: 10 }}>No strategies yet</div>}
-        {strats.map(s => {
-          const isRunning = s.status === 'running' || s.status === 'open (no monitor)';
-          return (
-            <div key={s.sid} className="strat-row" onClick={() => nav(`/strategy/${s.sid}`)}>
-              <div>
-                <span className={`source-badge ${s.source === 'AlgoX DN' ? 'source-dn' : 'source-oc'}`}>{s.source}</span>
-                <div style={{ fontWeight: 700, marginTop: 4 }}>{s.name}</div>
-                <div style={{ fontSize: '.75rem', color: 'var(--muted)' }}>ID: {s.sid} · {(s.started_at || '').replace('T', ' ').slice(0, 16)}</div>
-              </div>
-              <div style={{ textAlign: 'right' }}>
-                <div style={{ fontWeight: 700, fontSize: '1rem', color: (s.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.pnl || 0).toFixed(2)}</div>
-                <div style={{ fontSize: '.75rem' }}>{isRunning ? <span className="badge badge-green">● {s.status}</span> : <span className="badge" style={{ background: '#f0f0f0', color: 'var(--muted)' }}>{s.status}</span>}</div>
-                {isRunning && <button className="btn btn-red" onClick={e => { e.stopPropagation(); closeStrategy(s.sid); }} style={{ padding: '4px 12px', fontSize: '.75rem', marginTop: 4 }}>✕ Close</button>}
-                <button className="btn btn-outline" onClick={e => { e.stopPropagation(); nav(`/strategy/${s.sid}/logs`); }} style={{ padding: '4px 12px', fontSize: '.75rem', marginTop: 4 }}>📋 Logs</button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
+      <StrategyGrid
+        strategies={strats} title="📋 All Strategies"
+        onSelect={s => nav(`/strategy/${s.sid}`)}
+        onClose={sid => { if (window.confirm('Close this strategy?')) api.post(`/strategies/${sid}/close`).then(loadStrats); }}
+        onLogs={sid => nav(`/strategy/${sid}/logs`)}
+        onRefresh={loadStrats}
+        onCloseAll={closeAll}
+      />
 
       <div className="card">
         <div style={{ fontWeight: 700, marginBottom: 16 }}>Trade History</div>

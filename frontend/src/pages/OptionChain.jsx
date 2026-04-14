@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import api from '../api';
 import PayoffChart from '../components/PayoffChart';
+import { PositionGrid } from '../components/PositionCard';
 
 const ASSETS = ['BTC', 'ETH', 'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'];
 const CRYPTO = new Set(['BTC', 'ETH']);
@@ -20,11 +21,32 @@ export default function OptionChain() {
   const [maxLoss, setMaxLoss] = useState(0);
   const [monitorId, setMonitorId] = useState(null);
   const [monitorData, setMonitorData] = useState(null);
+  const [openPositions, setOpenPositions] = useState([]);
+  const [posPnl, setPosPnl] = useState(0);
   const monitorRef = useRef(null);
 
   const isCrypto = CRYPTO.has(asset);
   const sym = isCrypto ? '$' : '₹';
   const lot = LOT_SIZE[asset] || 1;
+
+  const loadPositions = () => {
+    api.get('/tracked-positions', { params: { profile_id: profileId } }).then(r => {
+      setOpenPositions(r.data.positions || []);
+      setPosPnl(r.data.total_pnl || 0);
+    }).catch(() => {});
+  };
+
+  useEffect(() => {
+    loadPositions();
+    const pt = setInterval(loadPositions, 10000);
+    return () => clearInterval(pt);
+  }, []);
+
+  const closePosition = (p) => {
+    if (!window.confirm(`Close ${p.side.toUpperCase()} ${p.size} lots of ${p.symbol}?`)) return;
+    api.post('/close-position', { product_id: p.product_id, symbol: p.symbol, size: p.size, side: p.side, profile_id: profileId })
+      .then(() => loadPositions());
+  };
 
   useEffect(() => {
     api.get('/profiles').then(r => {
@@ -94,6 +116,7 @@ export default function OptionChain() {
       const ok = (r.data.results || []).filter(r => r.success).length;
       alert(`${ok} order(s) placed`);
       if (ok === legs.length) setLegs([]);
+      loadPositions();
     });
   };
 
@@ -191,6 +214,9 @@ export default function OptionChain() {
           </div>
         </div>
       )}
+
+      {/* Open Positions */}
+      <PositionGrid positions={openPositions} sym={sym} onClose={closePosition} onRefresh={loadPositions} />
 
       {/* Chain Table */}
       <div className="chain-wrap">

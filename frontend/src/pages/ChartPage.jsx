@@ -14,6 +14,7 @@ const IND_LIST = [
   { key: 'supertrend', label: 'Supertrend', color: '#22c55e' },
   { key: 'rsi', label: 'RSI', color: '#7c3aed' },
   { key: 'rsi_div_mss', label: 'Div+MSS', color: '#ef4444' },
+  { key: 'sma_vol_breakout', label: 'SMA+Vol', color: '#3b82f6' },
 ];
 
 export default function ChartPage() {
@@ -90,30 +91,58 @@ export default function ChartPage() {
       rsiS.setData(inds.rsi.data);
     }
 
+    // Collect all markers from signal indicators
+    let allMarkers = [];
+
     // RSI Divergence + MSS signals
     if (inds.rsi_div_mss?.signals?.length) {
       const ohlc = data.candles;
-      const markers = inds.rsi_div_mss.signals.map(s => ({
-        time: s.time,
-        position: s.type === 'buy' ? 'belowBar' : 'aboveBar',
-        color: s.type === 'buy' ? '#26a65b' : '#ea3943',
-        shape: s.type === 'buy' ? 'arrowUp' : 'arrowDown',
-        text: s.type === 'buy' ? 'BUY (MSS)' : 'SELL (MSS)',
-      }));
-      markers.sort((a, b) => a.time - b.time);
-      cs.setMarkers(markers);
+      inds.rsi_div_mss.signals.forEach(s => {
+        allMarkers.push({
+          time: s.time,
+          position: s.type === 'buy' ? 'belowBar' : 'aboveBar',
+          color: s.type === 'buy' ? '#26a65b' : '#ea3943',
+          shape: s.type === 'buy' ? 'arrowUp' : 'arrowDown',
+          text: s.type === 'buy' ? 'BUY (MSS)' : 'SELL (MSS)',
+        });
+      });
       // SL and TP lines for each signal
       const ext = Math.min(30, Math.max(15, ohlc.length / 10 | 0));
       inds.rsi_div_mss.signals.forEach(s => {
-        if (s.sl) {
-          const sl = chart.addLineSeries({ color: '#ea3943', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false, title: 'SL' });
-          sl.setData([{ time: s.time, value: s.sl }, { time: s.time + ext * 3600, value: s.sl }]);
-        }
-        if (s.tp1) {
-          const tp = chart.addLineSeries({ color: '#26a65b', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false, title: 'TP1' });
-          tp.setData([{ time: s.time, value: s.tp1 }, { time: s.time + ext * 3600, value: s.tp1 }]);
-        }
+        if (s.sl) chart.addLineSeries({ color: '#ea3943', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.sl }, { time: s.time + ext * 3600, value: s.sl }]);
+        if (s.tp1) chart.addLineSeries({ color: '#26a65b', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.tp1 }, { time: s.time + ext * 3600, value: s.tp1 }]);
       });
+    }
+
+    // SMA+Volume Breakout signals
+    if (inds.sma_vol_breakout) {
+      const svb = inds.sma_vol_breakout;
+      if (svb.sma?.length) {
+        chart.addLineSeries({ color: '#3b82f6', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, title: 'SMA 50' }).setData(svb.sma);
+      }
+      if (svb.signals?.length) {
+        svb.signals.forEach(s => {
+          const isFake = s.setup === 2;
+          allMarkers.push({
+            time: s.time,
+            position: s.type === 'buy' ? 'belowBar' : 'aboveBar',
+            color: isFake ? '#f59e0b' : (s.type === 'buy' ? '#26a65b' : '#ea3943'),
+            shape: s.type === 'buy' ? 'arrowUp' : 'arrowDown',
+            text: `${s.type === 'buy' ? 'BUY' : 'SELL'} ${isFake ? '(Fake BO)' : '(Strong)'}`,
+          });
+        });
+        const ext2 = Math.min(30, Math.max(15, data.candles.length / 10 | 0));
+        svb.signals.filter(s => s.strength === 'strong').forEach(s => {
+          if (s.sl) chart.addLineSeries({ color: '#ea3943', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.sl }, { time: s.time + ext2 * 3600, value: s.sl }]);
+          if (s.tp1) chart.addLineSeries({ color: '#26a65b', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.tp1 }, { time: s.time + ext2 * 3600, value: s.tp1 }]);
+        });
+      }
+    }
+
+    // Apply all markers at once
+    if (allMarkers.length) {
+      allMarkers.sort((a, b) => a.time - b.time);
+      cs.setMarkers(allMarkers);
     }
 
     chart.timeScale().fitContent();

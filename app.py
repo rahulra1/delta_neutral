@@ -12,6 +12,7 @@ from strategy import DeltaNeutralStrategy
 from trade_history import record_start, record_end, get_history
 from models import init_db, create_user, verify_user, get_user, update_api_keys, get_profiles, get_profile, create_profile, update_profile, delete_profile, get_user_credits, deduct_credits, add_credits, set_user_plan, get_credit_history, is_admin, set_admin, get_all_users, get_all_plans, CREDIT_COSTS
 from strategy.tracker import TrackedStrategy, registry
+from api.position_tracker import position_tracker
 
 app = Flask(__name__, static_folder=None)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'delta-neutral-bot-secret-key-change-me')
@@ -864,6 +865,11 @@ def api_place_legs():
                 'side': leg['side'], 'size': int(leg['size']),
                 'entry_price': float(leg.get('mark', 0)),
             })
+            position_tracker.open(current_user_id(), leg['product_id'], leg['symbol'],
+                type=leg.get('type', ''), strike=leg.get('strike', ''),
+                side=leg['side'], size=int(leg['size']),
+                entry_price=float(leg.get('mark', 0)),
+                asset=data.get('asset', 'BTC'), source='Option Chain')
 
     # Always track the strategy
     asset = data.get('asset', 'BTC')
@@ -972,6 +978,8 @@ def api_close_position():
     # To close: buy back if short, sell if long
     close_side = 'buy' if data['side'] == 'sell' else 'sell'
     result = place_order(data['product_id'], data['symbol'], int(data['size']), close_side)
+    if result is not None:
+        position_tracker.close(current_user_id(), data['product_id'])
     return jsonify(success=result is not None)
 
 @app.route('/api/monitor/<mid>')
@@ -1098,6 +1106,11 @@ def api_deploy_strategy_builder():
                 'side': leg['side'], 'size': size,
                 'entry_price': float(opt.get('mark_price', 0)),
             })
+            position_tracker.open(current_user_id(), opt['product_id'], opt['symbol'],
+                type=leg['type'], strike=opt['strike'],
+                side=leg['side'], size=size,
+                entry_price=float(opt.get('mark_price', 0)),
+                asset=asset, source='Strategy Builder')
 
     if not placed_legs:
         return jsonify(error="All orders failed", results=results), 500
@@ -1228,6 +1241,82 @@ def api_admin_user_history(uid):
 
 
 # ── Unified Strategy Tracker API ──
+
+@app.route('/api/tracked-positions')
+@login_required
+def api_tracked_positions():
+    """Return all positions — from broker + position tracker, deduplicated."""
+    from api.live_pnl import compute_live_legs
+    uid = current_user_id()
+
+    # 1. Get positions from position tracker (Option Chain, Strategy Builder)
+    tracked = position_tracker.to_list(uid, refresh=True)
+
+    # 2. Get positions from broker API if profile provided
+    broker_positions = []
+    profile_id = request.args.get('profile_id', '')
+    if profile_id:
+        import re
+        from api.positions import get_positions
+        from config import set_thread_credentials
+        api_key, api_secret, _, broker = get_profile_creds(profile_id)
+        if api_key:
+            set_thread_credentials(api_key, api_secret, broker)
+            positions = get_positions()
+            for p in positions:
+                size = int(p.get('size', 0))
+                if size == 0:
+                    continue
+                sym = p.get('product_symbol', '')
+                m = re.match(r'^(C|P)-(\w+)-(\d+)-\d+$', sym)
+                opt_type = 'call' if (m and m.group(1) == 'C') else 'put' if m else 'unknown'
+                strike = m.group(3) if m else '0'
+                side = 'sell' if size < 0 else 'buy'
+                pid = p.get('product_id')
+                entry = float(p.get('entry_price', 0))
+                asset = m.group(2) if m else 'BTC'
+                broker_positions.append({
+                    'product_id': pid, 'symbol': sym, 'type': opt_type,
+                    'strike': strike, 'side': side, 'size': abs(size),
+                    'entry_price': entry, 'asset': asset, 'source': 'Broker',
+                })
+
+    # 3. Merge: broker positions + tracked (dedup by product_id)
+    seen = set()
+    merged = []
+    for p in tracked:
+        if p.get('product_id'):
+            seen.add(p['product_id'])
+        merged.append(p)
+    for p in broker_positions:
+        if p.get('product_id') not in seen:
+            merged.append(p)
+
+    # 4. Compute live prices for all
+    if merged:
+        from api.pricing import get_current_price
+        for p in merged:
+            if p.get('current_mark') and p.get('current_pnl') is not None:
+                continue  # already has live data from tracker
+            pid = p.get('product_id')
+            asset = p.get('asset', 'BTC')
+            if pid:
+                try:
+                    data = get_current_price(pid, asset)
+                    if data and data.get('mark_price'):
+                        mark = float(data['mark_price'])
+                        entry = float(p.get('entry_price', 0))
+                        lot_size = 0.01 if asset == 'ETH' else 0.001
+                        d = 1 if p.get('side') == 'buy' else -1
+                        p['current_mark'] = round(mark, 2)
+                        p['mark_price'] = round(mark, 2)
+                        p['current_pnl'] = round(d * (mark - entry) * int(p.get('size', 0)) * lot_size, 2)
+                        p['pnl'] = p['current_pnl']
+                except Exception:
+                    pass
+
+    total_pnl = sum(p.get('current_pnl') or p.get('pnl') or 0 for p in merged)
+    return jsonify(positions=merged, total_pnl=round(total_pnl, 2))
 
 @app.route('/api/tracker/strategies')
 @login_required

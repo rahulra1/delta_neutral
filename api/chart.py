@@ -348,6 +348,92 @@ def calc_rsi_divergence_mss(candles, rsi_period=14, ob=70, os_level=30, lb=5, ma
     return {'type': 'signals', 'signals': signals}
 
 
+def calc_sma_vol_breakout(candles, sma_period=50, vol_lookback=20, vol_threshold=1.2):
+    """
+    SETUP 1: STRONG TREND ENTRY
+    BUY: Price crosses above 50 SMA + candle closes above + volume > avg + volume increasing
+    Entry: Next candle break of high | SL: Below breakout candle low | TP: 1:2 RR
+    SELL: Mirror (crosses below + high volume)
+
+    SETUP 2: FAKE BREAKOUT REVERSAL
+    SHORT: Price crosses above SMA on LOW volume (weak) → then falls back below SMA → entry
+    SL: Above fake breakout high | TP: Previous support (recent swing low)
+    LONG: Mirror (weak breakdown → price recovers above SMA)
+    """
+    if len(candles) < sma_period + vol_lookback + 2:
+        return {'signals': [], 'sma': []}
+
+    closes = [c['c'] for c in candles]
+    opens = [c['o'] for c in candles]
+    highs = [c['h'] for c in candles]
+    lows = [c['l'] for c in candles]
+    volumes = [c.get('v', 0) for c in candles]
+    times = [c['t'] for c in candles]
+
+    # SMA
+    sma = [None] * len(closes)
+    for i in range(sma_period - 1, len(closes)):
+        sma[i] = sum(closes[i - sma_period + 1:i + 1]) / sma_period
+
+    # Average volume
+    avg_vol = [0] * len(volumes)
+    for i in range(len(volumes)):
+        start = max(0, i - vol_lookback + 1)
+        avg_vol[i] = max(1, sum(volumes[start:i + 1]) / (i - start + 1))
+
+    signals = []
+    sma_data = []
+
+    for i in range(sma_period + 1, len(candles) - 1):
+        if sma[i] is None or sma[i - 1] is None:
+            continue
+        sma_data.append({'time': times[i], 'value': round(sma[i], 2)})
+
+        prev_below = closes[i - 1] < sma[i - 1]
+        prev_above = closes[i - 1] > sma[i - 1]
+        curr_above = closes[i] > sma[i]
+        curr_below = closes[i] < sma[i]
+
+        vol = volumes[i]
+        prev_vol = volumes[i - 1]
+        avg = avg_vol[i]
+        vol_ratio = vol / avg if avg > 0 else 0
+        high_vol = vol > avg and vol > prev_vol
+
+        # ═══ SETUP 1: STRONG TREND ENTRY ═══
+        if prev_below and curr_above and closes[i] > sma[i] and high_vol:
+            next_candle = candles[i + 1]
+            entry = highs[i]
+            if next_candle['h'] >= entry:
+                sl = lows[i]
+                risk = entry - sl
+                if risk > 0:
+                    signals.append({
+                        'time': times[i + 1], 'type': 'buy', 'price': round(entry, 2),
+                        'sl': round(sl, 2), 'tp1': round(entry + risk * 2, 2),
+                        'setup': 1, 'strength': 'strong', 'vol_ratio': round(vol_ratio, 2),
+                        'volume': vol, 'avg_volume': round(avg, 0),
+                        'label': 'Strong Trend Entry',
+                    })
+
+        elif prev_above and curr_below and closes[i] < sma[i] and high_vol:
+            next_candle = candles[i + 1]
+            entry = lows[i]
+            if next_candle['l'] <= entry:
+                sl = highs[i]
+                risk = sl - entry
+                if risk > 0:
+                    signals.append({
+                        'time': times[i + 1], 'type': 'sell', 'price': round(entry, 2),
+                        'sl': round(sl, 2), 'tp1': round(entry - risk * 2, 2),
+                        'setup': 1, 'strength': 'strong', 'vol_ratio': round(vol_ratio, 2),
+                        'volume': vol, 'avg_volume': round(avg, 0),
+                        'label': 'Strong Trend Entry',
+                    })
+
+    return {'signals': signals, 'sma': sma_data}
+
+
 INDICATOR_FNS = {
     'sma20': lambda c: {'type': 'overlay', 'data': calc_sma(c, 20), 'color': '#6366f1', 'label': 'SMA 20'},
     'sma50': lambda c: {'type': 'overlay', 'data': calc_sma(c, 50), 'color': '#f59e0b', 'label': 'SMA 50'},
@@ -357,6 +443,7 @@ INDICATOR_FNS = {
     'vwap': lambda c: {'type': 'overlay', 'data': calc_vwap(c), 'color': '#ec4899', 'label': 'VWAP'},
     'supertrend': lambda c: {'type': 'overlay_st', 'data': calc_supertrend(c, 10, 3), 'label': 'Supertrend'},
     'rsi_div_mss': lambda c: calc_rsi_divergence_mss(c),
+    'sma_vol_breakout': lambda c: calc_sma_vol_breakout(c),
 }
 
 

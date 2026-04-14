@@ -26,5 +26,9 @@ def place_order(product_id, product_symbol, size, side):
             print(f"✗ Order failed: {result.get('error')}")
             return None
     except Exception as e:
-        print(f"✗ Error placing order: {e}")
+        try:
+            detail = e.response.text if hasattr(e, 'response') and e.response else str(e)
+        except Exception:
+            detail = str(e)
+        print(f"✗ Error placing order: {detail}")
         return None

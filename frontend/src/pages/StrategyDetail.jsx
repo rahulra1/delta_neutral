@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../api';
+import { PositionTable } from '../components/PositionCard';
 
 export default function StrategyDetail() {
   const { sid } = useParams();
@@ -72,34 +73,7 @@ export default function StrategyDetail() {
       {legs.length > 0 && (
         <div className="card">
           <div style={{ fontWeight: 700, marginBottom: 12 }}>Legs</div>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.85rem' }}>
-            <thead><tr>{['Side', 'Type', 'Strike', 'Symbol', 'Size', 'Entry', 'Mark', 'P&L'].map(h => <th key={h} style={{ textAlign: 'left', padding: '8px', color: 'var(--muted)', borderBottom: '2px solid var(--border)', fontSize: '.75rem' }}>{h}</th>)}</tr></thead>
-            <tbody>
-              {legs.map((l, i) => {
-                const entry = l.entry_price || l.entry || 0;
-                const mark = l.current_mark || l.mark || entry;
-                const pnl = l.current_pnl || l.payoff || 0;
-                const chg = entry ? ((mark - entry) / entry * 100) : 0;
-                return (
-                  <tr key={i}>
-                    <td style={{ padding: 8, borderBottom: '1px solid var(--border)' }}><span className={`badge ${(l.side||'').toLowerCase() === 'sell' ? 'badge-red' : 'badge-green'}`}>{(l.side||'').toUpperCase()}</span></td>
-                    <td style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>{(l.type||'').toUpperCase()}</td>
-                    <td style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>{l.strike}</td>
-                    <td style={{ padding: 8, borderBottom: '1px solid var(--border)', fontWeight: 600, fontSize: '.8rem' }}>{l.symbol}</td>
-                    <td style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>{l.size}</td>
-                    <td style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>${entry.toFixed(2)}</td>
-                    <td style={{ padding: 8, borderBottom: '1px solid var(--border)', fontWeight: 700 }}>${mark.toFixed(2)} <span style={{ fontSize: '.7rem', color: chg >= 0 ? 'var(--red)' : 'var(--green)', fontWeight: 600 }}>({chg >= 0 ? '+' : ''}{chg.toFixed(2)}%)</span></td>
-                    <td style={{ padding: 8, borderBottom: '1px solid var(--border)', fontWeight: 700, color: pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${pnl.toFixed(2)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          {legs.some(l => (l.current_pnl || l.payoff) !== undefined) && (
-            <div style={{ textAlign: 'right', padding: '10px 8px', fontWeight: 800, fontSize: '.9rem' }}>
-              Total: <span style={{ color: legs.reduce((s, l) => s + (l.current_pnl || l.payoff || 0), 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${legs.reduce((s, l) => s + (l.current_pnl || l.payoff || 0), 0).toFixed(2)}</span>
-            </div>
-          )}
+          <PositionTable positions={legs} sym="$" />
         </div>
       )}
 
