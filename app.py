@@ -966,9 +966,13 @@ def api_chain():
         chain, spot, exp = get_option_chain_full(expiry, asset)
     else:
         from api.nse import get_nse_chain
-        chain, spot, exp = get_nse_chain(asset, expiry)
+        try:
+            chain, spot, exp = get_nse_chain(asset, expiry)
+        except Exception as e:
+            print(f"NSE chain error: {e}")
+            return jsonify(error=str(e)), 500
     if chain is None:
-        return jsonify(error="Failed to fetch chain"), 500
+        return jsonify(error="No data for this expiry"), 500
     return jsonify(chain=chain, spot_price=spot, expiry=exp)
 
 

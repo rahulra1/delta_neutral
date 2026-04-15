@@ -12,12 +12,15 @@ function bsPrice(type, S, K, T, r, sigma) {
 }
 function cdf(x) { const a = 0.2316419, b = [0.319381530, -0.356563782, 1.781477937, -1.821255978, 1.330274429]; const k = 1 / (1 + a * Math.abs(x)); const n = Math.exp(-x * x / 2) / Math.sqrt(2 * Math.PI) * k * (b[0] + k * (b[1] + k * (b[2] + k * (b[3] + k * b[4])))); return x >= 0 ? 1 - n : n; }
 
-export default function PayoffChart({ legs = [], lotSize = 1, spot = 0, sym = '$', daysToExpiry = 30, height = 100 }) {
-  const [targetPrice, setTargetPrice] = useState(spot || 0);
+export default function PayoffChart({ legs = [], lotSize = 1, spot = 0, sym = '$', daysToExpiry = 30, height = 180 }) {
+  const [showScenario, setShowScenario] = useState(true);
+  const [ivOffset, setIvOffset] = useState(0);
+  const [spotOffset, setSpotOffset] = useState(0);
   const [targetDays, setTargetDays] = useState(Math.max(1, Math.floor(daysToExpiry / 2)));
-  const effectiveTarget = targetPrice || spot;
-  const targetRef = useRef(effectiveTarget);
-  targetRef.current = effectiveTarget;
+
+  const adjSpot = spot + spotOffset;
+  const spotRef = useRef(adjSpot);
+  spotRef.current = adjSpot;
 
   const calcPnl = useCallback((S, T) => {
     let pnl = 0;
@@ -25,15 +28,16 @@ export default function PayoffChart({ legs = [], lotSize = 1, spot = 0, sym = '$
       const K = parseFloat(l.strike), t = (l.type || '').toLowerCase();
       const isCall = t === 'call' || t === 'ce';
       const dir = (l.side || '').toLowerCase() === 'buy' ? 1 : -1;
-      pnl += dir * (bsPrice(isCall ? 'call' : 'put', S, K, T, 0.05, l.iv || 0.5) - (l.mark || 0)) * (l.size || l.lots || 1) * lotSize;
+      const iv = Math.max(0.01, (l.iv || 0.5) + ivOffset / 100);
+      pnl += dir * (bsPrice(isCall ? 'call' : 'put', S, K, T, 0.05, iv) - (l.mark || 0)) * (l.size || 1) * lotSize;
     });
     return parseFloat(pnl.toFixed(2));
-  }, [legs, lotSize]);
+  }, [legs, lotSize, ivOffset]);
 
   const { xs, expiryData, targetData, maxProfit, maxLoss, breakevens } = useMemo(() => {
     if (!legs.length) return { xs: [], expiryData: [], targetData: [], maxProfit: 0, maxLoss: 0, breakevens: [] };
     const strikes = legs.map(l => parseFloat(l.strike));
-    const center = spot || strikes.reduce((a, b) => a + b, 0) / strikes.length;
+    const center = adjSpot || strikes.reduce((a, b) => a + b, 0) / strikes.length;
     const range = center * 0.2;
     const xs = [], expiryData = [], targetData = [];
     let maxP = -Infinity, maxL = Infinity;
@@ -49,165 +53,193 @@ export default function PayoffChart({ legs = [], lotSize = 1, spot = 0, sym = '$
       if ((expiryData[i - 1] <= 0 && expiryData[i] >= 0) || (expiryData[i - 1] >= 0 && expiryData[i] <= 0)) be.push(xs[i]);
     }
     return { xs, expiryData, targetData, maxProfit: maxP, maxLoss: maxL, breakevens: be };
-  }, [legs, spot, targetDays, calcPnl]);
+  }, [legs, adjSpot, targetDays, calcPnl]);
 
-  const projectedPnl = useMemo(() => calcPnl(effectiveTarget, targetDays / 365), [effectiveTarget, targetDays, calcPnl]);
-  const expiryPnl = useMemo(() => calcPnl(effectiveTarget, 0), [effectiveTarget, calcPnl]);
+  const greeks = useMemo(() => {
+    let delta = 0;
+    legs.forEach(l => { delta += (l.side === 'buy' ? 1 : -1) * (parseFloat(l.delta) || 0) * (l.size || 1); });
+    return { delta: delta.toFixed(2) };
+  }, [legs]);
+
+  const mtm = calcPnl(adjSpot, targetDays / 365);
   const rr = maxLoss < 0 ? Math.abs(maxProfit / maxLoss).toFixed(2) : 'NA';
+  const spotPctStr = spot ? `${((spotOffset / spot) * 100).toFixed(1)}%` : '0%';
 
   if (!xs.length) return null;
-  const minS = xs[0], maxS = xs[xs.length - 1];
 
-  // Slider position as % for the green marker
-  const sliderPct = ((effectiveTarget - minS) / (maxS - minS)) * 100;
+  const avgIV = legs.reduce((s, l) => s + (l.iv || 0.5), 0) / (legs.length || 1);
 
   return (
-    <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: 20 }}>
-      {/* Header stats */}
-      <div style={{ display: 'flex', gap: 20, marginBottom: 16, flexWrap: 'wrap' }}>
-        {[
-          ['Max Profit', maxProfit > 1e6 ? '∞' : `${sym}${maxProfit.toFixed(2)}`, 'var(--green)'],
-          ['Max Loss', Math.abs(maxLoss) > 1e6 ? 'Unlimited' : `${sym}${maxLoss.toFixed(2)}`, 'var(--red)'],
-          ['Reward / Risk', rr, 'var(--text)'],
-          ['Breakeven', breakevens.length ? breakevens.map(b => b.toLocaleString()).join(', ') : '—', 'var(--text)'],
-        ].map(([lbl, val, clr]) => (
-          <div key={lbl}>
-            <div style={{ fontSize: '.68rem', color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.3px' }}>{lbl}</div>
-            <div style={{ fontWeight: 700, fontSize: '.88rem', color: clr }}>{val}</div>
+    <div>
+      {/* ── Scenario Analysis Header ── */}
+      <div onClick={() => setShowScenario(!showScenario)}
+        style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, color: 'var(--accent)', marginBottom: showScenario ? 12 : 0, userSelect: 'none' }}>
+        <span style={{ fontSize: 10, transform: showScenario ? 'rotate(0)' : 'rotate(-90deg)', transition: 'transform .15s' }}>▼</span>
+        Scenario Analysis
+      </div>
+
+      {showScenario && (
+        <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
+          {/* Left controls */}
+          <div style={{ flex: '0 0 160px', borderRight: '1px solid #eee', paddingRight: 14 }}>
+            {/* IV Offset */}
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <span style={{ fontSize: 10, color: '#999', fontWeight: 600 }}>IV Offset</span>
+                <span onClick={() => setIvOffset(0)} style={{ fontSize: 9, color: 'var(--accent)', cursor: 'pointer' }}>Reset</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 0, border: '1px solid #e0e0e0', borderRadius: 4, overflow: 'hidden' }}>
+                <button onClick={() => setIvOffset(v => v - 0.5)} style={{ ...btnStyle }}>−</button>
+                <span style={{ flex: 1, textAlign: 'center', fontSize: 12, fontWeight: 700, padding: '4px 0' }}>{ivOffset}</span>
+                <button onClick={() => setIvOffset(v => v + 0.5)} style={{ ...btnStyle }}>+</button>
+              </div>
+            </div>
+
+            {/* Spot */}
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <span style={{ fontSize: 10, color: '#999', fontWeight: 600 }}>Spot <span style={{ color: spotOffset >= 0 ? '#22c55e' : '#ef4444' }}>{spotPctStr}</span></span>
+                <span onClick={() => setSpotOffset(0)} style={{ fontSize: 9, color: 'var(--accent)', cursor: 'pointer' }}>Reset</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 0, border: '1px solid #e0e0e0', borderRadius: 4, overflow: 'hidden' }}>
+                <button onClick={() => setSpotOffset(v => v - (spot * 0.005))} style={{ ...btnStyle }}>−</button>
+                <span style={{ flex: 1, textAlign: 'center', fontSize: 12, fontWeight: 700, padding: '4px 0' }}>{Math.round(adjSpot).toLocaleString()}</span>
+                <button onClick={() => setSpotOffset(v => v + (spot * 0.005))} style={{ ...btnStyle }}>+</button>
+              </div>
+            </div>
+
+            {/* Date */}
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <span style={{ fontSize: 10, color: '#999', fontWeight: 600 }}>Date</span>
+                <span onClick={() => setTargetDays(Math.max(1, Math.floor(daysToExpiry / 2)))} style={{ fontSize: 9, color: 'var(--accent)', cursor: 'pointer' }}>Reset</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 0, border: '1px solid #e0e0e0', borderRadius: 4, overflow: 'hidden' }}>
+                <button onClick={() => setTargetDays(v => Math.max(0, v - 1))} style={{ ...btnStyle }}>‹</button>
+                <span style={{ flex: 1, textAlign: 'center', fontSize: 11, fontWeight: 700, padding: '4px 0' }}>{targetDays}d DTE</span>
+                <button onClick={() => setTargetDays(v => Math.min(daysToExpiry, v + 1))} style={{ ...btnStyle }}>›</button>
+              </div>
+            </div>
           </div>
-        ))}
+
+          {/* Right stats */}
+          <div style={{ flex: 1 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px 20px', marginBottom: 12 }}>
+              <ScVal label="Total MTM" value={`${sym} ${mtm.toFixed(2)}`} sub={spot ? `(${((mtm / spot) * 100).toFixed(2)}%)` : ''} color={mtm >= 0 ? '#22c55e' : '#ef4444'} />
+              <ScVal label="Maximum Profit" value={maxProfit > 1e6 ? 'Unlimited' : `${sym} ${maxProfit.toFixed(2)}`} color="#22c55e" />
+              <ScVal label="Risk/Reward" value={rr} />
+              <ScVal label="POP" value="—" />
+              <ScVal label="Maximum Loss" value={Math.abs(maxLoss) > 1e6 ? 'Unlimited' : `${sym} ${maxLoss.toFixed(2)}`} color="#ef4444" />
+              <ScVal label="Margin Approx" value="—" />
+            </div>
+            <div style={{ marginBottom: 0 }}>
+              <ScVal label="Breakeven" value={breakevens.length ? breakevens.map(b => `${b.toLocaleString()} (${((b - spot) / spot * 100).toFixed(1)}%)`).join('  ') : '—'} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Greeks Row ── */}
+      <div style={{ display: 'flex', gap: 28, alignItems: 'center', padding: '10px 0', borderTop: '1px solid #eee', borderBottom: '1px solid #eee', marginBottom: 12, fontSize: 12, color: '#666' }}>
+        <span>Delta: <b style={{ color: '#333' }}>{greeks.delta}</b></span>
+        <span>Gamma: <b style={{ color: '#333' }}>—</b></span>
+        <span style={{ flex: 1 }} />
+        <span>Theta: <b style={{ color: '#333' }}>—</b></span>
+        <span>Vega: <b style={{ color: '#333' }}>—</b></span>
       </div>
 
-      {/* Legend */}
-      <div style={{ display: 'flex', gap: 20, marginBottom: 6, fontSize: '.72rem', color: 'var(--muted)' }}>
-        <span><span style={{ display: 'inline-block', width: 18, height: 3, background: 'var(--green)', marginRight: 6, verticalAlign: 'middle', borderRadius: 2 }} />On Expiry Date</span>
-        <span style={{ color: 'var(--text)', fontWeight: 600 }}>Index {spot ? spot.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'}</span>
-        <span><span style={{ display: 'inline-block', width: 18, height: 3, background: '#f59e0b', marginRight: 6, verticalAlign: 'middle', borderRadius: 2 }} />On Target Date</span>
-      </div>
+      {/* ── Chart ── */}
+      <div style={{ position: 'relative' }}>
+        <div style={{ textAlign: 'center', marginBottom: 4, fontSize: 11, color: '#666' }}>
+          MTM: <b style={{ color: mtm >= 0 ? '#22c55e' : '#ef4444' }}>{sym}{mtm.toFixed(2)}</b>
+          <span style={{ margin: '0 8px', color: '#ccc' }}>|</span>
+          Spot: <b>{sym}{adjSpot ? adjSpot.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'}</b>
+        </div>
 
-      {/* Current Price badge */}
-      <div style={{ textAlign: 'center', marginBottom: -6, position: 'relative', zIndex: 2 }}>
-        <span style={{ background: 'var(--bg)', border: '1px solid var(--border)', padding: '4px 16px', borderRadius: 6, fontSize: '.8rem', fontWeight: 700 }}>Current Price {effectiveTarget.toLocaleString()}</span>
-      </div>
-
-      {/* Chart */}
-      <Line
-        data={{
-          labels: xs,
-          datasets: [
-            { label: 'On Expiry', data: expiryData, borderWidth: 2, pointRadius: 0, tension: 0.1,
-              segment: { borderColor: ctx => (ctx.p0.parsed.y >= 0 && ctx.p1.parsed.y >= 0) ? '#22c55e' : (ctx.p0.parsed.y <= 0 && ctx.p1.parsed.y <= 0) ? '#ef4444' : '#9ca3af' },
-              fill: { target: 'origin', above: 'rgba(34,197,94,0.12)', below: 'rgba(239,68,68,0.12)' } },
-            { label: 'On Target Date', data: targetData, borderColor: '#f59e0b', borderWidth: 2, pointRadius: 0, tension: 0.2, fill: false },
-          ],
-        }}
-        options={{
-          responsive: true, animation: false, interaction: { mode: 'index', intersect: false },
-          plugins: {
-            legend: { display: false },
-            tooltip: {
-              backgroundColor: '#ffffff', borderColor: '#e8e8e8', borderWidth: 1, titleColor: '#9ca3af', bodyColor: '#1a1a2e',
-              titleFont: { size: 11 }, bodyFont: { size: 12, weight: 'bold' }, padding: 12, cornerRadius: 8, displayColors: false,
-              callbacks: {
-                title: ctx => `When price is at: ${Number(ctx[0].label).toLocaleString()}`,
-                afterTitle: () => 'Expected PNL on',
-                label: ctx => {
-                  const lbl = ctx.datasetIndex === 0 ? 'Expiry' : `Target (${targetDays}d)`;
-                  return `${lbl}:  ${sym}${ctx.parsed.y.toFixed(2)}`;
+        <Line
+          data={{
+            labels: xs,
+            datasets: [
+              {
+                label: 'On Expiry', data: expiryData, borderWidth: 2, pointRadius: 0, tension: 0.1,
+                segment: { borderColor: ctx => (ctx.p0.parsed.y >= 0 && ctx.p1.parsed.y >= 0) ? '#22c55e' : (ctx.p0.parsed.y <= 0 && ctx.p1.parsed.y <= 0) ? '#ef4444' : '#9ca3af' },
+                fill: { target: 'origin', above: 'rgba(34,197,94,0.15)', below: 'rgba(239,68,68,0.15)' },
+              },
+              {
+                label: 'Target Date', data: targetData, borderColor: '#6366f1', borderWidth: 1.5, pointRadius: 0, tension: 0.2, borderDash: [4, 3], fill: false,
+              },
+            ],
+          }}
+          options={{
+            responsive: true, animation: false, interaction: { mode: 'index', intersect: false },
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                backgroundColor: '#fff', borderColor: '#e0e0e0', borderWidth: 1, titleColor: '#999', bodyColor: '#333',
+                titleFont: { size: 10 }, bodyFont: { size: 11, weight: 'bold' }, padding: 10, cornerRadius: 6, displayColors: false,
+                callbacks: {
+                  title: ctx => `Price: ${Number(ctx[0].label).toLocaleString()}`,
+                  label: ctx => `${ctx.datasetIndex === 0 ? 'Expiry' : `Target (${targetDays}d)`}: ${sym}${ctx.parsed.y.toFixed(2)}`,
+                  labelTextColor: ctx => ctx.parsed.y >= 0 ? '#22c55e' : '#ef4444',
                 },
-                labelTextColor: ctx => ctx.parsed.y >= 0 ? '#22c55e' : '#ef4444',
               },
             },
-          },
-          scales: {
-            x: { grid: { color: 'rgba(0,0,0,0.04)' }, ticks: { color: '#9ca3af', maxTicksLimit: 8, font: { size: 10 } } },
-            y: { grid: { color: 'rgba(0,0,0,0.04)' }, ticks: { color: '#9ca3af', font: { size: 10 } },
-              afterDataLimits: s => { if (s.min > 0) s.min = -s.max * 0.1; if (s.max < 0) s.max = -s.min * 0.1; } },
-          },
-        }}
-        height={height}
-        plugins={[{
-          id: 'lines',
-          afterDraw(chart) {
-            const ctx = chart.ctx, a = chart.chartArea, yS = chart.scales.y, xS = chart.scales.x;
-            const y0 = yS.getPixelForValue(0);
-            if (y0 >= a.top && y0 <= a.bottom) {
-              ctx.save(); ctx.beginPath(); ctx.moveTo(a.left, y0); ctx.lineTo(a.right, y0);
-              ctx.strokeStyle = 'rgba(0,0,0,0.08)'; ctx.lineWidth = 1; ctx.stroke(); ctx.restore();
+            scales: {
+              x: { grid: { color: 'rgba(0,0,0,0.04)' }, ticks: { color: '#aaa', maxTicksLimit: 8, font: { size: 10 } }, border: { color: '#e0e0e0' } },
+              y: { grid: { color: 'rgba(0,0,0,0.04)' }, ticks: { color: '#aaa', font: { size: 10 }, callback: v => sym + v.toLocaleString() }, border: { color: '#e0e0e0' },
+                afterDataLimits: s => { if (s.min > 0) s.min = -s.max * 0.1; if (s.max < 0) s.max = -s.min * 0.1; } },
+            },
+            layout: { padding: { top: 10 } },
+          }}
+          height={height}
+          plugins={[{
+            id: 'overlays',
+            afterDraw(chart) {
+              const ctx = chart.ctx, a = chart.chartArea, yS = chart.scales.y, xS = chart.scales.x;
+              // Zero line
+              const y0 = yS.getPixelForValue(0);
+              if (y0 >= a.top && y0 <= a.bottom) {
+                ctx.save(); ctx.beginPath(); ctx.moveTo(a.left, y0); ctx.lineTo(a.right, y0);
+                ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.lineWidth = 1; ctx.stroke(); ctx.restore();
+              }
+              // Spot line
+              const spotIdx = xs.findIndex(v => v >= adjSpot);
+              if (spotIdx >= 0) {
+                const x = xS.getPixelForValue(spotIdx);
+                ctx.save(); ctx.beginPath(); ctx.moveTo(x, a.top); ctx.lineTo(x, a.bottom);
+                ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 1.5; ctx.stroke(); ctx.restore();
+              }
+              // SD markers
+              const sd = adjSpot * avgIV * Math.sqrt(daysToExpiry / 365);
+              ctx.save();
+              for (let n = -3; n <= 3; n++) {
+                if (n === 0) continue;
+                const idx = xs.findIndex(v => v >= adjSpot + n * sd);
+                if (idx < 0) continue;
+                const x = xS.getPixelForValue(idx);
+                if (x < a.left || x > a.right) continue;
+                ctx.beginPath(); ctx.moveTo(x, a.top); ctx.lineTo(x, a.bottom);
+                ctx.strokeStyle = 'rgba(0,0,0,0.08)'; ctx.lineWidth = 1; ctx.setLineDash([2, 4]); ctx.stroke(); ctx.setLineDash([]);
+                ctx.fillStyle = '#aaa'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+                ctx.fillText(`${n > 0 ? '+' : ''}${n} SD`, x, a.top - 4);
+              }
+              ctx.restore();
             }
-            const t = targetRef.current;
-            const idx = xs.findIndex(v => v >= t);
-            if (idx >= 0) {
-              const x = xS.getPixelForValue(idx);
-              ctx.save(); ctx.beginPath(); ctx.moveTo(x, a.top); ctx.lineTo(x, a.bottom);
-              ctx.strokeStyle = '#22c55e'; ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]); ctx.stroke(); ctx.restore();
-            }
-          }
-        }]}
-      />
-
-      {/* Projected badge */}
-      <div style={{ textAlign: 'center', marginTop: 10 }}>
-        <span style={{ background: projectedPnl >= 0 ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)', border: `1px solid ${projectedPnl >= 0 ? 'var(--green)' : 'var(--red)'}`, color: projectedPnl >= 0 ? 'var(--green)' : 'var(--red)', padding: '6px 20px', borderRadius: 6, fontSize: '.85rem', fontWeight: 700 }}>
-          Projected {projectedPnl >= 0 ? 'Profit' : 'Loss'}: {sym}{Math.abs(projectedPnl).toFixed(2)}
-        </span>
+          }]}
+        />
       </div>
+    </div>
+  );
+}
 
-      {/* Targets */}
-      <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 16, marginTop: 16 }}>
-        <div style={{ textAlign: 'center', fontSize: '.82rem', fontWeight: 700, marginBottom: 16 }}>Targets ▲</div>
+const btnStyle = { background: 'none', border: 'none', borderRight: '1px solid #e0e0e0', padding: '4px 10px', cursor: 'pointer', fontSize: 14, color: '#666', fontWeight: 700 };
 
-        {/* Target Price */}
-        <div style={{ marginBottom: 20 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-            <span style={{ fontSize: '.82rem', color: 'var(--muted)' }}>Target Price</span>
-            <span style={{ fontSize: '1rem', fontWeight: 800 }}>{effectiveTarget.toLocaleString()}</span>
-          </div>
-          <div style={{ position: 'relative', height: 32 }}>
-            <input type="range" min={minS} max={maxS} step={Math.max(1, Math.round((maxS - minS) / 500))} value={effectiveTarget}
-              onChange={e => setTargetPrice(+e.target.value)}
-              style={{ width: '100%', position: 'absolute', top: 8, left: 0, accentColor: '#22c55e', zIndex: 2, opacity: 0, cursor: 'pointer', height: 20 }} />
-            {/* Custom track */}
-            <div style={{ position: 'absolute', top: 12, left: 0, right: 0, height: 6, background: 'var(--border)', borderRadius: 3 }}>
-              <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${sliderPct}%`, background: 'linear-gradient(90deg, var(--green), #6366f1)', borderRadius: 3 }} />
-            </div>
-            {/* Thumb */}
-            <div style={{ position: 'absolute', top: 4, left: `calc(${sliderPct}% - 14px)`, width: 28, height: 22, background: '#22c55e', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 8px rgba(34,197,94,0.4)', transition: 'left 0.05s', pointerEvents: 'none' }}>
-              <span style={{ color: '#fff', fontSize: 10, fontWeight: 800 }}>|||</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Target Date */}
-        <div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-            <span style={{ fontSize: '.82rem', color: 'var(--muted)' }}>Target Date</span>
-            <span style={{ fontSize: '1rem', fontWeight: 800 }}>{targetDays}d <span style={{ fontSize: '.75rem', color: 'var(--muted)', fontWeight: 400 }}>to Expiry</span></span>
-          </div>
-          <div style={{ position: 'relative', height: 32 }}>
-            <input type="range" min={0} max={daysToExpiry} value={targetDays} onChange={e => setTargetDays(+e.target.value)}
-              style={{ width: '100%', position: 'absolute', top: 8, left: 0, opacity: 0, cursor: 'pointer', height: 20, zIndex: 2 }} />
-            <div style={{ position: 'absolute', top: 12, left: 0, right: 0, height: 6, background: 'var(--border)', borderRadius: 3 }}>
-              <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${(targetDays / daysToExpiry) * 100}%`, background: 'linear-gradient(90deg, #f59e0b, #ef4444)', borderRadius: 3 }} />
-            </div>
-            <div style={{ position: 'absolute', top: 4, left: `calc(${(targetDays / daysToExpiry) * 100}% - 14px)`, width: 28, height: 22, background: '#f59e0b', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 8px rgba(245,158,11,0.4)', transition: 'left 0.05s', pointerEvents: 'none' }}>
-              <span style={{ color: '#fff', fontSize: 10, fontWeight: 800 }}>|||</span>
-            </div>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '.6rem', color: 'var(--muted)', marginTop: 6 }}><span>Expiry</span><span>Today</span></div>
-        </div>
-      </div>
-
-      {/* PNL Summary */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 16 }}>
-        <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 14, textAlign: 'center' }}>
-          <div style={{ fontSize: '.7rem', color: 'var(--muted)', textTransform: 'uppercase' }}>Total Target PNL</div>
-          <div style={{ fontSize: '1.1rem', fontWeight: 800, color: projectedPnl >= 0 ? 'var(--green)' : 'var(--red)', marginTop: 4 }}>{sym}{projectedPnl.toFixed(2)}</div>
-        </div>
-        <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 14, textAlign: 'center' }}>
-          <div style={{ fontSize: '.7rem', color: 'var(--muted)', textTransform: 'uppercase' }}>Expiry PNL @ Target</div>
-          <div style={{ fontSize: '1.1rem', fontWeight: 800, color: expiryPnl >= 0 ? 'var(--green)' : 'var(--red)', marginTop: 4 }}>{sym}{expiryPnl.toFixed(2)}</div>
-        </div>
+function ScVal({ label, value, sub, color }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, color: '#999', marginBottom: 2 }}>{label}</div>
+      <div style={{ fontSize: 13, fontWeight: 700, color: color || '#333' }}>
+        {value} {sub && <span style={{ fontSize: 10, fontWeight: 400 }}>{sub}</span>}
       </div>
     </div>
   );

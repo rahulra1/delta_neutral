@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import api from '../api';
 import PayoffChart from '../components/PayoffChart';
+import OptionChainTable from '../components/OptionChainTable';
 import { PositionGrid } from '../components/PositionCard';
 
 const ASSETS = ['BTC', 'ETH', 'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'];
@@ -22,7 +23,9 @@ export default function OptionChain() {
   const [monitorId, setMonitorId] = useState(null);
   const [monitorData, setMonitorData] = useState(null);
   const [openPositions, setOpenPositions] = useState([]);
-  const [posPnl, setPosPnl] = useState(0);
+  const [leftTab, setLeftTab] = useState('chain');
+  const [rightTab, setRightTab] = useState('payoff');
+  const [hoveredRow, setHoveredRow] = useState(null);
   const monitorRef = useRef(null);
 
   const isCrypto = CRYPTO.has(asset);
@@ -32,15 +35,10 @@ export default function OptionChain() {
   const loadPositions = () => {
     api.get('/tracked-positions', { params: { profile_id: profileId } }).then(r => {
       setOpenPositions(r.data.positions || []);
-      setPosPnl(r.data.total_pnl || 0);
     }).catch(() => {});
   };
 
-  useEffect(() => {
-    loadPositions();
-    const pt = setInterval(loadPositions, 10000);
-    return () => clearInterval(pt);
-  }, []);
+  useEffect(() => { loadPositions(); const pt = setInterval(loadPositions, 10000); return () => clearInterval(pt); }, []);
 
   const closePosition = (p) => {
     if (!window.confirm(`Close ${p.side.toUpperCase()} ${p.size} lots of ${p.symbol}?`)) return;
@@ -49,42 +47,30 @@ export default function OptionChain() {
   };
 
   useEffect(() => {
-    api.get('/profiles').then(r => {
-      const p = r.data.profiles || [];
-      setProfiles(p);
-      if (p.length) setProfileId(p[0].id);
-    });
+    api.get('/profiles').then(r => { const p = r.data.profiles || []; setProfiles(p); if (p.length) setProfileId(p[0].id); });
   }, []);
 
   const switchMode = m => {
     setMode(m);
-    const target = m === 'live' ? 'delta_exchange' : 'demo';
-    const match = profiles.find(p => p.broker === target);
+    const match = profiles.find(p => p.broker === (m === 'live' ? 'delta_exchange' : 'demo'));
     if (match) setProfileId(match.id);
   };
 
   useEffect(() => {
     if (!profileId) return;
-    api.get('/expiries', { params: { asset, profile_id: profileId } }).then(r => {
-      const e = r.data.expiries || [];
-      setExpiries(e);
-      setExpiry(e[0] || '');
-    });
+    setChain([]); setExpiry(''); setLegs([]);
+    api.get('/expiries', { params: { asset, profile_id: profileId } }).then(r => { const e = r.data.expiries || []; setExpiries(e); setExpiry(e[0] || ''); });
   }, [asset, profileId]);
 
   useEffect(() => {
     if (!expiry || !profileId) return;
-    api.get('/chain', { params: { asset, expiry, profile_id: profileId } }).then(r => {
-      setChain(r.data.chain || []);
-      setSpot(r.data.spot_price || 0);
-    });
+    api.get('/chain', { params: { asset, expiry, profile_id: profileId } }).then(r => { setChain(r.data.chain || []); setSpot(r.data.spot_price || 0); });
   }, [asset, expiry, profileId]);
 
   useEffect(() => {
     if (!monitorId) return;
     const poll = () => api.get(`/monitor/${monitorId}`).then(r => setMonitorData(r.data)).catch(() => {});
-    poll();
-    monitorRef.current = setInterval(poll, 5000);
+    poll(); monitorRef.current = setInterval(poll, 5000);
     return () => clearInterval(monitorRef.current);
   }, [monitorId]);
 
@@ -104,16 +90,13 @@ export default function OptionChain() {
 
   const netCredit = legs.reduce((s, l) => s + l.mark * l.size * lot * (l.side === 'sell' ? 1 : -1), 0);
 
-  const payoffLegs = legs.map(l => ({ ...l, type: l.type }));
-
   const execute = () => {
-    const payload = {
+    api.post('/place-legs', {
       legs: legs.map(l => ({ product_id: l.product_id, symbol: l.symbol, size: l.size, side: l.side, type: l.type, strike: l.strike, mark: l.mark })),
       max_profit: maxProfit, max_loss: maxLoss, asset, profile_id: profileId
-    };
-    api.post('/place-legs', payload).then(r => {
+    }).then(r => {
       if (r.data.monitor_id) setMonitorId(r.data.monitor_id);
-      const ok = (r.data.results || []).filter(r => r.success).length;
+      const ok = (r.data.results || []).filter(x => x.success).length;
       alert(`${ok} order(s) placed`);
       if (ok === legs.length) setLegs([]);
       loadPositions();
@@ -124,148 +107,128 @@ export default function OptionChain() {
   const f4 = v => typeof v === 'number' ? v.toFixed(4) : '—';
 
   return (
-    <div className="container" style={{ maxWidth: 1440 }}>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10, flexWrap: 'wrap' }}>
-        <h1 style={{ fontSize: '1.1rem', fontWeight: 700, marginRight: 12 }}>Options Chain</h1>
-        <select value={asset} onChange={e => setAsset(e.target.value)} style={{ padding: '6px 12px', border: '1px solid var(--border)', borderRadius: 4, fontSize: 12, background: 'var(--card)' }}>
-          {ASSETS.map(a => <option key={a}>{a}</option>)}
-        </select>
-        <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 4, padding: '6px 14px', fontWeight: 700, fontSize: 13 }}>Spot: {sym}{spot ? spot.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'}</div>
-        <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 4, padding: '6px 12px', fontSize: 10, color: 'var(--muted)' }}>{isCrypto ? `1 Lot = ${lot} ${asset}` : `Lot Size = ${lot}`}</div>
-        {isCrypto && (
-          <div style={{ display: 'flex', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 4, overflow: 'hidden', fontSize: 11 }}>
-            <span onClick={() => switchMode('live')} style={{ padding: '5px 14px', cursor: 'pointer', fontWeight: 600, background: mode === 'live' ? 'var(--green)' : 'transparent', color: mode === 'live' ? '#fff' : 'var(--muted)' }}>🟢 Live</span>
-            <span onClick={() => switchMode('demo')} style={{ padding: '5px 14px', cursor: 'pointer', fontWeight: 600, background: mode === 'demo' ? '#f59e0b' : 'transparent', color: mode === 'demo' ? '#fff' : 'var(--muted)' }}>🟡 Demo</span>
+    <div className="at-layout">
+      {/* ═══ LEFT PANEL ═══ */}
+      <div className="at-left">
+        {/* Header row */}
+        <div className="at-header">
+          <div className="at-header-row">
+            <select value={asset} onChange={e => setAsset(e.target.value)} className="at-sel">{ASSETS.map(a => <option key={a}>{a}</option>)}</select>
+            <div className="at-spot">{spot ? spot.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'}</div>
+            {isCrypto && (
+              <div className="at-mode-toggle">
+                <span className={mode === 'live' ? 'active green' : ''} onClick={() => switchMode('live')}>Live</span>
+                <span className={mode === 'demo' ? 'active amber' : ''} onClick={() => switchMode('demo')}>Demo</span>
+              </div>
+            )}
+            <select value={profileId} onChange={e => setProfileId(e.target.value)} className="at-sel">
+              <option value="">Default</option>
+              {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </div>
+          {/* Left tabs */}
+          <div className="at-tabs">
+            <span className={leftTab === 'chain' ? 'active' : ''} onClick={() => setLeftTab('chain')}>Option Chain</span>
+            <span className={leftTab === 'positions' ? 'active' : ''} onClick={() => setLeftTab('positions')}>Positions</span>
+          </div>
+        </div>
+
+        {leftTab === 'chain' ? (
+          <>
+            {/* Expiry row */}
+            <div className="at-expiry-row">
+              {expiries.map((e, i) => (
+                <span key={e} className={`at-expiry ${e === expiry ? 'active' : ''}`} onClick={() => setExpiry(e)}>{e}</span>
+              ))}
+              <span className="at-lot-info">Lot Size: {lot}</span>
+            </div>
+
+            {/* Chain table */}
+            <OptionChainTable chain={chain} spot={spot} sym={sym} lot={lot} isCrypto={isCrypto} legs={legs} onAddLeg={addLeg} />
+
+            {/* Bottom bar */}
+            <div className="at-bottom-bar">
+              <button className="at-btn outline" onClick={() => setLegs([])}>Clear</button>
+              <div style={{ flex: 1 }} />
+              <div className="at-bottom-controls">
+                <label>TP {sym}<input type="number" value={maxProfit} onChange={e => setMaxProfit(+e.target.value)} /></label>
+                <label>SL {sym}<input type="number" value={maxLoss} onChange={e => setMaxLoss(+e.target.value)} /></label>
+              </div>
+              <button className="at-btn green" onClick={execute} disabled={!legs.length}>
+                Live Trade ▾
+              </button>
+            </div>
+          </>
+        ) : (
+          <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
+            <PositionGrid positions={openPositions} sym={sym} onClose={closePosition} onRefresh={loadPositions} />
           </div>
         )}
-        <select value={profileId} onChange={e => setProfileId(e.target.value)} style={{ padding: '6px 12px', border: '1px solid var(--border)', borderRadius: 4, fontSize: 12, background: 'var(--card)' }}>
-          <option value="">Default</option>
-          {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
-        <div style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--muted)' }}>Click = BUY · Right-click = SELL</div>
       </div>
 
-      <div className="expiry-tabs">
-        {expiries.map(e => (
-          <div key={e} className={`expiry-tab ${e === expiry ? 'active' : ''}`} onClick={() => setExpiry(e)}>{e}</div>
-        ))}
-      </div>
+      {/* ═══ RIGHT PANEL ═══ */}
+      <div className="at-right">
+        {/* Top bar with ticker */}
+        <div className="at-right-header">
+          <span style={{ fontWeight: 700 }}>{asset} {spot ? spot.toLocaleString(undefined, { maximumFractionDigits: 2 }) : ''}</span>
+          <span style={{ color: 'var(--muted)', fontSize: 11 }}>{new Date().toLocaleTimeString()}</span>
+        </div>
 
-      {/* Strategy Builder */}
-      {legs.length > 0 && (
-        <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 6, padding: 16, marginBottom: 12 }}>
-          <h3 style={{ fontSize: '.85rem', marginBottom: 10 }}>📐 Strategy Builder</h3>
-          <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse', marginBottom: 10 }}>
-            <thead><tr>{['Side', 'Type', 'Strike', 'Symbol', 'Δ', 'Mark', 'IV', 'Lots', 'Value', ''].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontWeight: 600 }}>{h}</th>)}</tr></thead>
-            <tbody>
-              {legs.map((l, i) => (
-                <tr key={i}>
-                  <td style={{ padding: '4px 8px' }}>
-                    <div style={{ display: 'inline-flex', borderRadius: 3, overflow: 'hidden', fontSize: 10, fontWeight: 700, cursor: 'pointer' }} onClick={() => toggleSide(i)}>
-                      <span style={{ padding: '3px 10px', background: l.side === 'buy' ? 'var(--green)' : 'rgba(2,192,118,0.15)', color: l.side === 'buy' ? '#fff' : 'var(--green)' }}>BUY</span>
-                      <span style={{ padding: '3px 10px', background: l.side === 'sell' ? 'var(--red)' : 'rgba(246,70,93,0.15)', color: l.side === 'sell' ? '#fff' : 'var(--red)' }}>SELL</span>
-                    </div>
-                  </td>
-                  <td style={{ padding: '4px 8px' }}>{l.type.toUpperCase()}</td>
-                  <td style={{ padding: '4px 8px' }}>{Number(l.strike).toLocaleString()}</td>
-                  <td style={{ padding: '4px 8px', fontSize: 11 }}>{l.symbol}</td>
-                  <td style={{ padding: '4px 8px', fontWeight: 600 }}>{f4(l.delta)}</td>
-                  <td style={{ padding: '4px 8px' }}>{sym}{f2(l.mark)}</td>
-                  <td style={{ padding: '4px 8px', color: 'var(--muted)' }}>{l.iv ? (l.iv * 100).toFixed(1) + '%' : '—'}</td>
-                  <td style={{ padding: '4px 8px' }}><input type="number" min={1} value={l.size} onChange={e => updateSize(i, +e.target.value)} style={{ width: 60, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 3, textAlign: 'center' }} /></td>
-                  <td style={{ padding: '4px 8px', color: l.side === 'sell' ? 'var(--green)' : 'var(--red)' }}>{sym}{(l.mark * l.size * lot * (l.side === 'sell' ? 1 : -1)).toFixed(2)}</td>
-                  <td style={{ padding: '4px 8px', color: 'var(--red)', cursor: 'pointer', fontSize: 14 }} onClick={() => removeLeg(i)}>✕</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div style={{ display: 'flex', gap: 12, margin: '10px 0', flexWrap: 'wrap' }}>
-            {[
-              [netCredit >= 0 ? 'Net Credit' : 'Net Debit', `${sym}${Math.abs(netCredit).toFixed(2)}`, netCredit >= 0 ? 'var(--green)' : 'var(--red)'],
-              ['Legs', `${legs.length}`, 'var(--text)'],
-            ].map(([lbl, val, clr]) => (
-              <div key={lbl} style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, padding: '10px 14px', textAlign: 'center', minWidth: 90 }}>
-                <div style={{ fontSize: '.6rem', color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.5px' }}>{lbl}</div>
-                <div style={{ fontSize: '.95rem', fontWeight: 700, marginTop: 2, color: clr }}>{val}</div>
-              </div>
-            ))}
-          </div>
-          {legs.length > 0 && (
-            <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, padding: 12, marginTop: 10 }}>
-              <PayoffChart legs={payoffLegs} lotSize={lot} spot={spot} sym={sym} />
+        {/* Right tabs */}
+        <div className="at-tabs">
+          <span className={rightTab === 'payoff' ? 'active' : ''} onClick={() => setRightTab('payoff')}>Payoff</span>
+          <span className={rightTab === 'greeks' ? 'active' : ''} onClick={() => setRightTab('greeks')}>Greeks</span>
+        </div>
+
+        <div className="at-right-body">
+          {rightTab === 'payoff' && legs.length > 0 && (
+            <>
+              <PayoffChart legs={legs} lotSize={lot} spot={spot} sym={sym} height={160} />
+
+              {monitorData && (
+                <div className="at-monitor">
+                  <span>👁 Monitor</span>
+                  <span style={{ color: (monitorData.current_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>{sym}{(monitorData.current_pnl || 0).toFixed(2)}</span>
+                  <span>{monitorData.running ? '🟢' : '⚫'}</span>
+                </div>
+              )}
+            </>
+          )}
+
+          {rightTab === 'payoff' && !legs.length && (
+            <div className="at-empty">
+              <div style={{ fontSize: 48, marginBottom: 12 }}>📊</div>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>Select options from the chain</div>
+              <div style={{ fontSize: 11 }}>Use B (Buy) and S (Sell) buttons on hover</div>
             </div>
           )}
-          <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 12, flexWrap: 'wrap' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}><label style={{ fontSize: 10, color: 'var(--muted)' }}>Max Profit $</label><input type="number" value={maxProfit} onChange={e => setMaxProfit(+e.target.value)} style={{ width: 80, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 3 }} /></div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}><label style={{ fontSize: 10, color: 'var(--muted)' }}>Max Loss $</label><input type="number" value={maxLoss} onChange={e => setMaxLoss(+e.target.value)} style={{ width: 80, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 3 }} /></div>
-            <button className="btn btn-green" onClick={execute} style={{ fontWeight: 700 }}>Execute & Monitor</button>
-            <button className="btn btn-outline" onClick={() => setLegs([])}>Clear All</button>
-          </div>
+
+          {rightTab === 'greeks' && (
+            <div style={{ padding: 4 }}>
+              {legs.length > 0 ? (
+                <table className="at-greeks-table">
+                  <thead><tr>{['Type', 'Side', 'Strike', 'Delta', 'IV', 'Mark', 'Lots'].map(h => <th key={h}>{h}</th>)}</tr></thead>
+                  <tbody>
+                    {legs.map((l, i) => (
+                      <tr key={i}>
+                        <td>{l.type.toUpperCase()}</td>
+                        <td style={{ color: l.side === 'buy' ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>{l.side.toUpperCase()}</td>
+                        <td>{Number(l.strike).toLocaleString()}</td>
+                        <td>{f4(l.delta)}</td>
+                        <td>{l.iv ? (l.iv * 100).toFixed(1) + '%' : '—'}</td>
+                        <td>{sym}{f2(l.mark)}</td>
+                        <td>
+                          <input type="number" min={1} value={l.size} onChange={e => updateSize(i, +e.target.value)}
+                            style={{ width: 44, padding: '2px 4px', border: '1px solid var(--border)', borderRadius: 3, textAlign: 'center', fontSize: 11 }} />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : <div className="at-empty">No legs selected</div>}
+            </div>
+          )}
         </div>
-      )}
-
-      {/* Monitor */}
-      {monitorData && (
-        <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 6, padding: 16, marginBottom: 12 }}>
-          <h3 style={{ fontSize: '.85rem', marginBottom: 8 }}>👁 Live Strategy Monitor</h3>
-          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: '.8rem' }}>
-            <div>PnL: <b style={{ color: (monitorData.current_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>{sym}{(monitorData.current_pnl || 0).toFixed(2)}</b></div>
-            <div>Status: <b>{monitorData.running ? '🟢 Live' : '⚫ Stopped'}</b></div>
-          </div>
-        </div>
-      )}
-
-      {/* Open Positions */}
-      <PositionGrid positions={openPositions} sym={sym} onClose={closePosition} onRefresh={loadPositions} />
-
-      {/* Chain Table */}
-      <div className="chain-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th colSpan={7} style={{ textAlign: 'center', fontSize: 11, letterSpacing: 1, borderBottom: '2px solid var(--green)', color: 'var(--green)' }}>CALLS</th>
-              <th style={{ background: 'var(--accent)', color: '#fff', fontSize: 11, minWidth: 80, borderLeft: '2px solid var(--accent)', borderRight: '2px solid var(--accent)' }}>STRIKE</th>
-              <th colSpan={7} style={{ textAlign: 'center', fontSize: 11, letterSpacing: 1, borderBottom: '2px solid var(--red)', color: 'var(--red)' }}>PUTS</th>
-            </tr>
-            <tr>
-              {['OI', 'Vol', 'IV', 'Delta', 'Bid', 'Ask', 'Mark'].map(h => <th key={'c' + h} style={{ color: 'var(--green)' }}>{h}</th>)}
-              <th style={{ background: 'var(--accent)', color: '#fff' }}>Strike</th>
-              {['Mark', 'Bid', 'Ask', 'Delta', 'IV', 'Vol', 'OI'].map(h => <th key={'p' + h} style={{ color: 'var(--red)' }}>{h}</th>)}
-            </tr>
-          </thead>
-          <tbody>
-            {chain.map((row, i) => {
-              const s = parseFloat(row.strike);
-              const c = row.call || {}, p = row.put || {};
-              const cITM = spot && s < spot, pITM = spot && s > spot;
-              const isAtm = i === atmIdx;
-              const cOI = isCrypto ? Math.round((parseFloat(c.oi) || 0) / lot) : Math.round(parseFloat(c.oi) || 0);
-              const pOI = isCrypto ? Math.round((parseFloat(p.oi) || 0) / lot) : Math.round(parseFloat(p.oi) || 0);
-              return (
-                <React.Fragment key={row.strike}>
-                  {isAtm && <tr><td colSpan={7} style={{ height: 3, padding: 0, background: 'linear-gradient(90deg,transparent,var(--accent),transparent)' }} /><td style={{ position: 'relative', padding: 0 }}><span style={{ position: 'absolute', top: -14, left: '50%', transform: 'translateX(-50%)', background: 'var(--accent)', color: '#fff', fontSize: 9, padding: '2px 10px', borderRadius: 3, fontWeight: 700, whiteSpace: 'nowrap' }}>ATM {spot?.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span></td><td colSpan={7} style={{ height: 3, padding: 0, background: 'linear-gradient(90deg,transparent,var(--accent),transparent)' }} /></tr>}
-                  <tr>
-                    <td className={`call-side ${cITM ? 'itm' : ''}`}>{cOI || '—'}</td>
-                    <td className={`call-side ${cITM ? 'itm' : ''}`}>{c.volume || '—'}</td>
-                    <td className={`call-side ${cITM ? 'itm' : ''}`}>{c.iv ? (c.iv * 100).toFixed(1) + '%' : '—'}</td>
-                    <td className={`call-side ${cITM ? 'itm' : ''}`} style={{ fontWeight: 600 }}>{f4(c.delta)}</td>
-                    <td className={`call-side ${cITM ? 'itm' : ''} selectable`} onClick={() => addLeg(row, 'call', 'buy')} onContextMenu={e => { e.preventDefault(); addLeg(row, 'call', 'sell'); }}>{f2(c.bid)}</td>
-                    <td className={`call-side ${cITM ? 'itm' : ''} selectable`} onClick={() => addLeg(row, 'call', 'buy')} onContextMenu={e => { e.preventDefault(); addLeg(row, 'call', 'sell'); }}>{f2(c.ask)}</td>
-                    <td className={`call-side ${cITM ? 'itm' : ''} selectable`} onClick={() => addLeg(row, 'call', 'buy')} onContextMenu={e => { e.preventDefault(); addLeg(row, 'call', 'sell'); }} style={{ fontWeight: 700, color: 'var(--green)' }}>{f2(c.mark_price)}</td>
-                    <td className="strike-col">{Number(row.strike).toLocaleString()}</td>
-                    <td className={`put-side ${pITM ? 'itm' : ''} selectable`} onClick={() => addLeg(row, 'put', 'buy')} onContextMenu={e => { e.preventDefault(); addLeg(row, 'put', 'sell'); }} style={{ fontWeight: 700, color: 'var(--red)' }}>{f2(p.mark_price)}</td>
-                    <td className={`put-side ${pITM ? 'itm' : ''} selectable`} onClick={() => addLeg(row, 'put', 'buy')} onContextMenu={e => { e.preventDefault(); addLeg(row, 'put', 'sell'); }}>{f2(p.bid)}</td>
-                    <td className={`put-side ${pITM ? 'itm' : ''} selectable`} onClick={() => addLeg(row, 'put', 'buy')} onContextMenu={e => { e.preventDefault(); addLeg(row, 'put', 'sell'); }}>{f2(p.ask)}</td>
-                    <td className={`put-side ${pITM ? 'itm' : ''}`} style={{ fontWeight: 600 }}>{f4(p.delta)}</td>
-                    <td className={`put-side ${pITM ? 'itm' : ''}`}>{p.iv ? (p.iv * 100).toFixed(1) + '%' : '—'}</td>
-                    <td className={`put-side ${pITM ? 'itm' : ''}`}>{p.volume || '—'}</td>
-                    <td className={`put-side ${pITM ? 'itm' : ''}`}>{pOI || '—'}</td>
-                  </tr>
-                </React.Fragment>
-              );
-            })}
-          </tbody>
-        </table>
       </div>
     </div>
   );

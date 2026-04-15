@@ -175,5 +175,43 @@
     "pnl": 0,
     "adjustments": 0,
     "status": "completed"
+  },
+  {
+    "sid": "dbb19f8f",
+    "user_id": 1,
+    "started_at": "2026-04-15T14:56:10.443037",
+    "ended_at": null,
+    "params": {
+      "asset": "BTC",
+      "source": "Option Chain",
+      "legs": 2,
+      "max_profit": 0.0,
+      "max_loss": 0.0,
+      "expiry_date": "",
+      "lot_size": 1,
+      "leg_details": "SELL call 73200, SELL put 73200"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "running"
+  },
+  {
+    "sid": "538b2a83",
+    "user_id": 1,
+    "started_at": "2026-04-15T15:11:41.466119",
+    "ended_at": null,
+    "params": {
+      "asset": "BTC",
+      "source": "Option Chain",
+      "legs": 2,
+      "max_profit": 0.0,
+      "max_loss": 0.0,
+      "expiry_date": "",
+      "lot_size": 10,
+      "leg_details": "SELL call 74000, SELL put 74000"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "running"
   }
 ]
