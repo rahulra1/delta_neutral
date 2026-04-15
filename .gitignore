@@ -9,3 +9,9 @@ __pycache__/
 *.pyc
 users.db
 trade_history.json
+__pycache__/
+**/__pycache__/
+*.pyc
+users.db
+trade_history.json
+.nse_cache/
