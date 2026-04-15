@@ -10,7 +10,7 @@ from functools import wraps
 from auth import check_api_connection
 from strategy import DeltaNeutralStrategy
 from trade_history import record_start, record_end, get_history
-from models import init_db, create_user, verify_user, get_user, update_api_keys, get_profiles, get_profile, create_profile, update_profile, delete_profile, get_user_credits, deduct_credits, add_credits, set_user_plan, get_credit_history, is_admin, set_admin, get_all_users, get_all_plans, CREDIT_COSTS, save_strategy, update_strategy_db, get_live_strategies, delete_strategy_db
+from models import init_db, create_user, verify_user, get_user, update_api_keys, get_profiles, get_profile, create_profile, update_profile, delete_profile, get_user_credits, deduct_credits, add_credits, set_user_plan, get_credit_history, is_admin, set_admin, get_all_users, get_all_plans, CREDIT_COSTS, save_strategy, update_strategy_db, get_live_strategies, delete_strategy_db, get_db
 from strategy.tracker import TrackedStrategy, registry
 from api.position_tracker import position_tracker
 
@@ -1357,6 +1357,18 @@ def api_credit_costs():
 @admin_required
 def api_admin_users():
     return jsonify(users=get_all_users())
+
+
+@app.route('/api/admin/stats')
+@login_required
+@admin_required
+def api_admin_stats():
+    conn = get_db()
+    total = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+    creds = conn.execute('SELECT COALESCE(SUM(credits_remaining),0), COALESCE(SUM(credits_used),0) FROM user_credits').fetchone()
+    plans_count = conn.execute('SELECT COUNT(*) FROM plans').fetchone()[0]
+    conn.close()
+    return jsonify(total_users=total, credits_available=creds[0], credits_used=creds[1], plans_count=plans_count)
 
 
 @app.route('/api/admin/plans')

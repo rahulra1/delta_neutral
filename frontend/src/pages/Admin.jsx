@@ -13,9 +13,9 @@ export default function Admin() {
 
   const load = () => {
     api.get('/admin/stats').then(r => setStats(r.data));
-    api.get('/admin/users').then(r => setUsers(r.data));
-    api.get('/admin/plans').then(r => setPlans(r.data));
-    api.get('/credits/costs').then(r => setCosts(r.data));
+    api.get('/admin/users').then(r => setUsers(r.data.users || r.data));
+    api.get('/admin/plans').then(r => setPlans(r.data.plans || r.data));
+    api.get('/credits/costs').then(r => setCosts(r.data.costs || r.data));
   };
 
   useEffect(load, []);

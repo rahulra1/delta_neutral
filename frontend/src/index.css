@@ -142,7 +142,85 @@ table.a-table{width:100%;border-collapse:collapse;font-size:.8rem}
 .a-input{padding:5px 10px;border:1px solid var(--border);border-radius:4px;font-size:.8rem;font-family:inherit;background:var(--bg)}
 .badge-admin{background:var(--accent);color:#fff;font-size:.65rem;padding:2px 8px;border-radius:3px;font-weight:700}
 
-/* Option Chain — AlgoTest-style Split Panel */
+/* Option Chain v2 — Enhanced */
+.oc2-wrap{flex:1;overflow:auto}
+.oc2{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:11px}
+.oc2 thead{position:sticky;top:0;z-index:3}
+
+/* Header bands */
+.oc2-hdr-call{background:#2e7d32;color:#fff;text-align:center;font-size:10px;letter-spacing:1.5px;font-weight:700;padding:6px;border-bottom:2px solid #1b5e20}
+.oc2-hdr-put{background:#c62828;color:#fff;text-align:center;font-size:10px;letter-spacing:1.5px;font-weight:700;padding:6px;border-bottom:2px solid #b71c1c}
+.oc2-hdr-strike{background:#283593;color:#fff;text-align:center;font-size:10px;letter-spacing:1px;font-weight:700;padding:6px;border-bottom:2px solid #1a237e;border-left:2px solid #283593;border-right:2px solid #283593}
+
+/* Sub-headers */
+.oc2-th{background:#f5f5f5;color:#888;font-size:9px;text-transform:uppercase;letter-spacing:.5px;padding:6px 5px;text-align:right;border-bottom:1px solid #eee;font-weight:700}
+.oc2-th.c{background:#f1f8e9}
+.oc2-th.p{background:#fce4ec}
+.oc2-th.strike-h{background:#e8eaf6;border-left:2px solid #283593;border-right:2px solid #283593;min-width:80px}
+.oc2-th.ltp-h{font-size:10px;color:#333}
+
+/* Cells */
+.oc2-td{padding:5px 5px;text-align:right;border-bottom:1px solid #f5f5f5;font-family:'SF Mono','Fira Code','Consolas',monospace;white-space:nowrap;transition:background .1s}
+.oc2-td.c{background:rgba(76,175,80,0.02)}
+.oc2-td.p{background:rgba(244,67,54,0.02)}
+.oc2-row:hover .oc2-td{background:rgba(63,81,181,0.04)!important}
+
+/* ITM shading */
+.oc2-row.c-itm .oc2-td.c{background:rgba(76,175,80,0.06)}
+.oc2-row.p-itm .oc2-td.p{background:rgba(244,67,54,0.06)}
+.oc2-row.atm .oc2-td{background:rgba(63,81,181,0.07)!important}
+
+/* Strike */
+.oc2-td.strike{text-align:center;background:#f5f5fa!important;border-left:2px solid #c5cae9;border-right:2px solid #c5cae9;position:relative}
+.oc2-td.atm-strike{background:linear-gradient(180deg,rgba(63,81,181,0.12),rgba(63,81,181,0.06))!important}
+.oc2-strike-num{font-weight:800;font-size:12px;color:#333}
+.oc2-atm-badge{font-size:7px;background:#5c6bc0;color:#fff;padding:1px 6px;border-radius:8px;display:inline-block;margin-top:1px;letter-spacing:.5px;font-weight:700}
+
+/* OI bars */
+.oc2-td.oi-cell{position:relative;min-width:55px}
+.oc2-oi-bg{position:absolute;top:2px;bottom:2px;border-radius:2px;opacity:.6}
+.oc2-oi-bg.c{right:0;background:linear-gradient(90deg,transparent,#ff9800)}
+.oc2-oi-bg.p{left:0;background:linear-gradient(270deg,transparent,#2196f3)}
+.oc2-oi-val{position:relative;font-size:10px;color:#555}
+
+/* Volume bars */
+.oc2-td.vol-cell{position:relative;min-width:45px}
+.oc2-vol-bg{position:absolute;top:2px;bottom:2px;border-radius:2px;opacity:.35}
+.oc2-vol-bg.c{right:0;background:#4caf50}
+.oc2-vol-bg.p{left:0;background:#f44336}
+.oc2-vol-val{position:relative;font-size:10px;color:#777}
+
+/* IV */
+.oc2-td.iv{color:#999;font-size:10px}
+
+/* Delta */
+.oc2-td.delta{font-weight:600;color:#555}
+
+/* Bid/Ask */
+.oc2-td.bidask{font-size:10px}
+.oc2-td.bidask .bid{color:#2196f3}
+.oc2-td.bidask .ask{color:#ff5722}
+.oc2-td.bidask .sep{color:#ccc;margin:0 1px}
+
+/* LTP cell */
+.oc2-td.ltp-cell{position:relative;min-width:90px}
+.oc2-ltp-wrap{display:flex;flex-direction:column;align-items:flex-end;gap:0}
+.oc2-ltp{font-weight:700;font-size:12px;color:#222}
+.oc2-ltp.sel{color:#5c6bc0!important;text-decoration:underline;text-underline-offset:2px}
+.oc2-chg{font-size:8px;font-weight:600;letter-spacing:.3px}
+.oc2-chg.up{color:#4caf50}
+.oc2-chg.dn{color:#f44336}
+
+/* B/S buttons */
+.oc2-bs{position:absolute;left:3px;top:50%;transform:translateY(-50%);display:flex;gap:2px;z-index:2}
+.oc2-bs.right{left:auto;right:3px}
+.oc2-b,.oc2-s{width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:800;cursor:pointer;color:#fff;transition:all .12s;box-shadow:0 1px 3px rgba(0,0,0,.15)}
+.oc2-b{background:#2196f3}.oc2-b:hover{background:#1565c0;transform:scale(1.2)}
+.oc2-s{background:#f44336}.oc2-s:hover{background:#c62828;transform:scale(1.2)}
+.oc2-b.on{background:#0d47a1;box-shadow:0 0 0 2px rgba(13,71,161,.3)}
+.oc2-s.on{background:#b71c1c;box-shadow:0 0 0 2px rgba(183,28,28,.3)}
+
+/* Keep old at-* classes for the page layout */
 .at-layout{display:flex;height:calc(100vh - 56px);overflow:hidden;background:var(--bg)}
 .at-left{flex:0 0 52%;display:flex;flex-direction:column;border-right:1px solid var(--border);overflow:hidden;background:#fff}
 .at-right{flex:1;display:flex;flex-direction:column;overflow:hidden;background:#fff}

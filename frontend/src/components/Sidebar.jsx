@@ -22,6 +22,9 @@ export default function Sidebar() {
 
   useEffect(() => { api.get('/credits').then(r => setCredits(r.data.credits_remaining)).catch(() => {}); }, []);
 
+  const items = [...NAV_ITEMS];
+  if (user?.is_admin) items.push({ to: '/admin', icon: '🛡', label: 'Admin' });
+
   return (
     <div className="sidebar" style={{ width: collapsed ? 60 : 200 }}>
       {/* Brand */}
@@ -32,7 +35,7 @@ export default function Sidebar() {
 
       {/* Nav */}
       <nav className="sidebar-nav">
-        {NAV_ITEMS.map(item => (
+        {items.map(item => (
           <NavLink key={item.to} to={item.to} end={item.to === '/'} className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}>
             <span className="sidebar-icon">{item.icon}</span>
             {!collapsed && <span className="sidebar-label">{item.label}</span>}
