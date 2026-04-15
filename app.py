@@ -27,9 +27,13 @@ strategies = {}
 # {sid: {source, name, status, user_id, pnl, started_at, details, ...}}
 all_tracked = {}
 
+# {monitor_id: {monitor, user_id, profile_id}}
+active_monitors = {}
+
 # Resume strategies from DB on startup
 def _resume_db_strategies():
     from models import get_db
+    from strategy.monitor import StrategyMonitor
     import json as _json
     conn = get_db()
     rows = conn.execute("SELECT * FROM live_strategies WHERE status IN ('running', 'open (no monitor)')").fetchall()
@@ -39,19 +43,71 @@ def _resume_db_strategies():
         sid = d['sid']
         legs = _json.loads(d['legs']) if d['legs'] else []
         details = _json.loads(d['details']) if d['details'] else {}
+        user_id = d['user_id']
+        source = d['source']
+        max_profit = d.get('max_profit', 0) or 0
+        max_loss = d.get('max_loss', 0) or 0
+        asset = d.get('asset', 'BTC')
+        lot_size = d.get('lot_size', 0.001) or 0.001
+        profile_id = d.get('profile_id')
+
+        # 1. Restore all_tracked
         all_tracked[sid] = {
-            'sid': sid, 'source': d['source'], 'name': d['name'],
-            'user_id': d['user_id'], 'status': d['status'],
+            'sid': sid, 'source': source, 'name': d['name'],
+            'user_id': user_id, 'status': d['status'],
             'started_at': d['started_at'], 'pnl': d['pnl'] or 0,
             'details': details,
         }
-        if legs:
+
+        # 2. Restore position_tracker
+        for leg in legs:
+            position_tracker.open(user_id, leg.get('product_id'), leg.get('symbol', ''),
+                type=leg.get('type', ''), strike=leg.get('strike', ''),
+                side=leg.get('side', ''), size=int(leg.get('size', 0)),
+                entry_price=float(leg.get('entry_price', 0)),
+                asset=asset, source=source)
+
+        if not legs:
+            continue
+
+        # 3. Restore active_monitors (for Option Chain / Strategy Builder with targets)
+        if source in ('Option Chain', 'Strategy Builder') and max_profit > 0 and max_loss > 0:
+            mon = StrategyMonitor(
+                legs=legs, max_profit=max_profit, max_loss=max_loss,
+                asset=asset, lot_size=lot_size,
+            )
+            mon.current_pnl = d['pnl'] or 0
+            active_monitors[sid] = {'monitor': mon, 'user_id': user_id, 'profile_id': profile_id}
+            mon.on_complete = lambda pnl, reason, s=sid: (update_tracked(s, status='completed', pnl=round(pnl, 2)), record_end(s, pnl, 0))
+            mon._log("🔄 Resumed after restart")
+            mon.start()
+            print(f"[resume] Resumed monitor {sid} — {d['name']}")
+
+        # 4. Restore strategies dict (for AlgoX DN) — as TrackedStrategy since
+        #    DeltaNeutralStrategy needs live WebSocket state that can't be restored
+        elif source == 'AlgoX DN':
             strat = TrackedStrategy(
-                sid=sid, source=d['source'], name=d['name'],
-                user_id=d['user_id'], legs=legs, asset=d.get('asset', 'BTC'),
-                lot_size=d.get('lot_size', 0.001),
-                max_profit=d.get('max_profit', 0), max_loss=d.get('max_loss', 0),
-                profile_id=d.get('profile_id'), interval=d.get('interval', 10),
+                sid=sid, source=source, name=d['name'],
+                user_id=user_id, legs=legs, asset=asset,
+                lot_size=lot_size, max_profit=max_profit, max_loss=max_loss,
+                profile_id=profile_id, interval=d.get('interval', 10),
+                details=details,
+            )
+            strat.started_at = d['started_at']
+            strat.current_pnl = d['pnl'] or 0
+            strat.adjustment_count = d.get('adjustment_count', 0)
+            strat.log("🔄 Resumed after restart (monitoring only — adjustments disabled)")
+            registry.register(strat)
+            strat.start_monitoring()
+            print(f"[resume] Resumed DN strategy {sid} — {d['name']}")
+
+        # 5. Everything else — use TrackedStrategy
+        else:
+            strat = TrackedStrategy(
+                sid=sid, source=source, name=d['name'],
+                user_id=user_id, legs=legs, asset=asset,
+                lot_size=lot_size, max_profit=max_profit, max_loss=max_loss,
+                profile_id=profile_id, interval=d.get('interval', 10),
                 details=details,
             )
             strat.started_at = d['started_at']
@@ -381,6 +437,18 @@ def api_dashboard():
     # Include trades that belong to this user
     trades = [t for t in all_history if t.get('sid') in user_sids or t.get('user_id') == uid]
 
+    # Include DB-tracked strategies not in trade history
+    for sid, t in all_tracked.items():
+        if t.get('user_id') != uid:
+            continue
+        if not any(tr.get('sid') == sid for tr in trades):
+            trades.append({
+                'sid': sid, 'user_id': uid, 'status': t.get('status', 'running'),
+                'started_at': t.get('started_at', ''), 'ended_at': None,
+                'pnl': t.get('pnl', 0), 'params': t.get('details', {}),
+                'adjustments': 0,
+            })
+
     # Inject live PnL for running strategies into trade list
     for t in trades:
         sid = t.get('sid')
@@ -558,13 +626,24 @@ def api_close_strategy(sid):
         details = all_tracked[sid].get('details', {})
         placed_legs = details.get('legs', [])
         if isinstance(placed_legs, list) and placed_legs:
+            failed = []
             for leg in placed_legs:
-                close_side = 'buy' if leg['side'] == 'sell' else 'sell'
-                place_order(leg['product_id'], leg['symbol'], int(leg['size']), close_side)
+                try:
+                    close_side = 'buy' if leg['side'] == 'sell' else 'sell'
+                    result = place_order(leg['product_id'], leg['symbol'], int(leg['size']), close_side)
+                    if result is None:
+                        failed.append(leg.get('symbol', 'unknown'))
+                except Exception as e:
+                    failed.append(f"{leg.get('symbol')}: {e}")
+            if failed:
+                return jsonify(success=False, error=f"Failed to close: {', '.join(failed)}"), 500
             closed = True
 
+    if not closed:
+        return jsonify(success=False, error="Failed to close strategy"), 500
+
     update_tracked(sid, status='closed')
-    return jsonify(success=closed, status='closed')
+    return jsonify(success=True, status='closed')
 
 
 @app.route('/api/strategies/close-all', methods=['POST'])
@@ -846,8 +925,6 @@ def api_history():
 
 
 # ── Option Chain Routes ──
-
-active_monitors = {}  # {monitor_id: {monitor, user_id}}
 
 DELTA_ASSETS = {'BTC', 'ETH'}
 

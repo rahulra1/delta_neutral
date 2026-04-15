@@ -122,7 +122,7 @@
     "sid": "658583ca",
     "user_id": 1,
     "started_at": "2026-04-15T11:33:23.721550",
-    "ended_at": null,
+    "ended_at": "2026-04-15T12:10:17.352177",
     "params": {
       "asset": "BTC",
       "source": "Option Chain",
@@ -133,15 +133,15 @@
       "lot_size": 1,
       "leg_details": "BUY call 73200"
     },
-    "pnl": 0,
+    "pnl": -0.02,
     "adjustments": 0,
-    "status": "running"
+    "status": "completed"
   },
   {
     "sid": "91a0f6e8",
     "user_id": 1,
     "started_at": "2026-04-15T11:34:55.331836",
-    "ended_at": null,
+    "ended_at": "2026-04-15T12:10:04.469624",
     "params": {
       "asset": "BTC",
       "source": "Option Chain",
@@ -154,7 +154,7 @@
     },
     "pnl": 0,
     "adjustments": 0,
-    "status": "running"
+    "status": "completed"
   },
   {
     "sid": "838494bb",

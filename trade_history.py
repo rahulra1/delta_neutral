@@ -2,7 +2,7 @@ import json
 import os
 from datetime import datetime
 
-HISTORY_FILE = os.path.join(os.path.dirname(__file__), 'trade_history.json')
+HISTORY_FILE = os.environ.get('ALGOX_HISTORY_FILE', os.path.join(os.path.dirname(__file__), 'trade_history.json'))
 
 
 def _load():

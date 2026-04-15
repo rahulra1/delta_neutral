@@ -128,7 +128,9 @@ class TrackedStrategy:
     def _exit(self, reason):
         self.exit_reason = reason
         self.log(f"📝 Closing all legs — reason: {reason}")
-        self._close_legs()
+        failed = self._close_legs()
+        if failed:
+            self.log(f"⚠ Some legs failed to close: {', '.join(failed)}")
         self.running = False
         self.status = 'completed'
         self._save_to_db()
@@ -137,21 +139,39 @@ class TrackedStrategy:
             self.on_complete(self.current_pnl, reason)
 
     def _close_legs(self):
+        failed = []
         for leg in self.legs:
             close_side = 'sell' if leg['side'] == 'buy' else 'buy'
             self.log(f"   {close_side.upper()} {leg['symbol']} x {leg['size']}")
             try:
-                place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
+                result = place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
+                if result is None:
+                    self.log(f"   ⚠ Failed to close {leg['symbol']}")
+                    failed.append(leg['symbol'])
             except Exception as e:
                 self.log(f"   ⚠ Failed to close {leg['symbol']}: {e}")
+                failed.append(leg['symbol'])
+        return failed
 
     def close(self):
         """Manual close."""
         if self.running:
             self.log("🛑 Manual close requested")
-            self._exit('manual')
+            failed = self._close_legs()
+            if failed:
+                self.log(f"⚠ Some legs failed to close: {', '.join(failed)}")
+                return False
+            self.running = False
+            self.status = 'completed'
+            self.exit_reason = 'manual'
+            self._save_to_db()
+            self.log(f"✅ Strategy closed | PnL: ${self.current_pnl:.2f}")
+            if self.on_complete:
+                self.on_complete(self.current_pnl, 'manual')
+            return True
         else:
             self.status = 'closed'
+            return True
 
     def get_status(self):
         with self._lock:
