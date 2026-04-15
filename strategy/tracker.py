@@ -60,12 +60,26 @@ class TrackedStrategy:
         with self._lock:
             return list(self._logs[-last_n:])
 
+    def _save_to_db(self):
+        try:
+            from models import save_strategy
+            legs_data = [{k: l.get(k) for k in ('symbol','product_id','type','strike','side','size','entry_price','current_mark','current_pnl')} for l in self.legs]
+            save_strategy(self.sid, self.user_id, self.source, self.name, self.status,
+                          self.started_at, pnl=self.current_pnl, details=self.details,
+                          legs=legs_data, max_profit=self.max_profit, max_loss=self.max_loss,
+                          profile_id=self.profile_id, asset=self.asset, lot_size=self.lot_size,
+                          interval=self.interval, exit_reason=self.exit_reason,
+                          adjustment_count=self.adjustment_count)
+        except Exception:
+            pass
+
     def start_monitoring(self):
         if not self.legs:
             self.log("⚠ No legs to monitor")
             return
         self.running = True
         self.status = 'running'
+        self._save_to_db()
         self.log(f"👁 Monitoring started | {self.source} | {self.name}")
         self.log(f"   Legs: {len(self.legs)} | Asset: {self.asset} | Lot: {self.lot_size}")
         if self.max_profit:
@@ -96,6 +110,7 @@ class TrackedStrategy:
 
                 self.current_pnl = round(pnl, 2)
                 self.log(f"📊 PnL: ${pnl:.2f} | " + " | ".join(leg_details))
+                self._save_to_db()
 
                 # Check exit conditions
                 if self.max_profit > 0 and pnl >= self.max_profit:
@@ -116,6 +131,7 @@ class TrackedStrategy:
         self._close_legs()
         self.running = False
         self.status = 'completed'
+        self._save_to_db()
         self.log(f"✅ Strategy completed | PnL: ${self.current_pnl:.2f} | Reason: {reason}")
         if self.on_complete:
             self.on_complete(self.current_pnl, reason)

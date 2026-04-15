@@ -36,6 +36,7 @@ After=network.target
 User=root
 WorkingDirectory=${DIR}
 EnvironmentFile=${DIR}/.env
+Environment=ALGOX_DB_PATH=/root/delta_neutral/users.db
 ExecStart=${DIR}/venv/bin/gunicorn --bind 127.0.0.1:${PORT} --workers 1 --threads 4 --timeout 120 app:app
 Restart=always
 RestartSec=5

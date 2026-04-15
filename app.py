@@ -10,7 +10,7 @@ from functools import wraps
 from auth import check_api_connection
 from strategy import DeltaNeutralStrategy
 from trade_history import record_start, record_end, get_history
-from models import init_db, create_user, verify_user, get_user, update_api_keys, get_profiles, get_profile, create_profile, update_profile, delete_profile, get_user_credits, deduct_credits, add_credits, set_user_plan, get_credit_history, is_admin, set_admin, get_all_users, get_all_plans, CREDIT_COSTS
+from models import init_db, create_user, verify_user, get_user, update_api_keys, get_profiles, get_profile, create_profile, update_profile, delete_profile, get_user_credits, deduct_credits, add_credits, set_user_plan, get_credit_history, is_admin, set_admin, get_all_users, get_all_plans, CREDIT_COSTS, save_strategy, update_strategy_db, get_live_strategies, delete_strategy_db
 from strategy.tracker import TrackedStrategy, registry
 from api.position_tracker import position_tracker
 
@@ -27,6 +27,43 @@ strategies = {}
 # {sid: {source, name, status, user_id, pnl, started_at, details, ...}}
 all_tracked = {}
 
+# Resume strategies from DB on startup
+def _resume_db_strategies():
+    from models import get_db
+    import json as _json
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM live_strategies WHERE status IN ('running', 'open (no monitor)')").fetchall()
+    conn.close()
+    for r in rows:
+        d = dict(r)
+        sid = d['sid']
+        legs = _json.loads(d['legs']) if d['legs'] else []
+        details = _json.loads(d['details']) if d['details'] else {}
+        all_tracked[sid] = {
+            'sid': sid, 'source': d['source'], 'name': d['name'],
+            'user_id': d['user_id'], 'status': d['status'],
+            'started_at': d['started_at'], 'pnl': d['pnl'] or 0,
+            'details': details,
+        }
+        if legs:
+            strat = TrackedStrategy(
+                sid=sid, source=d['source'], name=d['name'],
+                user_id=d['user_id'], legs=legs, asset=d.get('asset', 'BTC'),
+                lot_size=d.get('lot_size', 0.001),
+                max_profit=d.get('max_profit', 0), max_loss=d.get('max_loss', 0),
+                profile_id=d.get('profile_id'), interval=d.get('interval', 10),
+                details=details,
+            )
+            strat.started_at = d['started_at']
+            strat.current_pnl = d['pnl'] or 0
+            strat.adjustment_count = d.get('adjustment_count', 0)
+            strat.log("🔄 Resumed after restart")
+            registry.register(strat)
+            strat.start_monitoring()
+            print(f"[resume] Resumed strategy {sid} — {d['name']}")
+
+_resume_db_strategies()
+
 def track_strategy(sid, source, name, user_id, details=None):
     """Register a strategy in the unified tracker."""
     all_tracked[sid] = {
@@ -35,10 +72,25 @@ def track_strategy(sid, source, name, user_id, details=None):
         'started_at': datetime.now().isoformat(),
         'pnl': 0, 'details': details or {},
     }
+    try:
+        legs = (details or {}).get('legs', [])
+        save_strategy(sid, user_id, source, name, 'running',
+                      all_tracked[sid]['started_at'], details=details, legs=legs,
+                      max_profit=(details or {}).get('max_profit', 0),
+                      max_loss=(details or {}).get('max_loss', 0),
+                      profile_id=(details or {}).get('profile_id'),
+                      asset=(details or {}).get('asset', 'BTC'))
+    except Exception:
+        pass
 
 def update_tracked(sid, **kwargs):
     if sid in all_tracked:
         all_tracked[sid].update(kwargs)
+        try:
+            update_strategy_db(sid, **{k: v for k, v in kwargs.items()
+                                       if k in ('status', 'pnl', 'details', 'legs', 'exit_reason', 'adjustment_count')})
+        except Exception:
+            pass
 
 
 def _get_jwt_user_id():
@@ -715,6 +767,15 @@ def stream(sid):
 def status(sid):
     e = strategies.get(sid)
     if not e or e.get('user_id') != current_user_id():
+        # Try peer
+        if PEER_PORT:
+            try:
+                import requests as req
+                token = request.headers.get('Authorization', '').replace('Bearer ', '')
+                r = req.get(f'http://127.0.0.1:{PEER_PORT}/api/status/{sid}',
+                            headers={'Authorization': f'Bearer {token}'}, timeout=3)
+                if r.ok: return jsonify(r.json())
+            except Exception: pass
         return jsonify(running=False)
     if not e['running'] or not e.get('strategy'):
         return jsonify(running=False)

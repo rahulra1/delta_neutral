@@ -38,5 +38,142 @@
     "pnl": 0,
     "adjustments": 0,
     "status": "completed"
+  },
+  {
+    "sid": "6d00ae36",
+    "user_id": 1,
+    "started_at": "2026-04-15T11:17:13.240494",
+    "ended_at": "2026-04-15T11:17:13.779294",
+    "params": {
+      "expiry_date": "",
+      "lot_size": 10,
+      "target_delta": 0.2,
+      "delta_tolerance": 0.05,
+      "premium_threshold": 40,
+      "target_pnl": 10,
+      "monitoring_interval": 5,
+      "max_adjustments": 10,
+      "asset": "BTC"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "completed"
+  },
+  {
+    "sid": "1d8eecdc",
+    "user_id": 1,
+    "started_at": "2026-04-15T11:17:48.913189",
+    "ended_at": "2026-04-15T11:17:49.726393",
+    "params": {
+      "expiry_date": "",
+      "lot_size": 10,
+      "target_delta": 0.2,
+      "delta_tolerance": 0.05,
+      "premium_threshold": 40,
+      "target_pnl": 10,
+      "monitoring_interval": 5,
+      "max_adjustments": 10,
+      "asset": "BTC"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "completed"
+  },
+  {
+    "sid": "c500f107",
+    "user_id": 1,
+    "started_at": "2026-04-15T11:18:03.329855",
+    "ended_at": "2026-04-15T11:18:04.846043",
+    "params": {
+      "expiry_date": "29-05-2026",
+      "lot_size": 10,
+      "target_delta": 0.2,
+      "delta_tolerance": 0.05,
+      "premium_threshold": 40,
+      "target_pnl": 10,
+      "monitoring_interval": 5,
+      "max_adjustments": 10,
+      "asset": "BTC"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "completed"
+  },
+  {
+    "sid": "a1e467f9",
+    "user_id": 1,
+    "started_at": "2026-04-15T11:18:21.913118",
+    "ended_at": null,
+    "params": {
+      "asset": "BTC",
+      "source": "Option Chain",
+      "legs": 1,
+      "max_profit": 30.0,
+      "max_loss": 30.0,
+      "expiry_date": "",
+      "lot_size": 1,
+      "leg_details": "BUY call 73200"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "running"
+  },
+  {
+    "sid": "658583ca",
+    "user_id": 1,
+    "started_at": "2026-04-15T11:33:23.721550",
+    "ended_at": null,
+    "params": {
+      "asset": "BTC",
+      "source": "Option Chain",
+      "legs": 1,
+      "max_profit": 12.0,
+      "max_loss": 12.0,
+      "expiry_date": "",
+      "lot_size": 1,
+      "leg_details": "BUY call 73200"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "running"
+  },
+  {
+    "sid": "91a0f6e8",
+    "user_id": 1,
+    "started_at": "2026-04-15T11:34:55.331836",
+    "ended_at": null,
+    "params": {
+      "asset": "BTC",
+      "source": "Option Chain",
+      "legs": 1,
+      "max_profit": 8.0,
+      "max_loss": 11.0,
+      "expiry_date": "",
+      "lot_size": 1,
+      "leg_details": "BUY call 73000"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "running"
+  },
+  {
+    "sid": "838494bb",
+    "user_id": 1,
+    "started_at": "2026-04-15T11:36:04.773784",
+    "ended_at": "2026-04-15T11:36:06.462292",
+    "params": {
+      "expiry_date": "29-05-2026",
+      "lot_size": 10,
+      "target_delta": 0.2,
+      "delta_tolerance": 0.05,
+      "premium_threshold": 40,
+      "target_pnl": 10,
+      "monitoring_interval": 5,
+      "max_adjustments": 10,
+      "asset": "BTC"
+    },
+    "pnl": 0,
+    "adjustments": 0,
+    "status": "completed"
   }
 ]

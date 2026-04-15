@@ -3,7 +3,7 @@ import os
 import bcrypt
 from datetime import datetime, timedelta
 
-DB_PATH = os.path.join(os.path.dirname(__file__), 'users.db')
+DB_PATH = os.environ.get('ALGOX_DB_PATH', os.path.join(os.path.dirname(__file__), 'users.db'))
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -74,6 +74,32 @@ def init_db():
     # Give credits to existing users who don't have a row yet
     for u in conn.execute("SELECT id FROM users WHERE id NOT IN (SELECT user_id FROM user_credits)").fetchall():
         conn.execute("INSERT INTO user_credits (user_id, plan_id, credits_remaining) VALUES (?, 1, 50)", (u['id'],))
+    conn.execute('''CREATE TABLE IF NOT EXISTS live_strategies (
+        sid TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running',
+        started_at TEXT NOT NULL,
+        pnl REAL DEFAULT 0,
+        details TEXT DEFAULT '{}',
+        legs TEXT DEFAULT '[]',
+        logs TEXT DEFAULT '[]',
+        max_profit REAL DEFAULT 0,
+        max_loss REAL DEFAULT 0,
+        profile_id INTEGER,
+        asset TEXT DEFAULT 'BTC',
+        lot_size REAL DEFAULT 0.001,
+        interval INTEGER DEFAULT 10,
+        exit_reason TEXT,
+        adjustment_count INTEGER DEFAULT 0,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )''')
+    # Migrate: add logs column if missing
+    ls_cols = [r['name'] for r in conn.execute("PRAGMA table_info(live_strategies)").fetchall()]
+    if 'logs' not in ls_cols:
+        conn.execute("ALTER TABLE live_strategies ADD COLUMN logs TEXT DEFAULT '[]'")
     conn.commit()
     conn.close()
 
@@ -251,3 +277,55 @@ def get_all_plans():
     rows = conn.execute('SELECT * FROM plans ORDER BY price').fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# --- Live strategy persistence ---
+import json as _json
+
+def save_strategy(sid, user_id, source, name, status, started_at, pnl=0,
+                  details=None, legs=None, logs=None, max_profit=0, max_loss=0,
+                  profile_id=None, asset='BTC', lot_size=0.001, interval=10,
+                  exit_reason=None, adjustment_count=0):
+    conn = get_db()
+    conn.execute('''INSERT OR REPLACE INTO live_strategies
+        (sid, user_id, source, name, status, started_at, pnl, details, legs, logs,
+         max_profit, max_loss, profile_id, asset, lot_size, interval,
+         exit_reason, adjustment_count, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)''',
+        (sid, user_id, source, name, status, started_at, pnl,
+         _json.dumps(details or {}), _json.dumps(legs or []), _json.dumps(logs or []),
+         max_profit, max_loss, profile_id, asset, lot_size, interval,
+         exit_reason, adjustment_count))
+    conn.commit()
+    conn.close()
+
+def update_strategy_db(sid, **kwargs):
+    conn = get_db()
+    for k in ('details', 'legs'):
+        if k in kwargs:
+            kwargs[k] = _json.dumps(kwargs[k])
+    sets = ', '.join(f'{k}=?' for k in kwargs)
+    vals = list(kwargs.values()) + [sid]
+    conn.execute(f'UPDATE live_strategies SET {sets}, updated_at=CURRENT_TIMESTAMP WHERE sid=?', vals)
+    conn.commit()
+    conn.close()
+
+def get_live_strategies(user_id):
+    conn = get_db()
+    rows = conn.execute('SELECT * FROM live_strategies WHERE user_id=? AND status IN (?,?)',
+                        (user_id, 'running', 'open (no monitor)')).fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d['details'] = _json.loads(d['details'])
+        d['legs'] = _json.loads(d['legs'])
+        d['logs'] = _json.loads(d.get('logs') or '[]')
+        result.append(d)
+    return result
+
+def delete_strategy_db(sid):
+    conn = get_db()
+    conn.execute('DELETE FROM live_strategies WHERE sid=?', (sid,))
+    conn.commit()
+    conn.close()
