@@ -5,3 +5,7 @@ venv/
 .env
 frontend/node_modules/
 .nse_cache/
+__pycache__/
+*.pyc
+users.db
+trade_history.json
