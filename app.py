@@ -428,26 +428,45 @@ def api_test_connection():
 @app.route('/api/dashboard')
 @login_required
 def api_dashboard():
-    """Compute dashboard stats from trade history."""
+    """Compute dashboard stats from trade history + DB."""
     uid = current_user_id()
     all_history = get_history()
     user_sids = {sid for sid, e in strategies.items() if e.get('user_id') == uid}
     user_sids.update(sid for sid, t in all_tracked.items() if t.get('user_id') == uid)
     user_sids.update(s.sid for s in registry.get_user_strategies(uid))
-    # Include trades that belong to this user
     trades = [t for t in all_history if t.get('sid') in user_sids or t.get('user_id') == uid]
 
     # Include DB-tracked strategies not in trade history
+    trade_sids = {t.get('sid') for t in trades}
     for sid, t in all_tracked.items():
-        if t.get('user_id') != uid:
+        if t.get('user_id') != uid or sid in trade_sids:
             continue
-        if not any(tr.get('sid') == sid for tr in trades):
+        trades.append({
+            'sid': sid, 'user_id': uid, 'status': t.get('status', 'running'),
+            'started_at': t.get('started_at', ''), 'ended_at': None,
+            'pnl': t.get('pnl', 0), 'params': t.get('details', {}),
+            'adjustments': 0,
+        })
+
+    # Also include completed/closed strategies from DB not yet in trades
+    try:
+        import json as _json
+        conn = get_db()
+        db_rows = conn.execute('SELECT * FROM live_strategies WHERE user_id=?', (uid,)).fetchall()
+        conn.close()
+        for r in db_rows:
+            d = dict(r)
+            if d['sid'] in trade_sids or d['sid'] in {t.get('sid') for t in trades}:
+                continue
             trades.append({
-                'sid': sid, 'user_id': uid, 'status': t.get('status', 'running'),
-                'started_at': t.get('started_at', ''), 'ended_at': None,
-                'pnl': t.get('pnl', 0), 'params': t.get('details', {}),
-                'adjustments': 0,
+                'sid': d['sid'], 'user_id': uid, 'status': d['status'],
+                'started_at': d['started_at'], 'ended_at': None,
+                'pnl': d.get('pnl', 0) or 0,
+                'params': _json.loads(d.get('details') or '{}'),
+                'adjustments': d.get('adjustment_count', 0),
             })
+    except Exception:
+        pass
 
     # Inject live PnL for running strategies into trade list
     for t in trades:

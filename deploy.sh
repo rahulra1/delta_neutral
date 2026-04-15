@@ -4,10 +4,21 @@ set -e
 REPO_DIR="/root/delta_neutral"
 BLUE_DIR="/root/delta_neutral-blue"
 GREEN_DIR="/root/delta_neutral-green"
+DATA_DIR="/root/delta_neutral-data"
 
 # --- First-time setup ---
 init_bluegreen() {
   echo "🔧 First-time blue-green setup..."
+
+  # Create shared data directory
+  mkdir -p "$DATA_DIR"
+  # Move existing data files to shared dir if they exist
+  for f in users.db trade_history.json; do
+    [ -f "$REPO_DIR/$f" ] && [ ! -f "$DATA_DIR/$f" ] && cp "$REPO_DIR/$f" "$DATA_DIR/$f"
+  done
+  # Initialize empty files if missing
+  [ ! -f "$DATA_DIR/users.db" ] && touch "$DATA_DIR/users.db"
+  [ ! -f "$DATA_DIR/trade_history.json" ] && echo "[]" > "$DATA_DIR/trade_history.json"
 
   # Create blue and green directories
   if [ ! -d "$BLUE_DIR" ]; then
@@ -36,8 +47,8 @@ After=network.target
 User=root
 WorkingDirectory=${DIR}
 EnvironmentFile=${DIR}/.env
-Environment=ALGOX_DB_PATH=/root/delta_neutral/users.db
-Environment=ALGOX_HISTORY_FILE=/root/delta_neutral/trade_history.json
+Environment=ALGOX_DB_PATH=${DATA_DIR}/users.db
+Environment=ALGOX_HISTORY_FILE=${DATA_DIR}/trade_history.json
 ExecStart=${DIR}/venv/bin/gunicorn --bind 127.0.0.1:${PORT} --workers 1 --threads 4 --timeout 120 app:app
 Restart=always
 RestartSec=5

@@ -25,7 +25,7 @@ export default function Admin() {
     api.get(`/admin/user-history/${u.id}`).then(r => setHistory(r.data));
   };
 
-  const addCredits = () => api.post('/admin/add-credits', { user_id: selectedUser.id, credits: +credits }).then(() => { setCredits(''); load(); });
+  const addCredits = () => api.post('/admin/add-credits', { user_id: selectedUser.id, amount: +credits }).then(() => { setCredits(''); load(); });
   const setPlan = () => api.post('/admin/set-plan', { user_id: selectedUser.id, plan_id: planId }).then(load);
   const toggleAdmin = () => api.post('/admin/set-admin', { user_id: selectedUser.id, is_admin: !selectedUser.is_admin }).then(load);
 
@@ -50,8 +50,8 @@ export default function Admin() {
               <thead><tr>{['ID', 'Username', 'Plan', 'Credits', 'Used', 'Role', ''].map(h => <th key={h} style={{ textAlign: 'left', padding: 4 }}>{h}</th>)}</tr></thead>
               <tbody>{users.map(u => (
                 <tr key={u.id} style={{ background: selectedUser?.id === u.id ? 'rgba(41,98,255,0.15)' : 'transparent' }}>
-                  <td style={{ padding: 4 }}>{u.id}</td><td>{u.username}</td><td>{u.plan}</td>
-                  <td>{u.credits}</td><td>{u.used}</td>
+                  <td style={{ padding: 4 }}>{u.id}</td><td>{u.username}</td><td>{u.plan_name || '—'}</td>
+                  <td>{u.credits_remaining ?? '—'}</td><td>{u.credits_used ?? '—'}</td>
                   <td><span className={`badge ${u.is_admin ? 'badge-red' : 'badge-green'}`}>{u.is_admin ? 'admin' : 'user'}</span></td>
                   <td><button className="btn btn-outline" style={{ fontSize: 11, padding: '2px 8px' }} onClick={() => selectUser(u)}>Select</button></td>
                 </tr>
