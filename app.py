@@ -943,6 +943,246 @@ def api_history():
     return jsonify(user_history)
 
 
+# ── IV Crush Strategy Routes ──
+
+iv_crush_strategies = {}  # {sid: {thread, strategy, log_queue, log_history, running, params, user_id}}
+
+def run_iv_crush(sid, params):
+    entry = iv_crush_strategies[sid]
+    LogCapture._local.log_queue = entry['log_queue']
+    LogCapture._local.log_history = entry['log_history']
+    try:
+        from config import set_thread_credentials
+        profile_id = entry.get('profile_id')
+        if profile_id:
+            p = get_profile(int(profile_id), entry['user_id'])
+            if p:
+                set_thread_credentials(p['api_key'], p['api_secret'], p.get('broker', 'demo'))
+            else:
+                entry['log_queue'].put("❌ Profile not found.")
+                entry['running'] = False
+                return
+        else:
+            user = get_user(entry['user_id'])
+            if not user or not user.get('api_key'):
+                entry['log_queue'].put("❌ API keys not configured.")
+                entry['running'] = False
+                return
+            set_thread_credentials(user['api_key'], user['api_secret'], 'demo')
+
+        if not check_api_connection():
+            entry['log_queue'].put("❌ Cannot connect to API")
+            entry['running'] = False
+            return
+
+        from strategy.iv_crush import IVCrushStrategy
+        s = IVCrushStrategy(
+            asset=params.get('asset', 'BTC'),
+            expiry_date=params['expiry_date'],
+            lot_size=int(params.get('lot_size', 10)),
+            iv_rv_threshold=float(params.get('iv_rv_threshold', 1.3)),
+            max_loss_pct=float(params.get('max_loss_pct', 50)),
+            target_profit_pct=float(params.get('target_profit_pct', 30)),
+            monitoring_interval=int(params.get('monitoring_interval', 10)),
+        )
+        entry['strategy'] = s
+        entry['running'] = True
+        if not s.initialize():
+            entry['log_queue'].put(f"✗ Init failed: {s.status_msg or 'unknown'}")
+            entry['running'] = False
+            entry['log_queue'].put("__STOPPED__")
+            return
+        s.monitor()
+    except Exception as e:
+        entry['log_queue'].put(f"❌ Error: {e}")
+    finally:
+        entry['running'] = False
+        entry['log_queue'].put("__STOPPED__")
+        update_tracked(sid, status='completed', pnl=round(getattr(entry.get('strategy'), 'total_pnl', 0), 2))
+
+
+@app.route('/api/iv-crush/start', methods=['POST'])
+@login_required
+def iv_crush_start():
+    params = request.json
+    profile_id = params.pop('profile_id', None)
+    api_key, api_secret, _, broker = get_profile_creds(profile_id)
+    if not api_key:
+        return jsonify(error="No API profile selected"), 400
+    sid = str(uuid.uuid4())[:8]
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [],
+             'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    iv_crush_strategies[sid] = entry
+    track_strategy(sid, 'IV Crush', f"{params.get('asset','BTC')} IV Crush {params.get('expiry_date','')}", current_user_id(), details=params)
+    entry['thread'] = threading.Thread(target=run_iv_crush, args=(sid, params), daemon=True)
+    entry['thread'].start()
+    return jsonify(status="started", sid=sid)
+
+
+@app.route('/api/iv-crush/stop', methods=['POST'])
+@login_required
+def iv_crush_stop():
+    sid = request.json.get('sid')
+    e = iv_crush_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error="Not found"), 404
+    if e.get('strategy'):
+        e['strategy'].running = False
+        e['strategy'].close_all()
+    return jsonify(status="stopping")
+
+
+@app.route('/api/iv-crush/stream/<sid>')
+@login_required
+def iv_crush_stream(sid):
+    e = iv_crush_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
+    q = e['log_queue']
+    def generate():
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                if msg == "__STOPPED__":
+                    yield f"event: stopped\ndata: done\n\n"
+                    break
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield f": heartbeat\n\n"
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/iv-crush/status/<sid>')
+@login_required
+def iv_crush_status(sid):
+    e = iv_crush_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(running=False)
+    s = e.get('strategy')
+    if not e['running'] or not s:
+        return jsonify(running=False, status_msg=getattr(s, 'status_msg', '') if s else '')
+    pnl_pct = (s.total_pnl / s.total_premium * 100) if s.total_premium > 0 else 0
+    return jsonify(
+        running=True,
+        total_pnl=round(s.total_pnl, 2),
+        unrealized_pnl=round(s.unrealized_pnl, 2),
+        total_premium=round(s.total_premium, 2),
+        pnl_pct=round(pnl_pct, 1),
+        iv_at_entry=round(s.iv_at_entry, 4),
+        current_iv=round(s.current_iv, 4),
+        iv_crush_pct=s.iv_crush_pct,
+        iv_rv_ratio=round(s.iv_rv_ratio, 2),
+        call=_iv_leg(s, 'call'),
+        put=_iv_leg(s, 'put'),
+    )
+
+
+def _iv_leg(s, leg):
+    pos = getattr(s, f'{leg}_position')
+    if not pos:
+        return None
+    entry = getattr(s, f'{leg}_entry_price')
+    ws = s.ws_manager.get_latest_price(pos['symbol'])
+    mark = ws['mark_price'] if ws else entry
+    return dict(symbol=pos['symbol'], strike=pos.get('strike_price', ''),
+                entry=round(entry, 2), mark=round(mark, 2))
+
+
+# ── Call Ratio Spread Routes ──
+
+call_ratio_strategies = {}
+
+def run_call_ratio(sid, params):
+    entry = call_ratio_strategies[sid]
+    LogCapture._local.log_queue = entry['log_queue']
+    LogCapture._local.log_history = entry['log_history']
+    try:
+        from config import set_thread_credentials
+        profile_id = entry.get('profile_id')
+        if profile_id:
+            p = get_profile(int(profile_id), entry['user_id'])
+            if p: set_thread_credentials(p['api_key'], p['api_secret'], p.get('broker', 'demo'))
+            else: entry['log_queue'].put("❌ Profile not found."); entry['running'] = False; return
+        else:
+            user = get_user(entry['user_id'])
+            if not user or not user.get('api_key'): entry['log_queue'].put("❌ API keys not configured."); entry['running'] = False; return
+            set_thread_credentials(user['api_key'], user['api_secret'], 'demo')
+        if not check_api_connection(): entry['log_queue'].put("❌ Cannot connect"); entry['running'] = False; return
+
+        from strategy.call_ratio import CallRatioStrategy
+        s = CallRatioStrategy(
+            asset=params.get('asset', 'BTC'), expiry_date=params.get('expiry_date', ''),
+            lot_size=int(params.get('lot_size', 10)),
+            buy_offset=float(params.get('buy_offset', 300)),
+            sell_offset=float(params.get('sell_offset', 600)),
+            hedge_offset=float(params.get('hedge_offset', 1000)),
+            target_pct=float(params.get('target_pct', 2.5)),
+            sl_pct=float(params.get('sl_pct', 3.0)),
+            monitoring_interval=int(params.get('monitoring_interval', 30)),
+        )
+        entry['strategy'] = s; entry['running'] = True
+        if not s.initialize():
+            entry['log_queue'].put(f"✗ Init failed: {s.status_msg or 'unknown'}"); entry['running'] = False; entry['log_queue'].put("__STOPPED__"); return
+        s.monitor()
+    except Exception as e: entry['log_queue'].put(f"❌ Error: {e}")
+    finally:
+        entry['running'] = False; entry['log_queue'].put("__STOPPED__")
+        update_tracked(sid, status='completed', pnl=round(getattr(entry.get('strategy'), 'total_pnl', 0), 2))
+
+
+@app.route('/api/call-ratio/start', methods=['POST'])
+@login_required
+def call_ratio_start():
+    params = request.json; profile_id = params.pop('profile_id', None)
+    api_key, api_secret, _, broker = get_profile_creds(profile_id)
+    if not api_key: return jsonify(error="No API profile selected"), 400
+    sid = str(uuid.uuid4())[:8]
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [], 'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    call_ratio_strategies[sid] = entry
+    track_strategy(sid, 'Call Ratio', f"{params.get('asset','BTC')} Call Ratio", current_user_id(), details=params)
+    entry['thread'] = threading.Thread(target=run_call_ratio, args=(sid, params), daemon=True); entry['thread'].start()
+    return jsonify(status="started", sid=sid)
+
+
+@app.route('/api/call-ratio/stop', methods=['POST'])
+@login_required
+def call_ratio_stop():
+    sid = request.json.get('sid'); e = call_ratio_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id(): return jsonify(error="Not found"), 404
+    if e.get('strategy'): e['strategy'].running = False; e['strategy'].close_all()
+    return jsonify(status="stopping")
+
+
+@app.route('/api/call-ratio/stream/<sid>')
+@login_required
+def call_ratio_stream(sid):
+    e = call_ratio_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id(): return Response("data: Not found\n\n", mimetype='text/event-stream')
+    q = e['log_queue']
+    def generate():
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                if msg == "__STOPPED__": yield f"event: stopped\ndata: done\n\n"; break
+                yield f"data: {msg}\n\n"
+            except queue.Empty: yield f": heartbeat\n\n"
+    return Response(generate(), mimetype='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/call-ratio/status/<sid>')
+@login_required
+def call_ratio_status(sid):
+    e = call_ratio_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id(): return jsonify(running=False)
+    s = e.get('strategy')
+    if not e['running'] or not s: return jsonify(running=False, status_msg=getattr(s, 'status_msg', '') if s else '')
+    return jsonify(running=True, total_pnl=s.total_pnl, pnl_pct=s.pnl_pct, deployed_margin=round(s.deployed_margin, 2),
+                   legs=[{'symbol': l['symbol'], 'strike': l['strike'], 'side': l['side'], 'size': l['size'],
+                          'entry': round(l['entry_price'], 2), 'mark': round(l.get('current_mark', l['entry_price']), 2),
+                          'pnl': l.get('current_pnl', 0)} for l in s.legs])
+
+
 # ── Option Chain Routes ──
 
 DELTA_ASSETS = {'BTC', 'ETH'}

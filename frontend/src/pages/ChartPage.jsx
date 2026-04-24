@@ -15,6 +15,18 @@ const IND_LIST = [
   { key: 'rsi', label: 'RSI', color: '#7c3aed' },
   { key: 'rsi_div_mss', label: 'Div+MSS', color: '#ef4444' },
   { key: 'sma_vol_breakout', label: 'SMA+Vol', color: '#3b82f6' },
+  { key: 'box_theory', label: 'Box', color: '#f97316' },
+  { key: 'ema_trendline', label: 'EMA+TL', color: '#14b8a6' },
+  { key: 'ema920_pullback', label: '9/20 PB', color: '#a855f7' },
+  { key: 'darvas_box', label: 'Darvas', color: '#06b6d4' },
+  { key: 'fib_retracement', label: 'Fib', color: '#eab308' },
+  { key: 'fvg', label: 'FVG', color: '#10b981' },
+  { key: 'supply_demand', label: 'S/D', color: '#f472b6' },
+  { key: 'candle_patterns', label: 'Candle', color: '#fb923c' },
+  { key: 'vol_imbalance', label: 'VolImb', color: '#dc2626' },
+  { key: 'confluence_scalp', label: 'Scalp', color: '#7c3aed' },
+  { key: 'renko_redbar', label: 'Renko', color: '#0ea5e9' },
+  { key: 'next_move', label: '🔮 Predict', color: '#d946ef' },
 ];
 
 export default function ChartPage() {
@@ -139,6 +151,149 @@ export default function ChartPage() {
       }
     }
 
+    // Box Theory signals
+    if (inds.box_theory?.signals?.length) {
+      const ext3 = Math.min(30, Math.max(15, data.candles.length / 10 | 0));
+      const drawnBoxes = new Set();
+      inds.box_theory.signals.forEach(s => {
+        allMarkers.push({
+          time: s.time,
+          position: s.type === 'buy' ? 'belowBar' : 'aboveBar',
+          color: s.type === 'buy' ? '#26a65b' : '#ea3943',
+          shape: s.type === 'buy' ? 'arrowUp' : 'arrowDown',
+          text: s.type === 'buy' ? 'BUY (Box)' : 'SELL (Box)',
+        });
+        // SL/TP lines
+        if (s.sl) chart.addLineSeries({ color: '#ea3943', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.sl }, { time: s.time + ext3 * 3600, value: s.sl }]);
+        if (s.tp1) chart.addLineSeries({ color: '#26a65b', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.tp1 }, { time: s.time + ext3 * 3600, value: s.tp1 }]);
+        // Box mid line (orange dashed)
+        const boxKey = `${s.box_high}-${s.box_low}`;
+        if (!drawnBoxes.has(boxKey) && s.box_high && s.box_low) {
+          drawnBoxes.add(boxKey);
+          chart.addLineSeries({ color: '#f9731644', lineWidth: 1, lineStyle: 1, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.box_high }, { time: s.time + ext3 * 3600, value: s.box_high }]);
+          chart.addLineSeries({ color: '#f9731644', lineWidth: 1, lineStyle: 1, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.box_low }, { time: s.time + ext3 * 3600, value: s.box_low }]);
+          if (s.box_mid) chart.addLineSeries({ color: '#f9731666', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.box_mid }, { time: s.time + ext3 * 3600, value: s.box_mid }]);
+        }
+      });
+    }
+
+    // EMA + Trendline Breakout signals
+    if (inds.ema_trendline) {
+      const etl = inds.ema_trendline;
+      if (etl.ema200?.length) {
+        chart.addLineSeries({ color: '#14b8a6', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, title: '200 EMA' }).setData(etl.ema200);
+      }
+      if (etl.signals?.length) {
+        const ext4 = Math.min(30, Math.max(15, data.candles.length / 10 | 0));
+        etl.signals.forEach(s => {
+          allMarkers.push({
+            time: s.time,
+            position: s.type === 'buy' ? 'belowBar' : 'aboveBar',
+            color: s.type === 'buy' ? '#26a65b' : '#ea3943',
+            shape: s.type === 'buy' ? 'arrowUp' : 'arrowDown',
+            text: s.type === 'buy' ? 'BUY (TL)' : 'SELL (TL)',
+          });
+          if (s.sl) chart.addLineSeries({ color: '#ea3943', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.sl }, { time: s.time + ext4 * 3600, value: s.sl }]);
+          if (s.tp1) chart.addLineSeries({ color: '#26a65b', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.tp1 }, { time: s.time + ext4 * 3600, value: s.tp1 }]);
+          // Draw trendline
+          if (s.tl_start_time && s.tl_end_time) {
+            chart.addLineSeries({ color: '#14b8a688', lineWidth: 1.5, lineStyle: 1, priceLineVisible: false, lastValueVisible: false }).setData([
+              { time: s.tl_start_time, value: s.tl_start_price },
+              { time: s.tl_end_time, value: s.tl_end_price },
+            ]);
+          }
+        });
+      }
+    }
+
+    // Darvas Box signals
+    if (inds.darvas_box) {
+      const db = inds.darvas_box;
+      if (db.boxes?.length) {
+        db.boxes.forEach(b => {
+          chart.addLineSeries({ color: '#06b6d466', lineWidth: 1, lineStyle: 1, priceLineVisible: false, lastValueVisible: false }).setData([{ time: b.start_time, value: b.top }, { time: b.end_time, value: b.top }]);
+          chart.addLineSeries({ color: '#06b6d466', lineWidth: 1, lineStyle: 1, priceLineVisible: false, lastValueVisible: false }).setData([{ time: b.start_time, value: b.bottom }, { time: b.end_time, value: b.bottom }]);
+        });
+      }
+      if (db.signals?.length) {
+        const ext6 = Math.min(30, Math.max(15, data.candles.length / 10 | 0));
+        db.signals.forEach(s => {
+          allMarkers.push({ time: s.time, position: 'belowBar', color: '#06b6d4', shape: 'arrowUp', text: 'BUY (Darvas)' });
+          if (s.sl) chart.addLineSeries({ color: '#ea3943', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.sl }, { time: s.time + ext6 * 3600, value: s.sl }]);
+          if (s.tp1) chart.addLineSeries({ color: '#26a65b', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.tp1 }, { time: s.time + ext6 * 3600, value: s.tp1 }]);
+        });
+      }
+    }
+
+    // Generic signal renderer for Fib, FVG, S/D, Candle patterns
+    const genericSignalInds = [
+      { key: 'fib_retracement', label: 'Fib', color: '#eab308' },
+      { key: 'fvg', label: 'FVG', color: '#10b981' },
+      { key: 'supply_demand', label: 'S/D', color: '#f472b6' },
+      { key: 'candle_patterns', label: 'Candle', color: '#fb923c' },
+      { key: 'vol_imbalance', label: 'VolImb', color: '#dc2626' },
+      { key: 'confluence_scalp', label: 'Scalp', color: '#7c3aed' },
+      { key: 'renko_redbar', label: 'Renko', color: '#0ea5e9' },
+    ];
+    genericSignalInds.forEach(({ key, label, color }) => {
+      if (inds[key]?.signals?.length) {
+        const extG = Math.min(30, Math.max(15, data.candles.length / 10 | 0));
+        inds[key].signals.forEach(s => {
+          allMarkers.push({
+            time: s.time,
+            position: s.type === 'buy' ? 'belowBar' : 'aboveBar',
+            color: s.type === 'buy' ? '#26a65b' : '#ea3943',
+            shape: s.type === 'buy' ? 'arrowUp' : 'arrowDown',
+            text: `${s.type === 'buy' ? 'BUY' : 'SELL'} (${label})`,
+          });
+          if (s.sl) chart.addLineSeries({ color: '#ea3943', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.sl }, { time: s.time + extG * 3600, value: s.sl }]);
+          if (s.tp1) chart.addLineSeries({ color: '#26a65b', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.tp1 }, { time: s.time + extG * 3600, value: s.tp1 }]);
+        });
+      }
+    });
+
+    // Renko Red Bar overlays (renko_line + ema10 + ema30)
+    if (inds.renko_redbar) {
+      const rr = inds.renko_redbar;
+      if (rr.renko_line?.length) chart.addLineSeries({ color: '#0ea5e9', lineWidth: 2, lineStyle: 0, priceLineVisible: false, lastValueVisible: false, title: 'Renko' }).setData(rr.renko_line);
+      if (rr.ema10?.length) chart.addLineSeries({ color: '#f59e0b', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, title: 'EMA10' }).setData(rr.ema10);
+      if (rr.ema30?.length) chart.addLineSeries({ color: '#ef4444', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, title: 'EMA30' }).setData(rr.ema30);
+    }
+
+    // Next Move Prediction — draw target lines
+    if (inds.next_move?.prediction?.price) {
+      const p = inds.next_move.prediction;
+      const lastT = data.candles[data.candles.length - 1].t;
+      const ext = 10 * 3600;
+      // Support/Resistance
+      chart.addLineSeries({ color: '#26a65b55', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: lastT - ext, value: p.nearest_support }, { time: lastT + ext, value: p.nearest_support }]);
+      chart.addLineSeries({ color: '#ea394355', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: lastT - ext, value: p.nearest_resistance }, { time: lastT + ext, value: p.nearest_resistance }]);
+      // Expected range band
+      chart.addLineSeries({ color: '#d946ef33', lineWidth: 1, lineStyle: 1, priceLineVisible: false, lastValueVisible: false }).setData([{ time: lastT - ext, value: p.expected_range[0] }, { time: lastT + ext, value: p.expected_range[0] }]);
+      chart.addLineSeries({ color: '#d946ef33', lineWidth: 1, lineStyle: 1, priceLineVisible: false, lastValueVisible: false }).setData([{ time: lastT - ext, value: p.expected_range[1] }, { time: lastT + ext, value: p.expected_range[1] }]);
+    }
+
+    // 9/20 EMA Pullback signals
+    if (inds.ema920_pullback) {
+      const ep = inds.ema920_pullback;
+      if (ep.ema9?.length) chart.addLineSeries({ color: '#a855f7', lineWidth: 1.5, priceLineVisible: false, lastValueVisible: false, title: '9 EMA' }).setData(ep.ema9);
+      if (ep.ema20?.length) chart.addLineSeries({ color: '#f43f5e', lineWidth: 1.5, priceLineVisible: false, lastValueVisible: false, title: '20 EMA' }).setData(ep.ema20);
+      if (ep.signals?.length) {
+        const ext5 = Math.min(30, Math.max(15, data.candles.length / 10 | 0));
+        ep.signals.forEach(s => {
+          allMarkers.push({
+            time: s.time,
+            position: s.type === 'buy' ? 'belowBar' : 'aboveBar',
+            color: s.type === 'buy' ? '#26a65b' : '#ea3943',
+            shape: s.type === 'buy' ? 'arrowUp' : 'arrowDown',
+            text: s.type === 'buy' ? 'BUY (9/20)' : 'SELL (9/20)',
+          });
+          if (s.sl) chart.addLineSeries({ color: '#ea3943', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.sl }, { time: s.time + ext5 * 3600, value: s.sl }]);
+          if (s.tp1) chart.addLineSeries({ color: '#26a65b', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }).setData([{ time: s.time, value: s.tp1 }, { time: s.time + ext5 * 3600, value: s.tp1 }]);
+        });
+      }
+    }
+
     // Apply all markers at once
     if (allMarkers.length) {
       allMarkers.sort((a, b) => a.time - b.time);
@@ -230,6 +385,41 @@ export default function ChartPage() {
               {data?.signal || 'Loading...'}
             </div>
           </div>
+
+          {/* Prediction */}
+          {data?.indicators?.next_move?.prediction?.price && (() => {
+            const p = data.indicators.next_move.prediction;
+            const biasColor = p.bias === 'BULLISH' ? '#26a65b' : p.bias === 'BEARISH' ? '#ea3943' : '#f59e0b';
+            return (
+              <div style={{ padding: '10px 12px', borderBottom: '1px solid #2a2e39' }}>
+                <div style={{ fontSize: '.72rem', fontWeight: 700, marginBottom: 6, color: '#787b86', textTransform: 'uppercase', letterSpacing: '.4px' }}>🔮 Next Move Prediction</div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontSize: '1.1rem', fontWeight: 800, padding: '4px 12px', borderRadius: 6, background: biasColor + '22', color: biasColor }}>{p.bias === 'BULLISH' ? '▲' : p.bias === 'BEARISH' ? '▼' : '◆'} {p.bias}</span>
+                  <span style={{ fontSize: '.7rem', color: '#787b86' }}>Score: {p.score}/100</span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 8 }}>
+                  <div style={{ background: '#131722', borderRadius: 4, padding: 5, textAlign: 'center' }}>
+                    <div style={{ fontSize: '.55rem', color: '#26a65b', textTransform: 'uppercase' }}>Up Prob</div>
+                    <div style={{ fontSize: '.9rem', fontWeight: 800, color: '#26a65b' }}>{p.up_probability}%</div>
+                  </div>
+                  <div style={{ background: '#131722', borderRadius: 4, padding: 5, textAlign: 'center' }}>
+                    <div style={{ fontSize: '.55rem', color: '#ea3943', textTransform: 'uppercase' }}>Down Prob</div>
+                    <div style={{ fontSize: '.9rem', fontWeight: 800, color: '#ea3943' }}>{p.down_probability}%</div>
+                  </div>
+                </div>
+                <div style={{ fontSize: '.68rem', color: '#787b86', marginBottom: 4 }}>RSI: {p.rsi} | ATR: {p.atr?.toLocaleString()} | Vol: {p.volatility_pct}%</div>
+                <div style={{ fontSize: '.68rem', marginBottom: 2 }}>
+                  <span style={{ color: '#26a65b' }}>▲ Targets:</span> {p.upside_targets?.map(t => t.toLocaleString()).join(' → ')}
+                </div>
+                <div style={{ fontSize: '.68rem', marginBottom: 2 }}>
+                  <span style={{ color: '#ea3943' }}>▼ Targets:</span> {p.downside_targets?.map(t => t.toLocaleString()).join(' → ')}
+                </div>
+                <div style={{ fontSize: '.68rem', color: '#d946ef' }}>
+                  📏 Range: {p.expected_range?.[0]?.toLocaleString()} — {p.expected_range?.[1]?.toLocaleString()}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Stats */}
           <div style={{ padding: '10px 12px', borderBottom: '1px solid #2a2e39' }}>

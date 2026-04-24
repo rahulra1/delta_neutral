@@ -14,11 +14,14 @@ def get_positions():
         return result.get('result', []) if result.get('success') else []
     except Exception as e:
         print(f"Error fetching positions: {e}")
-        return []
+        return None
 
 
 def get_position_entry_price(product_id):
-    for pos in get_positions():
+    positions = get_positions()
+    if not positions:
+        return None, 0
+    for pos in positions:
         if pos.get('product_id') == product_id:
             return float(pos.get('entry_price', 0)), int(pos.get('size', 0))
     return None, 0

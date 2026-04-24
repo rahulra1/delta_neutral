@@ -6,7 +6,7 @@ def calculate_total_pnl(positions, call_current_price, put_current_price,
     call_position_info = None
     put_position_info = None
 
-    for pos in positions:
+    for pos in (positions or []):
         product_id = pos.get('product_id')
         size = int(pos.get('size', 0))
         entry_price = float(pos.get('entry_price', 0))

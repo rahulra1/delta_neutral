@@ -164,6 +164,10 @@ class DeltaNeutralStrategy:
                 iteration += 1
                 ts = datetime.now().strftime("%H:%M:%S")
                 positions = get_positions()
+                if positions is None:
+                    print(f"[{ts}] Warning: Position fetch failed, skipping cycle")
+                    time.sleep(self.monitoring_interval)
+                    continue
 
                 call_ws = self.ws_manager.get_latest_price(self.call_position['symbol'])
                 put_ws = self.ws_manager.get_latest_price(self.put_position['symbol'])

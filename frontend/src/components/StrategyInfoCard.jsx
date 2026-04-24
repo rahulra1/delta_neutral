@@ -38,6 +38,14 @@ export default function StrategyInfoCard({ strategy: s, active = false, onClick 
           ))}
         </div>
       )}
+      {s.rec && (
+        <div style={{
+          marginTop: 8, padding: '4px 8px', borderRadius: 4, fontSize: '.65rem', fontWeight: 600,
+          background: active ? 'rgba(255,255,255,.12)' : '#ecfdf5',
+          color: active ? 'rgba(255,255,255,.85)' : '#059669',
+          lineHeight: 1.4,
+        }}>{s.rec}</div>
+      )}
     </div>
   );
 }
