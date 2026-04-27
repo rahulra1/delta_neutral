@@ -28,6 +28,8 @@ def place_order(product_id, product_symbol, size, side):
     except Exception as e:
         try:
             detail = e.response.text if hasattr(e, 'response') and e.response else str(e)
+            if hasattr(e, 'response') and e.response and e.response.status_code == 401:
+                detail = f"401 Unauthorized — check that your API key has trading permissions enabled. Response: {e.response.text}"
         except Exception:
             detail = str(e)
         print(f"✗ Error placing order: {detail}")

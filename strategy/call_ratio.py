@@ -14,15 +14,15 @@ from websocket import WebSocketManager
 
 class CallRatioStrategy:
     def __init__(self, asset='BTC', expiry_date='', lot_size=10,
-                 buy_offset=300, sell_offset=600, hedge_offset=1000,
-                 target_pct=2.5, sl_pct=3.0, max_credit_pct=1.0,
+                 buy_offset_pct=2, sell_offset_pct=4, hedge_offset_pct=7,
+                 target_pct=5, sl_pct=8, max_credit_pct=1.0,
                  monitoring_interval=30):
         self.asset = asset
         self.expiry_date = expiry_date
         self.lot_size = lot_size
-        self.buy_offset = buy_offset      # OTM distance for buy leg
-        self.sell_offset = sell_offset     # OTM distance for sell legs
-        self.hedge_offset = hedge_offset   # OTM distance for hedge
+        self.buy_offset_pct = buy_offset_pct    # % OTM for buy leg
+        self.sell_offset_pct = sell_offset_pct   # % OTM for sell legs
+        self.hedge_offset_pct = hedge_offset_pct # % OTM for hedge
         self.target_pct = target_pct
         self.sl_pct = sl_pct
         self.max_credit_pct = max_credit_pct
@@ -52,7 +52,7 @@ class CallRatioStrategy:
         print("MONTHLY CALL RATIO SPREAD (NO-BRAINER)")
         print("=" * 70)
         print(f"Asset: {self.asset} | Expiry: {self.expiry_date} | Lots: {self.lot_size}")
-        print(f"Offsets: Buy +{self.buy_offset} | Sell +{self.sell_offset} (x2) | Hedge +{self.hedge_offset}")
+        print(f"Offsets: Buy +{self.buy_offset_pct}% | Sell +{self.sell_offset_pct}% (x2) | Hedge +{self.hedge_offset_pct}%")
         print(f"Target: {self.target_pct}% | SL: {self.sl_pct}% | Max Credit: {self.max_credit_pct}%")
         print("=" * 70)
 
@@ -71,9 +71,14 @@ class CallRatioStrategy:
 
         print("[2/5] Fetching option chain...")
         from api.option_chain import get_option_chain as fetch_chain
-        chain = fetch_chain(self.expiry_date, self.asset)
-        if not chain:
+        raw = fetch_chain(self.expiry_date, self.asset)
+        if not raw:
             print("✗ Failed to fetch option chain")
+            return False
+        # raw is {success: bool, result: [...]} — extract the list
+        chain = raw.get('result', []) if isinstance(raw, dict) else raw
+        if not chain:
+            print("✗ Empty option chain")
             return False
 
         # Get spot price
@@ -88,10 +93,11 @@ class CallRatioStrategy:
                         .get('strike_price', 0))
         print(f"✓ Spot: {spot:.2f}")
 
-        # Find strikes
-        buy_strike = spot + self.buy_offset
-        sell_strike = spot + self.sell_offset
-        hedge_strike = spot + self.hedge_offset
+        # Find strikes — compute from percentage offsets
+        buy_strike = spot * (1 + self.buy_offset_pct / 100)
+        sell_strike = spot * (1 + self.sell_offset_pct / 100)
+        hedge_strike = spot * (1 + self.hedge_offset_pct / 100)
+        print(f"  Computed strikes: Buy={buy_strike:.0f} (+{self.buy_offset_pct}%) | Sell={sell_strike:.0f} (+{self.sell_offset_pct}%) | Hedge={hedge_strike:.0f} (+{self.hedge_offset_pct}%)")
 
         print(f"[3/5] Finding options...")
         buy_opt = self._find_strike(chain, buy_strike, 'call_options')
@@ -107,9 +113,9 @@ class CallRatioStrategy:
             print("✗ Buy and sell strikes are the same — increase offsets")
             return False
 
-        print(f"  BUY  1x {buy_opt['symbol']} @ Strike {buy_opt['strike_price']} | ${buy_opt.get('mark_price',0):.2f}")
-        print(f"  SELL 2x {sell_opt['symbol']} @ Strike {sell_opt['strike_price']} | ${sell_opt.get('mark_price',0):.2f}")
-        print(f"  BUY  1x {hedge_opt['symbol']} @ Strike {hedge_opt['strike_price']} | ${hedge_opt.get('mark_price',0):.2f}")
+        print(f"  BUY  1x {buy_opt['symbol']} @ Strike {buy_opt['strike_price']} | ${float(buy_opt.get('mark_price',0)):.2f}")
+        print(f"  SELL 2x {sell_opt['symbol']} @ Strike {sell_opt['strike_price']} | ${float(sell_opt.get('mark_price',0)):.2f}")
+        print(f"  BUY  1x {hedge_opt['symbol']} @ Strike {hedge_opt['strike_price']} | ${float(hedge_opt.get('mark_price',0)):.2f}")
 
         # Get contract values
         for opt in [buy_opt, sell_opt, hedge_opt]:

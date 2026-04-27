@@ -43,6 +43,8 @@ class TrackedStrategy:
         self._lock = threading.Lock()
         self._logs = []
         self._monitor_thread = None
+        self._pnl_history = []        # [(iso_ts, pnl), ...]
+        self._snap_counter = 0
 
         # Callbacks
         self.on_complete = None       # fn(pnl, reason)
@@ -95,22 +97,47 @@ class TrackedStrategy:
             try:
                 pnl = 0
                 leg_details = []
+                all_legs_ok = True
                 for leg in self.legs:
-                    data = get_current_price(leg['product_id'], self.asset)
+                    pid = leg.get('product_id')
+                    if not pid:
+                        leg_details.append(f"{leg.get('symbol', '?')}: no product_id")
+                        all_legs_ok = False
+                        continue
+                    data = get_current_price(pid, self.asset)
                     if not data:
-                        leg_details.append(f"{leg['symbol']}: no data")
+                        leg_details.append(f"{leg.get('symbol', '?')}: no data")
+                        all_legs_ok = False
                         continue
                     mark = data['mark_price']
-                    d = 1 if leg['side'] == 'buy' else -1
-                    leg_pnl = d * (mark - leg['entry_price']) * leg['size'] * self.lot_size
+                    d = 1 if leg.get('side') == 'buy' else -1
+                    leg_pnl = d * (mark - float(leg.get('entry_price', 0))) * int(leg.get('size', 0)) * self.lot_size
                     pnl += leg_pnl
                     leg['current_mark'] = mark
                     leg['current_pnl'] = round(leg_pnl, 2)
                     leg_details.append(f"{leg['symbol']}: {mark:.2f} ({'+' if leg_pnl >= 0 else ''}{leg_pnl:.2f})")
 
                 self.current_pnl = round(pnl, 2)
+                now_iso = datetime.now().isoformat()
+                with self._lock:
+                    self._pnl_history.append((now_iso, self.current_pnl))
+                    if len(self._pnl_history) > 2000:
+                        self._pnl_history = self._pnl_history[-2000:]
                 self.log(f"📊 PnL: ${pnl:.2f} | " + " | ".join(leg_details))
                 self._save_to_db()
+                # Persist snapshot every 6 ticks (~1 min at 10s interval)
+                self._snap_counter += 1
+                if self._snap_counter % 6 == 0:
+                    try:
+                        from models import save_pnl_snapshot
+                        save_pnl_snapshot(self.user_id, self.sid, self.current_pnl)
+                    except Exception:
+                        pass
+
+                # Skip exit checks if any leg had no data — P&L is incomplete
+                if not all_legs_ok:
+                    self.log("⚠ Skipping exit check — incomplete price data")
+                    continue
 
                 # Check exit conditions
                 if self.max_profit > 0 and pnl >= self.max_profit:
@@ -141,16 +168,22 @@ class TrackedStrategy:
     def _close_legs(self):
         failed = []
         for leg in self.legs:
-            close_side = 'sell' if leg['side'] == 'buy' else 'buy'
-            self.log(f"   {close_side.upper()} {leg['symbol']} x {leg['size']}")
+            pid = leg.get('product_id')
+            sym = leg.get('symbol', '?')
+            size = int(leg.get('size', 0))
+            if not pid or not size:
+                failed.append(sym)
+                continue
+            close_side = 'sell' if leg.get('side') == 'buy' else 'buy'
+            self.log(f"   {close_side.upper()} {sym} x {size}")
             try:
-                result = place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
+                result = place_order(pid, sym, size, close_side)
                 if result is None:
-                    self.log(f"   ⚠ Failed to close {leg['symbol']}")
-                    failed.append(leg['symbol'])
+                    self.log(f"   ⚠ Failed to close {sym}")
+                    failed.append(sym)
             except Exception as e:
-                self.log(f"   ⚠ Failed to close {leg['symbol']}: {e}")
-                failed.append(leg['symbol'])
+                self.log(f"   ⚠ Failed to close {sym}: {e}")
+                failed.append(sym)
         return failed
 
     def close(self):
@@ -201,6 +234,7 @@ class TrackedStrategy:
                     'current_pnl': round(l.get('current_pnl', 0), 2),
                 } for l in self.legs],
                 'logs': list(self._logs[-100:]),
+                'pnl_history': list(self._pnl_history[-500:]),
             }
 
 

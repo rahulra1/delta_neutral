@@ -90,8 +90,11 @@ class WebSocketManager:
                 print(f"Error unsubscribing from {symbol}: {e}")
         self.subscribed_symbols = [s for s in self.subscribed_symbols if s not in symbols]
 
-    def get_latest_price(self, symbol):
-        return self.latest_prices.get(symbol)
+    def get_latest_price(self, symbol, max_age=30):
+        data = self.latest_prices.get(symbol)
+        if data and (time.time() - data.get('timestamp', 0)) > max_age:
+            return None  # stale data
+        return data
 
     def start(self):
         self.running = True

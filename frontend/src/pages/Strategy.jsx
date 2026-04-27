@@ -62,8 +62,8 @@ const STRATEGIES = [
     features: ['Trendline Break', 'S/R Bounce', 'EMA Reclaim', 'Volume'],
     rec: '⏱ Best on 1H (44% WR SENSEX, 39% NIFTY) · 15M for BANKNIFTY' },
   { key: 'call_ratio', label: 'Call Ratio Spread', icon: '📐', type: 'Options',
-    desc: 'Monthly call ratio: Buy 1 OTM, Sell 2 further OTM, Hedge. No downside risk. 90%+ win rate.',
-    features: ['Call Ratio 1:2', 'No Downside Risk', 'Set & Forget', '2.5% Monthly'],
+    desc: 'Monthly call ratio: Buy 1 OTM, Sell 2 further OTM, Hedge. No downside risk. High win rate.',
+    features: ['Call Ratio 1:2', 'No Downside Risk', 'Set & Forget', '~5% Monthly'],
     rec: '⏱ Monthly expiry · Enter last Friday · BTC/ETH options' },
   { key: 'renko_redbar', label: 'Renko Red Bar', icon: '🧱', type: 'Futures',
     desc: 'ATR-based Renko trend + Red Bar reversal entry. Skip first candle, trade the trap. OTM option buying.',
@@ -94,11 +94,11 @@ const IVC_FIELDS = [
 const CR_FIELDS = [
   { key: 'expiry_date', label: 'Expiry (DD-MM-YYYY)', type: 'text', default: '', placeholder: 'Auto-select nearest', hint: 'Leave empty for auto-select' },
   { key: 'lot_size', label: 'Lot Size', type: 'number', default: 10 },
-  { key: 'buy_offset', label: 'Buy Offset (pts from spot)', type: 'number', default: 300, hint: 'OTM distance for buy leg' },
-  { key: 'sell_offset', label: 'Sell Offset (pts from spot)', type: 'number', default: 600, hint: 'OTM distance for sell legs (2x lots)' },
-  { key: 'hedge_offset', label: 'Hedge Offset (pts from spot)', type: 'number', default: 1000, hint: 'OTM distance for hedge' },
-  { key: 'target_pct', label: 'Target Profit (%)', type: 'number', step: '0.5', default: 2.5 },
-  { key: 'sl_pct', label: 'Stop Loss (%)', type: 'number', step: '0.5', default: 3.0 },
+  { key: 'buy_offset_pct', label: 'Buy Offset (% OTM)', type: 'number', step: '0.5', default: 2, hint: 'e.g. 2 = 2% above spot' },
+  { key: 'sell_offset_pct', label: 'Sell Offset (% OTM)', type: 'number', step: '0.5', default: 4, hint: 'Sell 2x lots at this offset' },
+  { key: 'hedge_offset_pct', label: 'Hedge Offset (% OTM)', type: 'number', step: '0.5', default: 7, hint: 'Far OTM hedge leg' },
+  { key: 'target_pct', label: 'Target Profit (%)', type: 'number', step: '0.5', default: 5 },
+  { key: 'sl_pct', label: 'Stop Loss (%)', type: 'number', step: '0.5', default: 8 },
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 30 },
 ];
 

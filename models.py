@@ -8,6 +8,7 @@ DB_PATH = os.environ.get('ALGOX_DB_PATH', os.path.join(os.path.dirname(__file__)
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 def init_db():
@@ -100,6 +101,17 @@ def init_db():
     ls_cols = [r['name'] for r in conn.execute("PRAGMA table_info(live_strategies)").fetchall()]
     if 'logs' not in ls_cols:
         conn.execute("ALTER TABLE live_strategies ADD COLUMN logs TEXT DEFAULT '[]'")
+    # P&L time-series snapshots for performance graphs
+    conn.execute('''CREATE TABLE IF NOT EXISTS pnl_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        sid TEXT NOT NULL,
+        pnl REAL NOT NULL,
+        ts TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_pnl_snap_user_ts ON pnl_snapshots(user_id, ts)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_pnl_snap_sid ON pnl_snapshots(sid, ts)')
     conn.commit()
     conn.close()
 
@@ -199,16 +211,17 @@ def deduct_credits(user_id, action, description=''):
     if cost == 0:
         return True, 0
     conn = get_db()
-    row = conn.execute('SELECT credits_remaining FROM user_credits WHERE user_id = ?', (user_id,)).fetchone()
-    if not row or row['credits_remaining'] < cost:
+    try:
+        row = conn.execute('SELECT credits_remaining FROM user_credits WHERE user_id = ?', (user_id,)).fetchone()
+        if not row or row['credits_remaining'] < cost:
+            return False, cost
+        conn.execute('UPDATE user_credits SET credits_remaining = credits_remaining - ?, credits_used = credits_used + ? WHERE user_id = ?',
+                     (cost, cost, user_id))
+        conn.execute('INSERT INTO credit_transactions (user_id, amount, action, description) VALUES (?, ?, ?, ?)',
+                     (user_id, -cost, action, description))
+        conn.commit()
+    finally:
         conn.close()
-        return False, cost
-    conn.execute('UPDATE user_credits SET credits_remaining = credits_remaining - ?, credits_used = credits_used + ? WHERE user_id = ?',
-                 (cost, cost, user_id))
-    conn.execute('INSERT INTO credit_transactions (user_id, amount, action, description) VALUES (?, ?, ?, ?)',
-                 (user_id, -cost, action, description))
-    conn.commit()
-    conn.close()
     return True, cost
 
 
@@ -287,34 +300,40 @@ def save_strategy(sid, user_id, source, name, status, started_at, pnl=0,
                   profile_id=None, asset='BTC', lot_size=0.001, interval=10,
                   exit_reason=None, adjustment_count=0):
     conn = get_db()
-    conn.execute('''INSERT OR REPLACE INTO live_strategies
-        (sid, user_id, source, name, status, started_at, pnl, details, legs, logs,
-         max_profit, max_loss, profile_id, asset, lot_size, interval,
-         exit_reason, adjustment_count, updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)''',
-        (sid, user_id, source, name, status, started_at, pnl,
-         _json.dumps(details or {}), _json.dumps(legs or []), _json.dumps(logs or []),
-         max_profit, max_loss, profile_id, asset, lot_size, interval,
-         exit_reason, adjustment_count))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute('''INSERT OR REPLACE INTO live_strategies
+            (sid, user_id, source, name, status, started_at, pnl, details, legs, logs,
+             max_profit, max_loss, profile_id, asset, lot_size, interval,
+             exit_reason, adjustment_count, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)''',
+            (sid, user_id, source, name, status, started_at, pnl,
+             _json.dumps(details or {}), _json.dumps(legs or []), _json.dumps(logs or []),
+             max_profit, max_loss, profile_id, asset, lot_size, interval,
+             exit_reason, adjustment_count))
+        conn.commit()
+    finally:
+        conn.close()
 
 def update_strategy_db(sid, **kwargs):
     conn = get_db()
-    for k in ('details', 'legs'):
-        if k in kwargs:
-            kwargs[k] = _json.dumps(kwargs[k])
-    sets = ', '.join(f'{k}=?' for k in kwargs)
-    vals = list(kwargs.values()) + [sid]
-    conn.execute(f'UPDATE live_strategies SET {sets}, updated_at=CURRENT_TIMESTAMP WHERE sid=?', vals)
-    conn.commit()
-    conn.close()
+    try:
+        for k in ('details', 'legs'):
+            if k in kwargs:
+                kwargs[k] = _json.dumps(kwargs[k])
+        sets = ', '.join(f'{k}=?' for k in kwargs)
+        vals = list(kwargs.values()) + [sid]
+        conn.execute(f'UPDATE live_strategies SET {sets}, updated_at=CURRENT_TIMESTAMP WHERE sid=?', vals)
+        conn.commit()
+    finally:
+        conn.close()
 
 def get_live_strategies(user_id):
     conn = get_db()
-    rows = conn.execute('SELECT * FROM live_strategies WHERE user_id=? AND status IN (?,?)',
-                        (user_id, 'running', 'open (no monitor)')).fetchall()
-    conn.close()
+    try:
+        rows = conn.execute('SELECT * FROM live_strategies WHERE user_id=? AND status IN (?,?)',
+                            (user_id, 'running', 'open (no monitor)')).fetchall()
+    finally:
+        conn.close()
     result = []
     for r in rows:
         d = dict(r)
@@ -326,6 +345,38 @@ def get_live_strategies(user_id):
 
 def delete_strategy_db(sid):
     conn = get_db()
-    conn.execute('DELETE FROM live_strategies WHERE sid=?', (sid,))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute('DELETE FROM live_strategies WHERE sid=?', (sid,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# --- P&L snapshots ---
+
+def save_pnl_snapshot(user_id, sid, pnl):
+    conn = get_db()
+    try:
+        conn.execute('INSERT INTO pnl_snapshots (user_id, sid, pnl, ts) VALUES (?,?,?,?)',
+                     (user_id, sid, round(pnl, 2), datetime.now().isoformat()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_pnl_snapshots(user_id, sid=None, since=None):
+    conn = get_db()
+    try:
+        q = 'SELECT sid, pnl, ts FROM pnl_snapshots WHERE user_id=?'
+        params = [user_id]
+        if sid:
+            q += ' AND sid=?'
+            params.append(sid)
+        if since:
+            q += ' AND ts>=?'
+            params.append(since)
+        q += ' ORDER BY ts'
+        rows = conn.execute(q, params).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]

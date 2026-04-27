@@ -25,6 +25,10 @@ class StrategyMonitor:
         self.exit_reason = None
         self._lock = threading.Lock()
         self.log = []
+        self.pnl_history = []         # [(iso_ts, pnl), ...]
+        self._snap_counter = 0
+        self.user_id = None
+        self.sid = None
 
     def _log(self, msg):
         with self._lock:
@@ -46,18 +50,45 @@ class StrategyMonitor:
             try:
                 pnl = 0
                 details = []
+                all_legs_ok = True
                 for leg in self.legs:
-                    data = get_current_price(leg['product_id'], self.asset)
+                    pid = leg.get('product_id')
+                    if not pid:
+                        all_legs_ok = False
+                        details.append(f"{leg.get('symbol', '?')}: no product_id")
+                        continue
+                    data = get_current_price(pid, self.asset)
                     if not data:
+                        all_legs_ok = False
+                        details.append(f"{leg.get('symbol', '?')}: no data")
                         continue
                     mark = data['mark_price']
-                    dir = 1 if leg['side'] == 'buy' else -1
-                    leg_pnl = dir * (mark - leg['entry_price']) * leg['size'] * self.lot_size
+                    dir = 1 if leg.get('side') == 'buy' else -1
+                    leg_pnl = dir * (mark - float(leg.get('entry_price', 0))) * int(leg.get('size', 0)) * self.lot_size
                     pnl += leg_pnl
                     details.append(f"{leg['symbol']}: ${mark:.2f} (pnl ${leg_pnl:.2f})")
 
                 self.current_pnl = pnl
+                from datetime import datetime as _dt
+                now_iso = _dt.now().isoformat()
+                with self._lock:
+                    self.pnl_history.append((now_iso, round(pnl, 2)))
+                    if len(self.pnl_history) > 2000:
+                        self.pnl_history = self.pnl_history[-2000:]
                 self._log(f"📊 PnL: ${pnl:.2f} | " + " | ".join(details))
+                # Persist snapshot every 6 ticks
+                self._snap_counter += 1
+                if self._snap_counter % 6 == 0 and self.user_id and self.sid:
+                    try:
+                        from models import save_pnl_snapshot
+                        save_pnl_snapshot(self.user_id, self.sid, round(pnl, 2))
+                    except Exception:
+                        pass
+
+                # Skip exit checks if any leg had no data — P&L is incomplete
+                if not all_legs_ok:
+                    self._log("⚠ Skipping exit check — incomplete price data")
+                    continue
 
                 if pnl >= self.max_profit:
                     self.exit_reason = 'max_profit'
@@ -104,4 +135,5 @@ class StrategyMonitor:
                     'type': l.get('type', ''), 'strike': l.get('strike', ''),
                 } for l in self.legs],
                 'logs': list(self.log),
+                'pnl_history': list(self.pnl_history[-500:]),
             }

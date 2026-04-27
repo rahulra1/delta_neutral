@@ -17,6 +17,10 @@ export default function Dashboard() {
   const [positions, setPositions] = useState([]);
   const [posProfile, setPosProfile] = useState('');
   const [selectedPos, setSelectedPos] = useState(new Set());
+  const [chartRange, setChartRange] = useState('7d');
+  const [chartFrom, setChartFrom] = useState('');
+  const [chartTo, setChartTo] = useState('');
+  const [pnlSeries, setPnlSeries] = useState([]);
   const nav = useNavigate();
 
   useEffect(() => {
@@ -26,6 +30,18 @@ export default function Dashboard() {
     const t = setInterval(loadStrats, 10000);
     return () => clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    const params = {};
+    if (chartRange === 'custom') {
+      if (chartFrom) params.since = chartFrom;
+      if (chartTo) params.until = chartTo;
+    } else if (chartRange !== 'all') {
+      const days = { '7d': 7, '30d': 30, '90d': 90 }[chartRange] || 0;
+      if (days) params.since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+    }
+    api.get('/pnl-series', { params }).then(r => setPnlSeries(r.data.pnl_series || []));
+  }, [chartRange, chartFrom, chartTo]);
 
   const loadStrats = () => api.get('/strategies').then(r => {
     const s = r.data.strategies || [];
@@ -51,7 +67,11 @@ export default function Dashboard() {
 
   if (!data) return <div className="container">Loading...</div>;
 
-  const pnlSeries = data.pnl_series || [];
+  const RANGE_BTNS = [
+    { key: '7d', label: '7D' }, { key: '30d', label: '1M' },
+    { key: '90d', label: '3M' }, { key: 'all', label: 'All' },
+    { key: 'custom', label: '📅 Custom' },
+  ];
   const alloc = data.asset_allocation || {};
   const allocLabels = Object.keys(alloc);
   const allocValues = Object.values(alloc);
@@ -68,12 +88,36 @@ export default function Dashboard() {
         <div className="stat-card"><div className="label">🎯 Win Rate</div><div className="value">{data.win_rate.toFixed(1)}%</div><div className="sub">All closed</div></div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 20, marginBottom: 24 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 300px', gap: 20, marginBottom: 24 }}>
         <div className="card">
-          <div style={{ fontWeight: 700, marginBottom: 16 }}>Portfolio Performance</div>
-          {pnlSeries.length > 0 && (
-            <Line data={{ labels: pnlSeries.map(s => s.date), datasets: [{ data: pnlSeries.map(s => s.pnl), borderColor: data.total_pnl >= 0 ? '#22c55e' : '#ef4444', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: { target: 'origin', above: 'rgba(34,197,94,0.08)', below: 'rgba(239,68,68,0.08)' } }] }}
-              options={{ responsive: true, animation: false, plugins: { legend: { display: false } }, scales: { x: { grid: { display: false } }, y: { grid: { color: '#f0f0f0' } } } }} />
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+            <div style={{ fontWeight: 700 }}>Portfolio Performance</div>
+            <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+              {RANGE_BTNS.map(r => (
+                <button key={r.key} onClick={() => setChartRange(r.key)} style={{
+                  padding: '5px 12px', border: chartRange === r.key ? '1.5px solid var(--accent)' : '1.5px solid var(--border)', borderRadius: 6,
+                  background: chartRange === r.key ? 'var(--accent)' : 'var(--bg)',
+                  color: chartRange === r.key ? '#fff' : 'var(--text)',
+                  fontSize: '.78rem', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+                }}>{r.label}</button>
+              ))}
+            </div>
+          </div>
+          {chartRange === 'custom' && (
+            <div style={{ display: 'flex', gap: 10, marginBottom: 12, alignItems: 'center', fontSize: '.82rem', flexWrap: 'wrap' }}>
+              <label style={{ color: 'var(--muted)', fontWeight: 600 }}>From</label>
+              <input type="date" value={chartFrom} onChange={e => setChartFrom(e.target.value)}
+                style={{ padding: '6px 10px', border: '1.5px solid var(--border)', borderRadius: 6, fontSize: '.82rem', background: 'var(--bg)', color: 'var(--text)' }} />
+              <label style={{ color: 'var(--muted)', fontWeight: 600 }}>To</label>
+              <input type="date" value={chartTo} onChange={e => setChartTo(e.target.value)}
+                style={{ padding: '6px 10px', border: '1.5px solid var(--border)', borderRadius: 6, fontSize: '.82rem', background: 'var(--bg)', color: 'var(--text)' }} />
+            </div>
+          )}
+          {pnlSeries.length > 0 ? (
+            <Line data={{ labels: pnlSeries.map(s => s.date), datasets: [{ data: pnlSeries.map(s => s.pnl), borderColor: data.total_pnl >= 0 ? '#22c55e' : '#ef4444', borderWidth: 2, pointRadius: pnlSeries.length < 30 ? 3 : 0, tension: 0.3, fill: { target: 'origin', above: 'rgba(34,197,94,0.08)', below: 'rgba(239,68,68,0.08)' } }] }}
+              options={{ responsive: true, animation: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => `P&L: $${ctx.parsed.y.toFixed(2)}` } } }, scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 8, font: { size: 10 }, color: '#aaa' } }, y: { grid: { color: '#f0f0f0' }, ticks: { font: { size: 10 }, color: '#aaa', callback: v => '$' + v } } } }} />
+          ) : (
+            <div style={{ color: 'var(--muted)', fontSize: '.85rem', padding: 20, textAlign: 'center' }}>No data for this range</div>
           )}
         </div>
         <div className="card">

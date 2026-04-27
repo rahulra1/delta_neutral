@@ -1,4 +1,5 @@
 import time
+import threading
 from datetime import datetime
 from api import (
     get_option_chain, find_target_delta_options, get_product_details,
@@ -42,6 +43,9 @@ class DeltaNeutralStrategy:
         self.last_check_time_call = 0
         self.last_check_time_put = 0
         self.check_interval = self.monitoring_interval
+        self._adjusting = threading.Lock()  # prevents concurrent adjustments
+        self._consecutive_failures = 0
+        self._max_consecutive_failures = 10  # emergency exit after this many
 
     def on_price_update(self, symbol, mark_price, delta):
         now = time.time()
@@ -71,6 +75,14 @@ class DeltaNeutralStrategy:
         return from_api['mark_price'] if from_api else fallback_price
 
     def check_adjustment(self, leg, current_price, current_delta):
+        if not self._adjusting.acquire(blocking=False):
+            return  # another adjustment is already in progress
+        try:
+            self._check_adjustment_inner(leg, current_price, current_delta)
+        finally:
+            self._adjusting.release()
+
+    def _check_adjustment_inner(self, leg, current_price, current_delta):
         ts = datetime.now().strftime("%H:%M:%S")
         entry = self.call_entry_price if leg == 'call' else self.put_entry_price
         if entry <= 0 or current_price <= 0:
@@ -178,20 +190,31 @@ class DeltaNeutralStrategy:
                     cd = get_current_price(self.call_position['product_id'], self.asset)
                     pd = get_current_price(self.put_position['product_id'], self.asset)
                     if not cd or not pd:
-                        print(f"[{ts}] Warning: Could not fetch prices")
+                        self._consecutive_failures += 1
+                        print(f"[{ts}] ⚠ Price fetch failed ({self._consecutive_failures}/{self._max_consecutive_failures})")
+                        if self._consecutive_failures >= self._max_consecutive_failures:
+                            print(f"[{ts}] 🚨 EMERGENCY: {self._consecutive_failures} consecutive failures — closing all positions")
+                            self.close_all_positions()
+                            self.running = False
+                            break
                         time.sleep(self.monitoring_interval)
                         continue
                     call_price, put_price, source = cd['mark_price'], pd['mark_price'], "REST"
 
+                self._consecutive_failures = 0  # reset on successful fetch
+
                 call_chg = (call_price - self.call_entry_price) / self.call_entry_price if self.call_entry_price > 0 else 0
                 put_chg = (put_price - self.put_entry_price) / self.put_entry_price if self.put_entry_price > 0 else 0
 
-                if call_chg >= self.premium_threshold:
-                    call_delta = call_ws['delta'] if call_ws else 0
-                    self.check_adjustment('call', call_price, call_delta)
-                if put_chg >= self.premium_threshold:
-                    put_delta = put_ws['delta'] if put_ws else 0
-                    self.check_adjustment('put', put_price, put_delta)
+                # Only check adjustments from polling when WS is NOT active
+                # (WS callback on_price_update handles it when WS is connected)
+                if source == "REST":
+                    if call_chg >= self.premium_threshold:
+                        call_delta = 0
+                        self.check_adjustment('call', call_price, call_delta)
+                    if put_chg >= self.premium_threshold:
+                        put_delta = 0
+                        self.check_adjustment('put', put_price, put_delta)
 
                 self.realized_pnl, self.unrealized_pnl, self.total_pnl, c_info, p_info = calculate_total_pnl(
                     positions, call_price, put_price,
@@ -264,7 +287,11 @@ class DeltaNeutralStrategy:
         })
 
         self.ws_manager.unsubscribe([close_pos['symbol']])
-        place_order(close_pos['product_id'], close_pos['symbol'], self.lot_size, 'buy')
+        close_result = place_order(close_pos['product_id'], close_pos['symbol'], self.lot_size, 'buy')
+        if close_result is None:
+            print(f"  ✗ Failed to close {close_leg.upper()} — aborting adjustment")
+            self.ws_manager.subscribe([close_pos['symbol']])
+            return
         self.cumulative_realized_pnl += realized
         time.sleep(2)
 
@@ -284,11 +311,28 @@ class DeltaNeutralStrategy:
             new_opt, _ = find_target_delta_options(option_chain, search_delta, self.delta_tolerance)
 
         if not new_opt:
-            print(f"  ✗ Could not find suitable {close_leg.upper()} option")
+            print(f"  ✗ Could not find suitable {close_leg.upper()} option — rolling back")
+            rollback = place_order(close_pos['product_id'], close_pos['symbol'], self.lot_size, 'sell')
+            if rollback:
+                print(f"  ↩ Rolled back: re-opened {close_leg.upper()} {close_pos['symbol']}")
+                self.cumulative_realized_pnl -= realized
+                self.ws_manager.subscribe([close_pos['symbol']])
+            else:
+                print(f"  ⚠ ROLLBACK FAILED — {close_leg.upper()} leg is now missing!")
             return
 
         print(f"  [3/3] Entering NEW {close_leg.upper()}: {new_opt['symbol']} @ ${new_opt['mark_price']:.2f}")
-        place_order(new_opt['product_id'], new_opt['symbol'], self.lot_size, 'sell')
+        new_order = place_order(new_opt['product_id'], new_opt['symbol'], self.lot_size, 'sell')
+        if new_order is None:
+            print(f"  ✗ Failed to open new {close_leg.upper()} — rolling back")
+            rollback = place_order(close_pos['product_id'], close_pos['symbol'], self.lot_size, 'sell')
+            if rollback:
+                print(f"  ↩ Rolled back: re-opened {close_leg.upper()} {close_pos['symbol']}")
+                self.cumulative_realized_pnl -= realized
+                self.ws_manager.subscribe([close_pos['symbol']])
+            else:
+                print(f"  ⚠ ROLLBACK FAILED — {close_leg.upper()} leg is now missing!")
+            return
         time.sleep(2)
 
         new_entry, _ = get_position_entry_price(new_opt['product_id'])

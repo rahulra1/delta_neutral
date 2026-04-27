@@ -68,15 +68,38 @@ class IVCrushStrategy:
         best_put = matching_puts[0] if matching_puts else min(puts, key=lambda o: abs(float(o.get('strike_price', 0)) - spot))
         return best_call, best_put
 
+    def _compute_realized_vol(self, days=30):
+        """Compute annualized realized volatility from daily close prices."""
+        import math
+        try:
+            from api.chart import get_candles
+            candles = get_candles(self.asset, '1d')
+            if not candles or len(candles) < 10:
+                return 0
+            closes = [c['c'] for c in candles[-days:] if c.get('c')]
+            if len(closes) < 10:
+                return 0
+            log_returns = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+            mean = sum(log_returns) / len(log_returns)
+            variance = sum((r - mean) ** 2 for r in log_returns) / (len(log_returns) - 1)
+            daily_vol = math.sqrt(variance)
+            return daily_vol * math.sqrt(365)  # annualized for crypto (365 days)
+        except Exception as e:
+            print(f"⚠ RV calculation failed: {e}")
+            return 0
+
     def _calc_iv_rv(self, call_option, put_option):
-        """Calculate IV/RV ratio from option data."""
+        """Calculate IV/RV ratio from option data and historical prices."""
         call_iv = float(call_option.get('iv', 0) or call_option.get('implied_volatility', 0))
         put_iv = float(put_option.get('iv', 0) or put_option.get('implied_volatility', 0))
         avg_iv = (call_iv + put_iv) / 2 if call_iv and put_iv else call_iv or put_iv
 
-        # Use greeks or estimate RV from mark prices
-        # For simplicity, estimate RV as IV * 0.7 (typical for crypto)
-        rv_estimate = avg_iv * 0.7 if avg_iv else 1
+        # Compute realized volatility from actual daily closes
+        rv_estimate = self._compute_realized_vol()
+        if rv_estimate <= 0:
+            # Fallback: can't compute RV, skip the filter
+            print("⚠ Could not compute realized volatility — skipping IV/RV filter")
+            return avg_iv, 0, self.iv_rv_threshold  # pass the filter
         ratio = avg_iv / rv_estimate if rv_estimate > 0 else 0
         return avg_iv, rv_estimate, ratio
 
@@ -121,17 +144,25 @@ class IVCrushStrategy:
             print(f"[1/5] Using provided expiry: {self.expiry_date}")
 
         print(f"[2/5] Fetching option chain for {self.expiry_date}...")
-        from api.option_chain import get_option_chain as fetch_chain
-        option_chain = fetch_chain(self.expiry_date, self.asset)
-        if not option_chain:
+        from api.chain import get_option_chain_full
+        chain, spot, _ = get_option_chain_full(self.expiry_date, self.asset)
+        if not chain or not spot:
             print("✗ Failed to fetch option chain")
             return False
 
         print("[3/5] Finding ATM options...")
-        call_option, put_option = self._find_atm_options(option_chain)
+        # chain is [{strike, call: {symbol, product_id, mark_price, iv, ...}, put: {...}}, ...]
+        atm_row = min(chain, key=lambda r: abs(float(r['strike']) - spot))
+        call_option = atm_row.get('call')
+        put_option = atm_row.get('put')
         if not call_option or not put_option:
-            print("✗ Could not find ATM options")
+            print("✗ Could not find ATM call/put pair")
             return False
+
+        # Normalize field names for downstream use
+        for opt in (call_option, put_option):
+            opt.setdefault('strike_price', opt.get('strike', atm_row['strike']))
+            opt.setdefault('spot_price', spot)
 
         print(f"✓ Call: {call_option['symbol']} | Strike: {call_option.get('strike_price')} | ${call_option.get('mark_price', 0):.2f}")
         print(f"✓ Put:  {put_option['symbol']} | Strike: {put_option.get('strike_price')} | ${put_option.get('mark_price', 0):.2f}")
@@ -141,7 +172,7 @@ class IVCrushStrategy:
         self.iv_at_entry = avg_iv
         self.rv_at_entry = rv_est
         self.iv_rv_ratio = ratio
-        print(f"[4/5] IV: {avg_iv:.2f} | RV est: {rv_est:.2f} | IV/RV: {ratio:.2f}")
+        print(f"[4/5] IV: {avg_iv:.4f} | RV est: {rv_est:.4f} | IV/RV: {ratio:.2f}")
 
         if ratio < self.iv_rv_threshold:
             print(f"✗ IV/RV ratio {ratio:.2f} below threshold {self.iv_rv_threshold}. IV not overpriced enough.")
