@@ -15,19 +15,19 @@ def main():
 
     if not strategy.initialize():
         print("✗ Strategy initialization failed")
-        strategy.ws_manager.stop()
+        strategy.stop()
         return
 
     try:
-        strategy.monitor_and_adjust()
+        strategy.monitor()
     except Exception as e:
         print(f"✗ Strategy error: {e}")
-        strategy.close_all_positions()
+        strategy.stop()
     finally:
-        strategy.ws_manager.stop()
+        strategy.stop()
 
     print("=" * 70)
-    print(f"STRATEGY COMPLETED | PnL: ${strategy.cumulative_realized_pnl:.2f} | Adjustments: {strategy.adjustment_count}")
+    print(f"STRATEGY COMPLETED | PnL: ${strategy.pnl:.2f} | Adjustments: {strategy.adjustment_count}")
     print("=" * 70)
 
 

@@ -1,14 +1,9 @@
-import time
 import requests
 import config
-from config import get_api_key, get_api_secret
-from auth.signature import generate_signature
+from auth.headers import get_headers
 
 
 def check_api_connection():
-    api_key = get_api_key()
-    api_secret = get_api_secret()
-
     print("=" * 60)
     print("CHECKING API CONNECTION")
     print("=" * 60)
@@ -24,17 +19,8 @@ def check_api_connection():
         return False
 
     try:
-        timestamp = str(int(time.time()))
         path = '/v2/wallet/balances'
-        signature_data = 'GET' + timestamp + path
-        signature = generate_signature(api_secret, signature_data)
-        headers = {
-            'api-key': api_key,
-            'timestamp': timestamp,
-            'signature': signature,
-            'User-Agent': 'delta-neutral-bot',
-            'Content-Type': 'application/json'
-        }
+        headers = get_headers('GET', path)
         response = requests.get(f'{config.BASE_URL}{path}', headers=headers, timeout=(3, 27))
 
         if response.status_code == 200:

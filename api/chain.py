@@ -1,8 +1,11 @@
 import re
+import logging
 import requests
 from datetime import datetime, timedelta
 import config
 from auth import get_headers
+
+logger = logging.getLogger(__name__)
 
 
 def get_expiries(asset='BTC', min_days=0):
@@ -33,7 +36,7 @@ def get_expiries(asset='BTC', min_days=0):
                 expiries.add((exp_dt, exp_dt.strftime('%d-%m-%Y')))
         return [e[1] for e in sorted(expiries, key=lambda x: x[0])]
     except Exception as e:
-        print(f"Error fetching expiries: {e}")
+        logger.error(f"Error fetching expiries: {e}")
         return []
 
 
@@ -109,5 +112,5 @@ def get_option_chain_full(expiry_date, asset='BTC'):
 
         return chain, spot_price, expiry_date
     except Exception as e:
-        print(f"Error fetching option chain: {e}")
+        logger.error(f"Error fetching option chain: {e}")
         return None, None, None

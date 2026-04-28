@@ -3,6 +3,9 @@
 import requests
 import time
 import threading
+import logging
+
+logger = logging.getLogger(__name__)
 import json
 import os
 from datetime import datetime
@@ -37,7 +40,7 @@ def _get_session():
             _session.get(NSE_BASE, timeout=10)
             _session_ts = time.time()
         except Exception as e:
-            print(f"NSE session init failed: {e}")
+            logger.warning(f"NSE session init failed: {e}")
         return _session
 
 
@@ -77,11 +80,11 @@ def _fetch_chain_raw(symbol):
                 _save_disk(symbol, data)
                 return data
     except Exception as e:
-        print(f"NSE chain fetch error: {e}")
+        logger.warning(f"NSE chain fetch error: {e}")
     # Fallback to last saved data
     cached = _load_disk(symbol)
     if cached:
-        print(f"NSE: serving cached data for {symbol} (market closed or error)")
+        logger.warning(f"NSE: serving cached data for {symbol} (market closed or error)")
     return cached
 
 
@@ -139,7 +142,7 @@ def get_nse_chain(symbol, expiry_date):
             puts[strike] = _parse_opt(pe, symbol, 'PE', strike, expiry_date)
 
     if not calls and not puts:
-        print(f"NSE: no data for {symbol} expiry {exp_nse} (matched 0 rows out of {len(records.get('data', []))})")
+        logger.warning(f"NSE: no data for {symbol} expiry {exp_nse} (matched 0 rows out of {len(records.get('data', []))})")
         return None, spot, None
 
     strikes = sorted(set(list(calls.keys()) + list(puts.keys())), key=lambda s: float(s))

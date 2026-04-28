@@ -1,8 +1,11 @@
 import json
 import os
+import threading
 from datetime import datetime
 
 HISTORY_FILE = os.environ.get('ALGOX_HISTORY_FILE', os.path.join(os.path.dirname(__file__), 'trade_history.json'))
+
+_file_lock = threading.Lock()
 
 
 def _load():
@@ -18,31 +21,34 @@ def _save(data):
 
 
 def record_start(sid, params, user_id=None):
-    history = _load()
-    history.append({
-        'sid': sid,
-        'user_id': user_id,
-        'started_at': datetime.now().isoformat(),
-        'ended_at': None,
-        'params': params,
-        'pnl': 0,
-        'adjustments': 0,
-        'status': 'running',
-    })
-    _save(history)
+    with _file_lock:
+        history = _load()
+        history.append({
+            'sid': sid,
+            'user_id': user_id,
+            'started_at': datetime.now().isoformat(),
+            'ended_at': None,
+            'params': params,
+            'pnl': 0,
+            'adjustments': 0,
+            'status': 'running',
+        })
+        _save(history)
 
 
 def record_end(sid, pnl, adjustments):
-    history = _load()
-    for entry in reversed(history):
-        if entry['sid'] == sid and entry['status'] == 'running':
-            entry['ended_at'] = datetime.now().isoformat()
-            entry['pnl'] = round(pnl, 2)
-            entry['adjustments'] = adjustments
-            entry['status'] = 'completed'
-            break
-    _save(history)
+    with _file_lock:
+        history = _load()
+        for entry in reversed(history):
+            if entry['sid'] == sid and entry['status'] == 'running':
+                entry['ended_at'] = datetime.now().isoformat()
+                entry['pnl'] = round(pnl, 2)
+                entry['adjustments'] = adjustments
+                entry['status'] = 'completed'
+                break
+        _save(history)
 
 
 def get_history():
-    return _load()
+    with _file_lock:
+        return _load()

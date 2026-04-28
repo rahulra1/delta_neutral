@@ -1,6 +1,9 @@
+import logging
 import requests
 import config
 from auth import get_headers
+
+logger = logging.getLogger(__name__)
 
 
 def get_option_chain(expiry_date, asset='BTC'):
@@ -12,5 +15,5 @@ def get_option_chain(expiry_date, asset='BTC'):
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        print(f"Error fetching option chain: {e}")
+        logger.error(f"Error fetching option chain: {e}")
         return None

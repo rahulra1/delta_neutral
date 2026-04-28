@@ -314,14 +314,23 @@ def save_strategy(sid, user_id, source, name, status, started_at, pnl=0,
     finally:
         conn.close()
 
+_ALLOWED_STRATEGY_COLUMNS = frozenset({
+    'status', 'pnl', 'details', 'legs', 'logs', 'max_profit', 'max_loss',
+    'profile_id', 'asset', 'lot_size', 'interval', 'exit_reason', 'adjustment_count',
+    'name', 'source',
+})
+
 def update_strategy_db(sid, **kwargs):
     conn = get_db()
     try:
         for k in ('details', 'legs'):
             if k in kwargs:
                 kwargs[k] = _json.dumps(kwargs[k])
-        sets = ', '.join(f'{k}=?' for k in kwargs)
-        vals = list(kwargs.values()) + [sid]
+        safe_kwargs = {k: v for k, v in kwargs.items() if k in _ALLOWED_STRATEGY_COLUMNS}
+        if not safe_kwargs:
+            return
+        sets = ', '.join(f'{k}=?' for k in safe_kwargs)
+        vals = list(safe_kwargs.values()) + [sid]
         conn.execute(f'UPDATE live_strategies SET {sets}, updated_at=CURRENT_TIMESTAMP WHERE sid=?', vals)
         conn.commit()
     finally:

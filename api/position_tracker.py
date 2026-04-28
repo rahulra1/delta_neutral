@@ -5,6 +5,8 @@ Auto-registers positions when orders are placed.
 import threading
 from datetime import datetime
 from api.pricing import get_current_price
+from api.live_pnl import compute_leg_pnl
+from config import get_contract_value
 
 
 class Position:
@@ -31,9 +33,8 @@ class Position:
 
     def update_price(self, mark):
         self.current_mark = float(mark)
-        lot_size = 0.01 if self.asset == 'ETH' else 0.001
-        d = 1 if self.side == 'buy' else -1
-        self.current_pnl = round(d * (self.current_mark - self.entry_price) * self.size * lot_size, 2)
+        cv = get_contract_value(self.asset)
+        self.current_pnl = round(compute_leg_pnl(self.entry_price, self.current_mark, self.size, self.side, cv), 2)
 
     def to_dict(self):
         return {

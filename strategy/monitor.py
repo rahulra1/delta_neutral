@@ -1,7 +1,13 @@
 import time
 import threading
+import logging
+from datetime import datetime
 from api.pricing import get_current_price
 from api.orders import place_order
+from api.live_pnl import compute_leg_pnl
+from config import get_contract_value
+
+logger = logging.getLogger(__name__)
 
 
 class StrategyMonitor:
@@ -29,13 +35,14 @@ class StrategyMonitor:
         self._snap_counter = 0
         self.user_id = None
         self.sid = None
+        self.profile_id = None
 
     def _log(self, msg):
         with self._lock:
             self.log.append(msg)
             if len(self.log) > 200:
                 self.log = self.log[-200:]
-        print(msg)
+        logger.info(msg)
 
     def start(self):
         self.running = True
@@ -43,6 +50,16 @@ class StrategyMonitor:
         threading.Thread(target=self._monitor_loop, daemon=True).start()
 
     def _monitor_loop(self):
+        # Set API credentials for this thread so auto-close orders work
+        if self.profile_id and self.user_id:
+            try:
+                from config import set_thread_credentials
+                from models import get_profile
+                p = get_profile(int(self.profile_id), self.user_id)
+                if p:
+                    set_thread_credentials(p['api_key'], p['api_secret'], p.get('broker'))
+            except Exception:
+                pass
         while self.running:
             time.sleep(self.interval)
             if not self.running:
@@ -63,14 +80,15 @@ class StrategyMonitor:
                         details.append(f"{leg.get('symbol', '?')}: no data")
                         continue
                     mark = data['mark_price']
-                    dir = 1 if leg.get('side') == 'buy' else -1
-                    leg_pnl = dir * (mark - float(leg.get('entry_price', 0))) * int(leg.get('size', 0)) * self.lot_size
+                    leg_pnl = compute_leg_pnl(
+                        float(leg.get('entry_price', 0)), mark,
+                        int(leg.get('size', 0)), leg.get('side', 'sell'), self.lot_size
+                    )
                     pnl += leg_pnl
                     details.append(f"{leg['symbol']}: ${mark:.2f} (pnl ${leg_pnl:.2f})")
 
                 self.current_pnl = pnl
-                from datetime import datetime as _dt
-                now_iso = _dt.now().isoformat()
+                now_iso = datetime.now().isoformat()
                 with self._lock:
                     self.pnl_history.append((now_iso, round(pnl, 2)))
                     if len(self.pnl_history) > 2000:

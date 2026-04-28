@@ -2,8 +2,11 @@ import threading
 import queue
 import uuid
 import os
+import sys
+import time
+import logging
 import jwt as pyjwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import config as default_config
 from flask import Flask, request, jsonify, Response, session, g, send_from_directory
 from functools import wraps
@@ -14,12 +17,14 @@ from models import init_db, create_user, verify_user, get_user, update_api_keys,
 from strategy.tracker import TrackedStrategy, registry
 from api.position_tracker import position_tracker
 
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__, static_folder=None)
 _secret = os.environ.get('FLASK_SECRET_KEY')
 if not _secret:
     import secrets as _secrets
     _secret = _secrets.token_hex(32)
-    print("⚠ FLASK_SECRET_KEY not set — using random key (sessions won't survive restarts)")
+    logger.warning("⚠ FLASK_SECRET_KEY not set — using random key (sessions won't survive restarts)")
 app.secret_key = _secret
 JWT_SECRET = _secret
 
@@ -81,7 +86,7 @@ def _resume_db_strategies():
         # Skip strategies where all legs have no product_id (invalid/empty data)
         valid_legs = [l for l in legs if l.get('product_id')]
         if not valid_legs:
-            print(f"[resume] Skipping {sid} — no valid legs (missing product_id)")
+            logger.warning(f"[resume] Skipping {sid} — no valid legs (missing product_id)")
             all_tracked[sid]['status'] = 'closed'
             try:
                 update_strategy_db(sid, status='closed', exit_reason='invalid_legs')
@@ -97,11 +102,12 @@ def _resume_db_strategies():
             mon.current_pnl = d['pnl'] or 0
             mon.user_id = user_id
             mon.sid = sid
+            mon.profile_id = profile_id
             active_monitors[sid] = {'monitor': mon, 'user_id': user_id, 'profile_id': profile_id}
             mon.on_complete = lambda pnl, reason, s=sid: (update_tracked(s, status='completed', pnl=round(pnl, 2)), record_end(s, pnl, 0))
             mon._log("🔄 Resumed after restart")
             mon.start()
-            print(f"[resume] Resumed monitor {sid} — {d['name']}")
+            logger.info(f"[resume] Resumed monitor {sid} — {d['name']}")
         # 4. Restore strategies dict (for AlgoX DN) — as TrackedStrategy since
         #    DeltaNeutralStrategy needs live WebSocket state that can't be restored
         elif source == 'AlgoX DN':
@@ -118,7 +124,7 @@ def _resume_db_strategies():
             strat.log("🔄 Resumed after restart (monitoring only — adjustments disabled)")
             registry.register(strat)
             strat.start_monitoring()
-            print(f"[resume] Resumed DN strategy {sid} — {d['name']}")
+            logger.info(f"[resume] Resumed DN strategy {sid} — {d['name']}")
 
         # 5. Everything else — use TrackedStrategy
         else:
@@ -135,9 +141,16 @@ def _resume_db_strategies():
             strat.log("🔄 Resumed after restart")
             registry.register(strat)
             strat.start_monitoring()
-            print(f"[resume] Resumed strategy {sid} — {d['name']}")
+            logger.info(f"[resume] Resumed strategy {sid} — {d['name']}")
 
-_resume_db_strategies()
+_db_resumed = False
+
+@app.before_request
+def _resume_once():
+    global _db_resumed
+    if not _db_resumed:
+        _db_resumed = True
+        _resume_db_strategies()
 
 def track_strategy(sid, source, name, user_id, details=None):
     """Register a strategy in the unified tracker."""
@@ -236,7 +249,7 @@ def credits_required(action):
 
 
 def _make_token(user_id):
-    return pyjwt.encode({'user_id': user_id, 'exp': datetime.now(tz=None) + timedelta(days=7)}, JWT_SECRET, algorithm='HS256')
+    return pyjwt.encode({'user_id': user_id, 'exp': datetime.now(tz=timezone.utc) + timedelta(days=7)}, JWT_SECRET, algorithm='HS256')
 
 
 # ── JWT Auth API ──
@@ -269,7 +282,8 @@ def api_auth_register():
 
 
 class LogCapture:
-    """Thread-aware stdout that routes print() to the correct strategy's log queue."""
+    """Thread-aware stdout that routes print() to the correct strategy's log queue.
+    Kept as fallback for any remaining print() calls or third-party library output."""
     _local = threading.local()
 
     def __init__(self, original):
@@ -288,6 +302,36 @@ class LogCapture:
 
     def flush(self):
         self.original.flush()
+
+
+class _StrategyQueueHandler(logging.Handler):
+    """Logging handler that routes log records to the thread-local strategy queue."""
+    def emit(self, record):
+        msg = self.format(record)
+        q = getattr(LogCapture._local, 'log_queue', None)
+        if q and msg.strip():
+            q.put(msg.strip())
+        h = getattr(LogCapture._local, 'log_history', None)
+        if h is not None and msg.strip():
+            h.append(msg.strip())
+            if len(h) > 500:
+                del h[:len(h)-500]
+
+
+def _setup_logging():
+    """Configure root logger with both console and strategy-queue handlers."""
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    if not root.handlers:
+        console = logging.StreamHandler(sys.__stderr__)
+        console.setFormatter(logging.Formatter('%(message)s'))
+        root.addHandler(console)
+        queue_handler = _StrategyQueueHandler()
+        queue_handler.setFormatter(logging.Formatter('%(message)s'))
+        root.addHandler(queue_handler)
+
+
+_setup_logging()
 
 
 def _save_dn_legs(sid, s):
@@ -317,35 +361,45 @@ import sys
 sys.stdout = LogCapture(sys.stdout)
 
 
-def run_strategy(sid, params):
-    entry = strategies[sid]
-
-    # Route this thread's print() to this strategy's log queue and history
+def _setup_strategy_thread(entry):
+    """Common setup for strategy runner threads: log routing + credential resolution.
+    Returns True if setup succeeded, False if it failed (error already logged to queue)."""
     LogCapture._local.log_queue = entry['log_queue']
     LogCapture._local.log_history = entry['log_history']
+    from config import set_thread_credentials
+    profile_id = entry.get('profile_id')
+    if not profile_id:
+        entry['log_queue'].put("❌ No profile selected. Please select an API profile.")
+        entry['running'] = False
+        return False
+    p = get_profile(int(profile_id), entry['user_id'])
+    if not p:
+        entry['log_queue'].put("❌ Profile not found.")
+        entry['running'] = False
+        return False
+    set_thread_credentials(p['api_key'], p['api_secret'], p.get('broker'))
+    if not check_api_connection():
+        entry['log_queue'].put("❌ Cannot connect to API")
+        entry['running'] = False
+        return False
+    return True
+
+
+def _teardown_strategy_thread(entry):
+    """Common cleanup for strategy runner threads."""
+    LogCapture._local.log_queue = None
+    LogCapture._local.log_history = None
+    entry['running'] = False
+    entry['log_queue'].put("__STOPPED__")
+
+
+def run_strategy(sid, params):
+    entry = strategies[sid]
+    if not _setup_strategy_thread(entry):
+        entry['log_queue'].put("__STOPPED__")
+        return
 
     try:
-        # Set per-thread API keys from profile or default
-        from config import set_thread_credentials
-        profile_id = entry.get('profile_id')
-        if profile_id:
-            p = get_profile(int(profile_id), entry['user_id'])
-            if p:
-                set_thread_credentials(p['api_key'], p['api_secret'], p.get('broker'))
-            else:
-                entry['log_queue'].put("❌ Profile not found.")
-                entry['running'] = False
-                return
-        else:
-            entry['log_queue'].put("❌ No profile selected. Please select an API profile.")
-            entry['running'] = False
-            return
-
-        if not check_api_connection():
-            entry['log_queue'].put("❌ Cannot proceed without proper API access")
-            entry['running'] = False
-            return
-
         s = DeltaNeutralStrategy(
             asset=params.get('asset', 'BTC'),
             expiry_date=params['expiry_date'],
@@ -385,17 +439,13 @@ def run_strategy(sid, params):
     finally:
         pnl = entry['strategy'].cumulative_realized_pnl if entry.get('strategy') else 0
         adj = entry['strategy'].adjustment_count if entry.get('strategy') else 0
-        # Save final legs state
         if entry.get('strategy'):
             _save_dn_legs(sid, entry['strategy'])
         record_end(sid, pnl, adj)
         update_tracked(sid, status='completed', pnl=round(pnl, 2))
         if entry.get('strategy'):
             entry['strategy'].ws_manager.stop()
-        LogCapture._local.log_queue = None
-        LogCapture._local.log_history = None
-        entry['running'] = False
-        entry['log_queue'].put("__STOPPED__")
+        _teardown_strategy_thread(entry)
 
 
 # ── Old template routes removed — React frontend serves all pages ──
@@ -538,6 +588,12 @@ def api_dashboard():
                 # Check old strategies dict (Delta Neutral)
                 elif sid in strategies and strategies[sid].get('strategy'):
                     t['pnl'] = round(strategies[sid]['strategy'].total_pnl, 2)
+                # Check IV Crush
+                elif sid in iv_crush_strategies and iv_crush_strategies[sid].get('strategy'):
+                    t['pnl'] = round(iv_crush_strategies[sid]['strategy'].total_pnl, 2)
+                # Check Call Ratio
+                elif sid in call_ratio_strategies and call_ratio_strategies[sid].get('strategy'):
+                    t['pnl'] = round(call_ratio_strategies[sid]['strategy'].total_pnl, 2)
                 # Check unified tracker
                 rs = registry.get(sid)
                 if rs and rs.running:
@@ -546,6 +602,8 @@ def api_dashboard():
         completed = [t for t in trades if t.get('status') == 'completed']
         running_count = sum(1 for sid, e in strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in active_monitors.items() if e.get('user_id') == uid and e['monitor'].running)
+        running_count += sum(1 for sid, e in iv_crush_strategies.items() if e.get('user_id') == uid and e.get('running'))
+        running_count += sum(1 for sid, e in call_ratio_strategies.items() if e.get('user_id') == uid and e.get('running'))
     running_count += len(registry.get_running(uid))
     pnls = [t.get('pnl', 0) for t in completed]
     wins = [p for p in pnls if p > 0]
@@ -625,6 +683,10 @@ def api_all_strategies():
                     entry['pnl'] = round(mon.current_pnl, 2)
                     if not mon.running:
                         entry['status'] = 'completed'
+                elif sid in iv_crush_strategies and iv_crush_strategies[sid].get('strategy'):
+                    entry['pnl'] = round(iv_crush_strategies[sid]['strategy'].total_pnl, 2)
+                elif sid in call_ratio_strategies and call_ratio_strategies[sid].get('strategy'):
+                    entry['pnl'] = round(call_ratio_strategies[sid]['strategy'].total_pnl, 2)
                 else:
                     # No monitor — compute live P&L from legs
                     raw_legs = entry.get('details', {}).get('legs', [])
@@ -686,7 +748,15 @@ def api_close_strategy(sid):
             profile_id = strategies[sid].get('profile_id')
         elif sid in active_monitors:
             profile_id = active_monitors[sid].get('profile_id')
-        elif all_tracked[sid].get('details', {}).get('profile_id'):
+        elif sid in iv_crush_strategies:
+            profile_id = iv_crush_strategies[sid].get('profile_id')
+        elif sid in call_ratio_strategies:
+            profile_id = call_ratio_strategies[sid].get('profile_id')
+        if not profile_id:
+            rs = registry.get(sid)
+            if rs:
+                profile_id = rs.profile_id
+        if not profile_id and all_tracked.get(sid, {}).get('details', {}).get('profile_id'):
             profile_id = all_tracked[sid]['details']['profile_id']
 
     api_key, api_secret, _, broker = get_profile_creds(profile_id)
@@ -701,11 +771,31 @@ def api_close_strategy(sid):
             e['strategy'].running = False
             e['strategy'].close_all_positions()
             closed = True
+    # IV Crush strategy
+    if not closed and sid in iv_crush_strategies:
+        ic = iv_crush_strategies[sid]
+        if ic.get('strategy'):
+            ic['strategy'].running = False
+            ic['strategy'].close_all()
+            closed = True
+    # Call Ratio strategy
+    if not closed and sid in call_ratio_strategies:
+        cr = call_ratio_strategies[sid]
+        if cr.get('strategy'):
+            cr['strategy'].running = False
+            cr['strategy'].close_all()
+            closed = True
     # Option Chain monitor
-    if sid in active_monitors:
+    if not closed and sid in active_monitors:
         active_monitors[sid]['monitor'].stop()
         closed = True
-    # Option Chain with no monitor — close positions by reversing each leg
+    # TrackedStrategy (registry)
+    if not closed:
+        rs = registry.get(sid)
+        if rs and rs.user_id == uid:
+            rs.close()
+            closed = True
+    # Fallback — close positions by reversing each leg
     if not closed and api_key:
         details = all_tracked[sid].get('details', {})
         placed_legs = details.get('legs', [])
@@ -751,7 +841,15 @@ def api_close_all_strategies():
                 profile_id = strategies[sid].get('profile_id')
             elif sid in active_monitors:
                 profile_id = active_monitors[sid].get('profile_id')
-            elif t.get('details', {}).get('profile_id'):
+            elif sid in iv_crush_strategies:
+                profile_id = iv_crush_strategies[sid].get('profile_id')
+            elif sid in call_ratio_strategies:
+                profile_id = call_ratio_strategies[sid].get('profile_id')
+            if not profile_id:
+                rs = registry.get(sid)
+                if rs:
+                    profile_id = rs.profile_id
+            if not profile_id and t.get('details', {}).get('profile_id'):
                 profile_id = t['details']['profile_id']
 
         api_key, api_secret, _, broker = get_profile_creds(profile_id)
@@ -763,10 +861,23 @@ def api_close_all_strategies():
             strategies[sid]['strategy'].running = False
             strategies[sid]['strategy'].close_all_positions()
             closed = True
-        if sid in active_monitors:
+        if not closed and sid in iv_crush_strategies and iv_crush_strategies[sid].get('strategy'):
+            iv_crush_strategies[sid]['strategy'].running = False
+            iv_crush_strategies[sid]['strategy'].close_all()
+            closed = True
+        if not closed and sid in call_ratio_strategies and call_ratio_strategies[sid].get('strategy'):
+            call_ratio_strategies[sid]['strategy'].running = False
+            call_ratio_strategies[sid]['strategy'].close_all()
+            closed = True
+        if not closed and sid in active_monitors:
             active_monitors[sid]['monitor'].stop()
             closed = True
-        # Option Chain with no monitor
+        if not closed:
+            rs = registry.get(sid)
+            if rs:
+                rs.close()
+                closed = True
+        # Fallback — close by reversing legs
         if not closed and api_key:
             from api.orders import place_order
             placed_legs = t.get('details', {}).get('legs', [])
@@ -816,6 +927,37 @@ def api_strategy_detail(sid):
                         'entry_price': info['entry'], 'current_mark': info['mark'],
                         'current_pnl': info['payoff'], 'delta': info['delta'],
                     })
+        elif sid in iv_crush_strategies and iv_crush_strategies[sid].get('strategy'):
+            ic = iv_crush_strategies[sid]
+            strat = ic['strategy']
+            entry['pnl'] = round(strat.total_pnl, 2)
+            entry['realized_pnl'] = round(getattr(strat, 'realized_pnl', 0), 2)
+            entry['unrealized_pnl'] = round(getattr(strat, 'unrealized_pnl', 0), 2)
+            entry['running'] = ic.get('running', False)
+            logs = ic.get('log_history', [])
+            live_legs = _iv_crush_legs(strat)
+            # Enrich with live marks
+            for leg in live_legs:
+                ws = strat.ws_manager.get_latest_price(leg['symbol'])
+                mark = ws['mark_price'] if ws else leg['entry_price']
+                d = -1  # short
+                leg['current_mark'] = round(mark, 2)
+                leg['current_pnl'] = round(d * (mark - leg['entry_price']) * leg['size'] * leg.get('contract_value', 0.001), 2)
+        elif sid in call_ratio_strategies and call_ratio_strategies[sid].get('strategy'):
+            cr = call_ratio_strategies[sid]
+            strat = cr['strategy']
+            entry['pnl'] = round(strat.total_pnl, 2)
+            entry['running'] = cr.get('running', False)
+            logs = cr.get('log_history', [])
+            for leg in strat.legs:
+                live_legs.append({
+                    'product_id': leg.get('product_id'), 'symbol': leg['symbol'],
+                    'type': 'call', 'strike': leg.get('strike', ''),
+                    'side': leg['side'], 'size': leg['size'],
+                    'entry_price': round(leg['entry_price'], 2),
+                    'current_mark': round(leg.get('current_mark', leg['entry_price']), 2),
+                    'current_pnl': leg.get('current_pnl', 0),
+                })
         else:
             # Option Chain / Strategy Builder / Tracker — use common P&L calculator
             raw_legs = []
@@ -926,7 +1068,7 @@ def start():
     with _state_lock:
         strategies[sid] = entry
     record_start(sid, clean_params, user_id=current_user_id())
-    track_strategy(sid, 'AlgoX DN', f"{clean_params.get('asset','BTC')} {clean_params.get('expiry_date','')}", current_user_id(), details=clean_params)
+    track_strategy(sid, 'AlgoX DN', f"{clean_params.get('asset','BTC')} {clean_params.get('expiry_date','')}", current_user_id(), details={**clean_params, 'profile_id': profile_id})
     entry['thread'] = threading.Thread(target=run_strategy, args=(sid, clean_params), daemon=True)
     entry['thread'].start()
     return jsonify(status="started", sid=sid)
@@ -1120,31 +1262,31 @@ def api_pnl_series():
 
 iv_crush_strategies = {}  # {sid: {thread, strategy, log_queue, log_history, running, params, user_id}}
 
+def _iv_crush_legs(s):
+    """Extract legs list from IVCrushStrategy's call/put positions."""
+    legs = []
+    for name, pos, entry_p, cv in [
+        ('call', s.call_position, s.call_entry_price, s.call_contract_value),
+        ('put', s.put_position, s.put_entry_price, s.put_contract_value),
+    ]:
+        if pos:
+            legs.append({
+                'product_id': pos.get('product_id'), 'symbol': pos.get('symbol', ''),
+                'type': name, 'strike': pos.get('strike_price', ''), 'side': 'sell',
+                'size': s.lot_size, 'entry_price': round(entry_p, 2),
+                'contract_value': cv,
+            })
+    return legs
+
+
 def run_iv_crush(sid, params):
     entry = iv_crush_strategies[sid]
-    LogCapture._local.log_queue = entry['log_queue']
-    LogCapture._local.log_history = entry['log_history']
+    uid = entry['user_id']
+    if not _setup_strategy_thread(entry):
+        entry['log_queue'].put("__STOPPED__")
+        return
+
     try:
-        from config import set_thread_credentials
-        profile_id = entry.get('profile_id')
-        if profile_id:
-            p = get_profile(int(profile_id), entry['user_id'])
-            if p:
-                set_thread_credentials(p['api_key'], p['api_secret'], p.get('broker'))
-            else:
-                entry['log_queue'].put("❌ Profile not found.")
-                entry['running'] = False
-                return
-        else:
-            entry['log_queue'].put("❌ No profile selected. Please select an API profile.")
-            entry['running'] = False
-            return
-
-        if not check_api_connection():
-            entry['log_queue'].put("❌ Cannot connect to API")
-            entry['running'] = False
-            return
-
         from strategy.iv_crush import IVCrushStrategy
         s = IVCrushStrategy(
             asset=params.get('asset', 'BTC'),
@@ -1157,18 +1299,50 @@ def run_iv_crush(sid, params):
         )
         entry['strategy'] = s
         entry['running'] = True
+        record_start(sid, params, user_id=uid)
         if not s.initialize():
             entry['log_queue'].put(f"✗ Init failed: {s.status_msg or 'unknown'}")
             entry['running'] = False
             entry['log_queue'].put("__STOPPED__")
             return
-        s.monitor()
+
+        # Save legs to DB and register positions
+        legs = _iv_crush_legs(s)
+        try:
+            update_strategy_db(sid, legs=legs)
+        except Exception:
+            pass
+        for leg in legs:
+            position_tracker.open(uid, leg['product_id'], leg['symbol'],
+                type=leg['type'], strike=leg.get('strike', ''), side='sell',
+                size=leg['size'], entry_price=leg['entry_price'],
+                asset=params.get('asset', 'BTC'), source='IV Crush')
+
+        # Wrap monitor to inject PnL snapshots
+        import strategy.iv_crush as _iv_mod
+        _orig_sleep = _iv_mod.time.sleep
+        _tick = [0]
+        def _snap_sleep(secs):
+            _orig_sleep(secs)
+            _tick[0] += 1
+            if _tick[0] % 6 == 0:
+                try:
+                    save_pnl_snapshot(uid, sid, round(s.total_pnl, 2))
+                    update_strategy_db(sid, pnl=round(s.total_pnl, 2), legs=_iv_crush_legs(s))
+                except Exception:
+                    pass
+        _iv_mod.time.sleep = _snap_sleep
+        try:
+            s.monitor()
+        finally:
+            _iv_mod.time.sleep = _orig_sleep
     except Exception as e:
         entry['log_queue'].put(f"❌ Error: {e}")
     finally:
-        entry['running'] = False
-        entry['log_queue'].put("__STOPPED__")
-        update_tracked(sid, status='completed', pnl=round(getattr(entry.get('strategy'), 'total_pnl', 0), 2))
+        pnl = round(getattr(entry.get('strategy'), 'total_pnl', 0), 2)
+        record_end(sid, pnl, 0)
+        update_tracked(sid, status='completed', pnl=pnl)
+        _teardown_strategy_thread(entry)
 
 
 @app.route('/api/iv-crush/start', methods=['POST'])
@@ -1183,7 +1357,7 @@ def iv_crush_start():
     entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [],
              'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     iv_crush_strategies[sid] = entry
-    track_strategy(sid, 'IV Crush', f"{params.get('asset','BTC')} IV Crush {params.get('expiry_date','')}", current_user_id(), details=params)
+    track_strategy(sid, 'IV Crush', f"{params.get('asset','BTC')} IV Crush {params.get('expiry_date','')}", current_user_id(), details={**params, 'profile_id': profile_id})
     entry['thread'] = threading.Thread(target=run_iv_crush, args=(sid, params), daemon=True)
     entry['thread'].start()
     return jsonify(status="started", sid=sid)
@@ -1265,19 +1439,12 @@ call_ratio_strategies = {}
 
 def run_call_ratio(sid, params):
     entry = call_ratio_strategies[sid]
-    LogCapture._local.log_queue = entry['log_queue']
-    LogCapture._local.log_history = entry['log_history']
-    try:
-        from config import set_thread_credentials
-        profile_id = entry.get('profile_id')
-        if profile_id:
-            p = get_profile(int(profile_id), entry['user_id'])
-            if p: set_thread_credentials(p['api_key'], p['api_secret'], p.get('broker'))
-            else: entry['log_queue'].put("❌ Profile not found."); entry['running'] = False; return
-        else:
-            entry['log_queue'].put("❌ No profile selected. Please select an API profile."); entry['running'] = False; return
-        if not check_api_connection(): entry['log_queue'].put("❌ Cannot connect"); entry['running'] = False; return
+    uid = entry['user_id']
+    if not _setup_strategy_thread(entry):
+        entry['log_queue'].put("__STOPPED__")
+        return
 
+    try:
         from strategy.call_ratio import CallRatioStrategy
         s = CallRatioStrategy(
             asset=params.get('asset', 'BTC'), expiry_date=params.get('expiry_date', ''),
@@ -1290,13 +1457,49 @@ def run_call_ratio(sid, params):
             monitoring_interval=int(params.get('monitoring_interval', 30)),
         )
         entry['strategy'] = s; entry['running'] = True
+        record_start(sid, params, user_id=uid)
         if not s.initialize():
-            entry['log_queue'].put(f"✗ Init failed: {s.status_msg or 'unknown'}"); entry['running'] = False; entry['log_queue'].put("__STOPPED__"); return
-        s.monitor()
-    except Exception as e: entry['log_queue'].put(f"❌ Error: {e}")
+            entry['log_queue'].put(f"✗ Init failed: {s.status_msg or 'unknown'}")
+            entry['running'] = False
+            entry['log_queue'].put("__STOPPED__")
+            return
+
+        # Save legs to DB and register positions
+        try:
+            update_strategy_db(sid, legs=s.legs)
+        except Exception:
+            pass
+        for leg in s.legs:
+            position_tracker.open(uid, leg['product_id'], leg['symbol'],
+                type='call', strike=leg.get('strike', ''), side=leg['side'],
+                size=leg['size'], entry_price=leg['entry_price'],
+                asset=params.get('asset', 'BTC'), source='Call Ratio')
+
+        # Wrap monitor to inject PnL snapshots
+        import strategy.call_ratio as _cr_mod
+        _orig_sleep = _cr_mod.time.sleep
+        _tick = [0]
+        def _snap_sleep(secs):
+            _orig_sleep(secs)
+            _tick[0] += 1
+            if _tick[0] % 6 == 0:
+                try:
+                    save_pnl_snapshot(uid, sid, round(s.total_pnl, 2))
+                    update_strategy_db(sid, pnl=round(s.total_pnl, 2), legs=s.legs)
+                except Exception:
+                    pass
+        _cr_mod.time.sleep = _snap_sleep
+        try:
+            s.monitor()
+        finally:
+            _cr_mod.time.sleep = _orig_sleep
+    except Exception as e:
+        entry['log_queue'].put(f"❌ Error: {e}")
     finally:
-        entry['running'] = False; entry['log_queue'].put("__STOPPED__")
-        update_tracked(sid, status='completed', pnl=round(getattr(entry.get('strategy'), 'total_pnl', 0), 2))
+        pnl = round(getattr(entry.get('strategy'), 'total_pnl', 0), 2)
+        record_end(sid, pnl, 0)
+        update_tracked(sid, status='completed', pnl=pnl)
+        _teardown_strategy_thread(entry)
 
 
 @app.route('/api/call-ratio/start', methods=['POST'])
@@ -1308,7 +1511,7 @@ def call_ratio_start():
     sid = str(uuid.uuid4())[:8]
     entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [], 'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     call_ratio_strategies[sid] = entry
-    track_strategy(sid, 'Call Ratio', f"{params.get('asset','BTC')} Call Ratio", current_user_id(), details=params)
+    track_strategy(sid, 'Call Ratio', f"{params.get('asset','BTC')} Call Ratio", current_user_id(), details={**params, 'profile_id': profile_id})
     entry['thread'] = threading.Thread(target=run_call_ratio, args=(sid, params), daemon=True); entry['thread'].start()
     return jsonify(status="started", sid=sid)
 
@@ -1396,7 +1599,7 @@ def api_chain():
         try:
             chain, spot, exp = get_nse_chain(asset, expiry)
         except Exception as e:
-            print(f"NSE chain error: {e}")
+            logger.error(f"NSE chain error: {e}")
             return jsonify(error=str(e)), 500
     if chain is None:
         return jsonify(error="No data for this expiry"), 500
@@ -1458,13 +1661,14 @@ def api_place_legs():
     monitor_id = None
     if max_profit > 0 and max_loss > 0 and placed_legs and all(r['success'] for r in results):
         from strategy.monitor import StrategyMonitor
-        lot_sizes = {'BTC': 0.001, 'ETH': 0.01}
+        from config import get_contract_value
         mon = StrategyMonitor(
             legs=placed_legs, max_profit=max_profit, max_loss=max_loss,
-            asset=asset, lot_size=lot_sizes.get(asset, 0.001),
+            asset=asset, lot_size=get_contract_value(asset),
         )
         mon.user_id = current_user_id()
         mon.sid = sid
+        mon.profile_id = data.get('profile_id')
         monitor_id = sid
         active_monitors[monitor_id] = {'monitor': mon, 'user_id': current_user_id(), 'profile_id': data.get('profile_id')}
         mon.on_complete = lambda pnl, reason: (update_tracked(sid, status='completed', pnl=round(pnl, 2)), record_end(sid, pnl, 0))
@@ -1521,7 +1725,8 @@ def api_positions():
         mark = mark_prices.get(pid, entry)
         # contract_value: BTC options = 0.001, ETH options = 0.01
         asset = m.group(2) if m else 'BTC'
-        cv = 0.01 if asset == 'ETH' else 0.001
+        from config import get_contract_value
+        cv = get_contract_value(asset)
         direction = 1 if side == 'buy' else -1
         pnl = direction * (mark - entry) * abs(size) * cv
         result.append({
@@ -1540,14 +1745,22 @@ def api_close_position():
     """Close a single position leg."""
     from api.orders import place_order
     from config import set_thread_credentials
-    data = request.json
+    data = request.json or {}
+    for field in ('side', 'product_id', 'symbol', 'size'):
+        if field not in data:
+            return jsonify(error=f"Missing required field: {field}"), 400
+    try:
+        size = int(data['size'])
+    except (ValueError, TypeError):
+        return jsonify(error="size must be an integer"), 400
+    if data['side'] not in ('buy', 'sell'):
+        return jsonify(error="side must be 'buy' or 'sell'"), 400
     api_key, api_secret, _, broker = get_profile_creds(data.get('profile_id'))
     if not api_key:
         return jsonify(error="No API profile selected"), 400
     set_thread_credentials(api_key, api_secret, broker)
-    # To close: buy back if short, sell if long
     close_side = 'buy' if data['side'] == 'sell' else 'sell'
-    result = place_order(data['product_id'], data['symbol'], int(data['size']), close_side)
+    result = place_order(data['product_id'], data['symbol'], size, close_side)
     if result is not None:
         position_tracker.close(current_user_id(), data['product_id'])
         # Also try closing on peer
@@ -1744,6 +1957,7 @@ def api_deploy_strategy_builder():
         )
         mon.user_id = current_user_id()
         mon.sid = sid
+        mon.profile_id = data.get('profile_id')
         monitor_id = sid
         active_monitors[monitor_id] = {'monitor': mon, 'user_id': current_user_id(), 'profile_id': data.get('profile_id')}
         mon.on_complete = lambda pnl, reason: (update_tracked(sid, status='completed', pnl=round(pnl, 2)), record_end(sid, pnl, 0))

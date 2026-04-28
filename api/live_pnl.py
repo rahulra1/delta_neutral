@@ -3,6 +3,16 @@ Common P&L calculator for any strategy's legs.
 Works for Delta Neutral, Option Chain, Strategy Builder, and Tracker strategies.
 """
 from api.pricing import get_current_price
+from config import get_contract_value
+
+
+def compute_leg_pnl(entry_price, mark_price, size, side, contract_value):
+    """Single-leg P&L calculation. Returns float.
+    
+    side: 'buy' or 'sell'
+    """
+    direction = 1 if side == 'buy' else -1
+    return direction * (mark_price - entry_price) * size * contract_value
 
 
 def compute_live_legs(legs, asset='BTC'):
@@ -12,8 +22,7 @@ def compute_live_legs(legs, asset='BTC'):
     Input legs: [{product_id, symbol, side, size, entry_price, type?, strike?, ...}]
     Returns: (enriched_legs, total_pnl)
     """
-    lot_sizes = {'BTC': 0.001, 'ETH': 0.01}
-    lot_size = lot_sizes.get(asset, 0.001)
+    lot_size = get_contract_value(asset)
     total_pnl = 0
     result = []
 
@@ -32,8 +41,7 @@ def compute_live_legs(legs, asset='BTC'):
 
         size = int(leg.get('size') or leg.get('lots') or 0)
         side = (leg.get('side') or '').lower()
-        direction = 1 if side == 'buy' else -1
-        pnl = direction * (mark - entry) * size * lot_size
+        pnl = compute_leg_pnl(entry, mark, size, side, lot_size)
 
         result.append({
             'product_id': pid,

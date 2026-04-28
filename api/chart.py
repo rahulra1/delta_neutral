@@ -212,12 +212,12 @@ def calc_bollinger(candles, period=20, std_dev=2):
 
 
 def calc_vwap(candles):
+    import datetime
     cum_vol = 0
     cum_tp_vol = 0
     out = []
     day = None
     for c in candles:
-        import datetime
         d = datetime.datetime.utcfromtimestamp(c['t']).date()
         if d != day:
             cum_vol = 0

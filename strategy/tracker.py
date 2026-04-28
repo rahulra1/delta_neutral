@@ -5,9 +5,13 @@ with independent log threads and real-time P&L monitoring.
 import time
 import threading
 import uuid
+import logging
 from datetime import datetime
 from api.pricing import get_current_price
 from api.orders import place_order
+from api.live_pnl import compute_leg_pnl
+
+logger = logging.getLogger(__name__)
 
 
 class TrackedStrategy:
@@ -56,7 +60,7 @@ class TrackedStrategy:
             self._logs.append(entry)
             if len(self._logs) > 500:
                 self._logs = self._logs[-500:]
-        print(f"[{self.sid}] {entry}")
+        logger.info(f"[{self.sid}] {entry}")
 
     def get_logs(self, last_n=100):
         with self._lock:
@@ -90,6 +94,16 @@ class TrackedStrategy:
         self._monitor_thread.start()
 
     def _monitor_loop(self):
+        # Set API credentials for this thread so auto-close orders work
+        if self.profile_id:
+            try:
+                from config import set_thread_credentials
+                from models import get_profile
+                p = get_profile(int(self.profile_id), self.user_id)
+                if p:
+                    set_thread_credentials(p['api_key'], p['api_secret'], p.get('broker'))
+            except Exception:
+                pass
         while self.running:
             time.sleep(self.interval)
             if not self.running:
@@ -110,8 +124,10 @@ class TrackedStrategy:
                         all_legs_ok = False
                         continue
                     mark = data['mark_price']
-                    d = 1 if leg.get('side') == 'buy' else -1
-                    leg_pnl = d * (mark - float(leg.get('entry_price', 0))) * int(leg.get('size', 0)) * self.lot_size
+                    leg_pnl = compute_leg_pnl(
+                        float(leg.get('entry_price', 0)), mark,
+                        int(leg.get('size', 0)), leg.get('side', 'sell'), self.lot_size
+                    )
                     pnl += leg_pnl
                     leg['current_mark'] = mark
                     leg['current_pnl'] = round(leg_pnl, 2)
@@ -278,6 +294,25 @@ class StrategyRegistry:
 
     def all_statuses(self, user_id):
         return [s.get_status() for s in self._strategies.values() if s.user_id == user_id]
+
+    def cleanup_completed(self, max_age_seconds=3600):
+        """Remove completed strategies older than max_age_seconds."""
+        import time as _time
+        now = _time.time()
+        to_remove = []
+        with self._lock:
+            for sid, s in self._strategies.items():
+                if not s.running and s.status in ('completed', 'closed', 'error'):
+                    try:
+                        from datetime import datetime as _dt
+                        started = _dt.fromisoformat(s.started_at).timestamp()
+                        if now - started > max_age_seconds:
+                            to_remove.append(sid)
+                    except Exception:
+                        to_remove.append(sid)
+            for sid in to_remove:
+                del self._strategies[sid]
+        return len(to_remove)
 
 
 # Global singleton

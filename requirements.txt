@@ -1,7 +1,7 @@
-flask
-requests
-websocket-client
-python-dotenv
-gunicorn
-bcrypt
-PyJWT
+flask==3.1.1
+requests==2.32.3
+websocket-client==1.8.0
+python-dotenv==1.1.0
+gunicorn==23.0.0
+bcrypt==4.3.0
+PyJWT==2.10.1

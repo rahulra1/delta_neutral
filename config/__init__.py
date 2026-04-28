@@ -20,6 +20,16 @@ TARGET_PNL = 25
 MAX_ADJUSTMENTS = 5
 MONITORING_INTERVAL = 5
 
+# Per-asset contract values (how many units of the underlying per 1 contract)
+CONTRACT_VALUES = {
+    'BTC': 0.001,
+    'ETH': 0.01,
+}
+
+
+def get_contract_value(asset):
+    return CONTRACT_VALUES.get(asset, 0.001)
+
 # Thread-local credentials + broker
 _thread_local = threading.local()
 
@@ -55,8 +65,8 @@ def get_api_secret():
 # We use a module-level __getattr__ so `config.BASE_URL` resolves per-thread.
 
 def __getattr__(name):
-    if name == 'BASE_URL':
-        return _get_broker_module().BASE_URL
-    if name == 'WS_URL':
-        return _get_broker_module().WS_URL
-    raise AttributeError(f"module 'config' has no attribute {name}")
+    broker = _get_broker_module()
+    try:
+        return getattr(broker, name)
+    except AttributeError:
+        raise AttributeError(f"module 'config' has no attribute {name}")

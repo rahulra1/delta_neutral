@@ -1,3 +1,4 @@
+import logging
 import time
 import threading
 from datetime import datetime
@@ -7,9 +8,12 @@ from api import (
     get_position_entry_price, calculate_total_pnl
 )
 from websocket import WebSocketManager
+from strategy.base import BaseStrategy
+
+logger = logging.getLogger(__name__)
 
 
-class DeltaNeutralStrategy:
+class DeltaNeutralStrategy(BaseStrategy):
     def __init__(self, asset='BTC', expiry_date='01-04-2026', target_delta=0.20,
                  delta_tolerance=0.05, lot_size=100, premium_threshold=0.4,
                  target_pnl=25, max_adjustments=5, monitoring_interval=5):
@@ -44,17 +48,21 @@ class DeltaNeutralStrategy:
         self.last_check_time_put = 0
         self.check_interval = self.monitoring_interval
         self._adjusting = threading.Lock()  # prevents concurrent adjustments
+        self._state_lock = threading.Lock()  # protects shared mutable state
         self._consecutive_failures = 0
         self._max_consecutive_failures = 10  # emergency exit after this many
 
     def on_price_update(self, symbol, mark_price, delta):
         now = time.time()
-        if self.call_position and symbol == self.call_position['symbol']:
+        with self._state_lock:
+            call_pos = self.call_position
+            put_pos = self.put_position
+        if call_pos and symbol == call_pos['symbol']:
             if now - self.last_check_time_call < self.check_interval:
                 return
             self.last_check_time_call = now
             self.check_adjustment('call', mark_price, delta)
-        elif self.put_position and symbol == self.put_position['symbol']:
+        elif put_pos and symbol == put_pos['symbol']:
             if now - self.last_check_time_put < self.check_interval:
                 return
             self.last_check_time_put = now
@@ -84,59 +92,61 @@ class DeltaNeutralStrategy:
 
     def _check_adjustment_inner(self, leg, current_price, current_delta):
         ts = datetime.now().strftime("%H:%M:%S")
-        entry = self.call_entry_price if leg == 'call' else self.put_entry_price
+        with self._state_lock:
+            entry = self.call_entry_price if leg == 'call' else self.put_entry_price
+            adj_count = self.adjustment_count
         if entry <= 0 or current_price <= 0:
             return
-        if self.adjustment_count >= self.max_adjustments:
+        if adj_count >= self.max_adjustments:
             return
         change = (current_price - entry) / entry
         if change < self.premium_threshold:
             return
         other_price = self._get_other_leg_price(leg)
-        print(f"[{ts}] ⚠ ALERT: {leg.upper()} premium increased by {change:.2%}! (threshold: {self.premium_threshold:.2%})")
-        print(f"  Entry: ${entry:.2f} → Current: ${current_price:.2f}")
+        logger.warning(f"[{ts}] ⚠ ALERT: {leg.upper()} premium increased by {change:.2%}! (threshold: {self.premium_threshold:.2%})")
+        logger.warning(f"  Entry: ${entry:.2f} → Current: ${current_price:.2f}")
         if leg == 'call':
-            print("  Action: Closing put position and re-entering NEW put with matching delta")
+            logger.info("  Action: Closing put position and re-entering NEW put with matching delta")
             self.adjust_position('call', current_delta, current_price, other_price)
         else:
-            print("  Action: Closing call position and re-entering NEW call with matching delta")
+            logger.info("  Action: Closing call position and re-entering NEW call with matching delta")
             self.adjust_position('put', current_delta, other_price, current_price)
 
     def initialize(self):
-        print("=" * 70)
-        print("DELTA NEUTRAL OPTIONS STRATEGY (WebSocket Enabled)")
-        print("=" * 70)
-        print(f"Asset: {self.asset} | Expiry: {self.expiry_date} | Delta: ±{self.target_delta} | Lots: {self.lot_size}")
-        print(f"Threshold: {self.premium_threshold*100}% | Target PnL: ±${self.target_pnl}")
-        print("=" * 70)
+        logger.info("=" * 70)
+        logger.info("DELTA NEUTRAL OPTIONS STRATEGY (WebSocket Enabled)")
+        logger.info("=" * 70)
+        logger.info(f"Asset: {self.asset} | Expiry: {self.expiry_date} | Delta: ±{self.target_delta} | Lots: {self.lot_size}")
+        logger.info(f"Threshold: {self.premium_threshold*100}% | Target PnL: ±${self.target_pnl}")
+        logger.info("=" * 70)
 
-        print("[1/4] Fetching option chain...")
+        logger.info("[1/4] Fetching option chain...")
         option_chain = get_option_chain(self.expiry_date, self.asset)
         if not option_chain:
-            print("✗ Failed to fetch option chain")
+            logger.warning("✗ Failed to fetch option chain")
             return False
 
-        print(f"[2/4] Finding options with ~{self.target_delta} delta...")
+        logger.info(f"[2/4] Finding options with ~{self.target_delta} delta...")
         call_option, put_option = find_target_delta_options(option_chain, self.target_delta, self.delta_tolerance)
         if not call_option or not put_option:
-            print("✗ Could not find suitable options with target delta")
+            logger.warning("✗ Could not find suitable options with target delta")
             return False
 
-        print(f"✓ Call: {call_option['symbol']} | Strike: {call_option['strike_price']} | Δ: {call_option['delta']:.4f} | ${call_option['mark_price']:.2f}")
-        print(f"✓ Put:  {put_option['symbol']} | Strike: {put_option['strike_price']} | Δ: {put_option['delta']:.4f} | ${put_option['mark_price']:.2f}")
+        logger.info(f"✓ Call: {call_option['symbol']} | Strike: {call_option['strike_price']} | Δ: {call_option['delta']:.4f} | ${call_option['mark_price']:.2f}")
+        logger.info(f"✓ Put:  {put_option['symbol']} | Strike: {put_option['strike_price']} | Δ: {put_option['delta']:.4f} | ${put_option['mark_price']:.2f}")
 
-        print("[3/4] Fetching contract specs...")
+        logger.info("[3/4] Fetching contract specs...")
         for opt, attr in [(call_option, 'call'), (put_option, 'put')]:
             details = get_product_details(opt['product_id'])
             if details:
                 setattr(self, f'{attr}_contract_value', details['contract_value'])
-                print(f"✓ {attr.title()} contract value: {details['contract_value']} {details['contract_unit_currency']}")
+                logger.info(f"✓ {attr.title()} contract value: {details['contract_value']} {details['contract_unit_currency']}")
 
         call_prem = call_option['mark_price'] * self.lot_size * self.call_contract_value
         put_prem = put_option['mark_price'] * self.lot_size * self.put_contract_value
-        print(f"Expected Premium: Call=${call_prem:.2f} + Put=${put_prem:.2f} = ${call_prem+put_prem:.2f}")
+        logger.info(f"Expected Premium: Call=${call_prem:.2f} + Put=${put_prem:.2f} = ${call_prem+put_prem:.2f}")
 
-        print("[4/4] Placing initial orders...")
+        logger.info("[4/4] Placing initial orders...")
         call_order = place_order(call_option['product_id'], call_option['symbol'], self.lot_size, 'sell')
         if not call_order:
             return False
@@ -155,21 +165,21 @@ class DeltaNeutralStrategy:
         self.call_actual_entry_price = call_actual or call_option['mark_price']
         self.put_actual_entry_price = put_actual or put_option['mark_price']
 
-        print("=" * 70)
-        print("✓ STRATEGY INITIALIZED")
-        print(f"Short Call: {call_option['symbol']} @ ${self.call_actual_entry_price:.2f}")
-        print(f"Short Put:  {put_option['symbol']} @ ${self.put_actual_entry_price:.2f}")
-        print("=" * 70)
+        logger.info("=" * 70)
+        logger.info("✓ STRATEGY INITIALIZED")
+        logger.info(f"Short Call: {call_option['symbol']} @ ${self.call_actual_entry_price:.2f}")
+        logger.info(f"Short Put:  {put_option['symbol']} @ ${self.put_actual_entry_price:.2f}")
+        logger.info("=" * 70)
 
         self.ws_manager.start()
         time.sleep(2)
         symbols = [self.call_position['symbol'], self.put_position['symbol']]
         self.ws_manager.subscribe(symbols)
-        print(f"✓ Subscribed to real-time updates for {symbols}")
+        logger.info(f"✓ Subscribed to real-time updates for {symbols}")
         return True
 
     def monitor_and_adjust(self):
-        print(f"[MONITORING] Active — updates every {self.monitoring_interval}s. Ctrl+C to stop.")
+        logger.info(f"[MONITORING] Active — updates every {self.monitoring_interval}s. Ctrl+C to stop.")
         iteration = 0
         try:
             while self.running:
@@ -177,7 +187,7 @@ class DeltaNeutralStrategy:
                 ts = datetime.now().strftime("%H:%M:%S")
                 positions = get_positions()
                 if positions is None:
-                    print(f"[{ts}] Warning: Position fetch failed, skipping cycle")
+                    logger.info(f"[{ts}] Warning: Position fetch failed, skipping cycle")
                     time.sleep(self.monitoring_interval)
                     continue
 
@@ -191,9 +201,9 @@ class DeltaNeutralStrategy:
                     pd = get_current_price(self.put_position['product_id'], self.asset)
                     if not cd or not pd:
                         self._consecutive_failures += 1
-                        print(f"[{ts}] ⚠ Price fetch failed ({self._consecutive_failures}/{self._max_consecutive_failures})")
+                        logger.warning(f"[{ts}] ⚠ Price fetch failed ({self._consecutive_failures}/{self._max_consecutive_failures})")
                         if self._consecutive_failures >= self._max_consecutive_failures:
-                            print(f"[{ts}] 🚨 EMERGENCY: {self._consecutive_failures} consecutive failures — closing all positions")
+                            logger.error(f"[{ts}] 🚨 EMERGENCY: {self._consecutive_failures} consecutive failures — closing all positions")
                             self.close_all_positions()
                             self.running = False
                             break
@@ -223,7 +233,7 @@ class DeltaNeutralStrategy:
                     self.cumulative_realized_pnl
                 )
 
-                print(f"[{ts}] #{iteration} | Adj: {self.adjustment_count}/{self.max_adjustments} | {source}")
+                logger.info(f"[{ts}] #{iteration} | Adj: {self.adjustment_count}/{self.max_adjustments} | {source}")
                 for label, price, chg, entry, info in [
                     ("Call", call_price, call_chg, self.call_entry_price, c_info),
                     ("Put ", put_price, put_chg, self.put_entry_price, p_info)
@@ -233,49 +243,49 @@ class DeltaNeutralStrategy:
                         line += f" | Size:{info['size']} | UPnL:${info['unrealized_pnl']:.2f}"
                     else:
                         line += " | No position"
-                    print(line)
-                print(f"  P&L: R=${self.realized_pnl:.2f} | U=${self.unrealized_pnl:.2f} | T=${self.total_pnl:.2f}")
+                    logger.info(line)
+                logger.info(f"  P&L: R=${self.realized_pnl:.2f} | U=${self.unrealized_pnl:.2f} | T=${self.total_pnl:.2f}")
 
                 if self.adjustment_count >= self.max_adjustments:
-                    print("=" * 70)
-                    print(f"✓ MAX ADJUSTMENTS REACHED! Count: {self.adjustment_count} | Total PnL: ${self.total_pnl:.2f}")
-                    print("=" * 70)
+                    logger.info("=" * 70)
+                    logger.info(f"✓ MAX ADJUSTMENTS REACHED! Count: {self.adjustment_count} | Total PnL: ${self.total_pnl:.2f}")
+                    logger.info("=" * 70)
                     self.close_all_positions()
                     self.running = False
                     break
 
                 if abs(self.total_pnl) >= self.target_pnl:
-                    print("=" * 70)
-                    print(f"✓ TARGET P&L REACHED! Total: ${self.total_pnl:.2f} | Adjustments: {self.adjustment_count}")
-                    print("=" * 70)
+                    logger.info("=" * 70)
+                    logger.info(f"✓ TARGET P&L REACHED! Total: ${self.total_pnl:.2f} | Adjustments: {self.adjustment_count}")
+                    logger.info("=" * 70)
                     self.close_all_positions()
                     self.running = False
                     break
 
                 time.sleep(self.monitoring_interval)
         except KeyboardInterrupt:
-            print("[STOPPED] Strategy stopped by user")
+            logger.info("[STOPPED] Strategy stopped by user")
             self.close_all_positions()
 
-    def adjust_position(self, triggered_leg, triggered_delta, call_current_price, put_current_price):
-        print(f"  [SNAPSHOT] Cumulative realized PnL: ${self.cumulative_realized_pnl:.2f}")
-
-        if triggered_leg == 'call':
-            close_leg, close_pos = 'put', self.put_position
-            close_cv = self.put_contract_value
-            close_current = put_current_price
+    def _rollback(self, close_leg, close_pos, realized):
+        """Attempt to re-open a closed leg after a failed adjustment."""
+        rollback = place_order(close_pos['product_id'], close_pos['symbol'], self.lot_size, 'sell')
+        if rollback:
+            logger.info(f"  ↩ Rolled back: re-opened {close_leg.upper()} {close_pos['symbol']}")
+            self.cumulative_realized_pnl -= realized
+            self.ws_manager.subscribe([close_pos['symbol']])
         else:
-            close_leg, close_pos = 'call', self.call_position
-            close_cv = self.call_contract_value
-            close_current = call_current_price
+            logger.warning(f"  ⚠ ROLLBACK FAILED — {close_leg.upper()} leg is now missing!")
 
+    def _close_leg(self, close_leg, close_pos, close_cv, close_current):
+        """Close the opposite leg and record realized P&L. Returns (realized, success)."""
         entry_from_pos, size = get_position_entry_price(close_pos['product_id'])
         if entry_from_pos is None:
-            print(f"  ✗ Could not fetch {close_leg.upper()} position entry price")
-            return
+            logger.warning(f"  ✗ Could not fetch {close_leg.upper()} position entry price")
+            return 0, False
 
         realized = (entry_from_pos - close_current) * abs(size) * close_cv
-        print(f"  [1/3] Closing {close_leg.upper()}: Entry=${entry_from_pos:.2f} Current=${close_current:.2f} PnL=${realized:+.2f}")
+        logger.info(f"  [1/3] Closing {close_leg.upper()}: Entry=${entry_from_pos:.2f} Current=${close_current:.2f} PnL=${realized:+.2f}")
 
         self.adjustment_history.append({
             'leg': close_leg, 'symbol': close_pos['symbol'],
@@ -289,49 +299,55 @@ class DeltaNeutralStrategy:
         self.ws_manager.unsubscribe([close_pos['symbol']])
         close_result = place_order(close_pos['product_id'], close_pos['symbol'], self.lot_size, 'buy')
         if close_result is None:
-            print(f"  ✗ Failed to close {close_leg.upper()} — aborting adjustment")
+            logger.warning(f"  ✗ Failed to close {close_leg.upper()} — aborting adjustment")
             self.ws_manager.subscribe([close_pos['symbol']])
-            return
+            return 0, False
         self.cumulative_realized_pnl += realized
         time.sleep(2)
+        return realized, True
 
-        # Fetch live delta from REST API instead of relying on WS delta (may be 0)
+    def _find_replacement(self, triggered_leg, triggered_delta, close_leg):
+        """Find a replacement option for the closed leg. Returns option dict or None."""
         triggered_pos = self.call_position if triggered_leg == 'call' else self.put_position
         live_data = get_current_price(triggered_pos['product_id'], self.asset)
         if live_data and live_data.get('delta'):
             triggered_delta = live_data['delta']
 
         search_delta = abs(triggered_delta) if abs(triggered_delta) > self.delta_tolerance else self.target_delta
-        print(f"  [2/3] Finding NEW {close_leg.upper()} with delta {search_delta:.4f}...")
+        logger.info(f"  [2/3] Finding NEW {close_leg.upper()} with delta {search_delta:.4f}...")
         option_chain = get_option_chain(self.expiry_date, self.asset)
 
         if triggered_leg == 'call':
             _, new_opt = find_target_delta_options(option_chain, search_delta, self.delta_tolerance)
         else:
             new_opt, _ = find_target_delta_options(option_chain, search_delta, self.delta_tolerance)
+        return new_opt
 
-        if not new_opt:
-            print(f"  ✗ Could not find suitable {close_leg.upper()} option — rolling back")
-            rollback = place_order(close_pos['product_id'], close_pos['symbol'], self.lot_size, 'sell')
-            if rollback:
-                print(f"  ↩ Rolled back: re-opened {close_leg.upper()} {close_pos['symbol']}")
-                self.cumulative_realized_pnl -= realized
-                self.ws_manager.subscribe([close_pos['symbol']])
-            else:
-                print(f"  ⚠ ROLLBACK FAILED — {close_leg.upper()} leg is now missing!")
+    def adjust_position(self, triggered_leg, triggered_delta, call_current_price, put_current_price):
+        logger.info(f"  [SNAPSHOT] Cumulative realized PnL: ${self.cumulative_realized_pnl:.2f}")
+
+        if triggered_leg == 'call':
+            close_leg, close_pos = 'put', self.put_position
+            close_cv, close_current = self.put_contract_value, put_current_price
+        else:
+            close_leg, close_pos = 'call', self.call_position
+            close_cv, close_current = self.call_contract_value, call_current_price
+
+        realized, ok = self._close_leg(close_leg, close_pos, close_cv, close_current)
+        if not ok:
             return
 
-        print(f"  [3/3] Entering NEW {close_leg.upper()}: {new_opt['symbol']} @ ${new_opt['mark_price']:.2f}")
+        new_opt = self._find_replacement(triggered_leg, triggered_delta, close_leg)
+        if not new_opt:
+            logger.warning(f"  ✗ Could not find suitable {close_leg.upper()} option — rolling back")
+            self._rollback(close_leg, close_pos, realized)
+            return
+
+        logger.info(f"  [3/3] Entering NEW {close_leg.upper()}: {new_opt['symbol']} @ ${new_opt['mark_price']:.2f}")
         new_order = place_order(new_opt['product_id'], new_opt['symbol'], self.lot_size, 'sell')
         if new_order is None:
-            print(f"  ✗ Failed to open new {close_leg.upper()} — rolling back")
-            rollback = place_order(close_pos['product_id'], close_pos['symbol'], self.lot_size, 'sell')
-            if rollback:
-                print(f"  ↩ Rolled back: re-opened {close_leg.upper()} {close_pos['symbol']}")
-                self.cumulative_realized_pnl -= realized
-                self.ws_manager.subscribe([close_pos['symbol']])
-            else:
-                print(f"  ⚠ ROLLBACK FAILED — {close_leg.upper()} leg is now missing!")
+            logger.warning(f"  ✗ Failed to open new {close_leg.upper()} — rolling back")
+            self._rollback(close_leg, close_pos, realized)
             return
         time.sleep(2)
 
@@ -339,34 +355,36 @@ class DeltaNeutralStrategy:
         details = get_product_details(new_opt['product_id'])
 
         if triggered_leg == 'call':
-            self.put_position = new_opt
-            if details:
-                self.put_contract_value = details['contract_value']
-            self.call_entry_price = call_current_price
-            self.put_entry_price = new_opt['mark_price']
-            self.put_actual_entry_price = new_entry or new_opt['mark_price']
-            self.call_actual_entry_price = call_current_price
+            with self._state_lock:
+                self.put_position = new_opt
+                if details:
+                    self.put_contract_value = details['contract_value']
+                self.call_entry_price = call_current_price
+                self.put_entry_price = new_opt['mark_price']
+                self.put_actual_entry_price = new_entry or new_opt['mark_price']
+                self.call_actual_entry_price = call_current_price
         else:
-            self.call_position = new_opt
-            if details:
-                self.call_contract_value = details['contract_value']
-            self.call_entry_price = new_opt['mark_price']
-            self.put_entry_price = put_current_price
-            self.call_actual_entry_price = new_entry or new_opt['mark_price']
-            self.put_actual_entry_price = put_current_price
+            with self._state_lock:
+                self.call_position = new_opt
+                if details:
+                    self.call_contract_value = details['contract_value']
+                self.call_entry_price = new_opt['mark_price']
+                self.put_entry_price = put_current_price
+                self.call_actual_entry_price = new_entry or new_opt['mark_price']
+                self.put_actual_entry_price = put_current_price
 
-        self.realized_pnl_snapshot = self.cumulative_realized_pnl
-        self.adjustment_count += 1
+        with self._state_lock:
+            self.realized_pnl_snapshot = self.cumulative_realized_pnl
+            self.adjustment_count += 1
         self.ws_manager.subscribe([new_opt['symbol']])
-        # Cooldown: prevent immediate re-trigger after adjustment
         self.last_check_time_call = time.time() + 30
         self.last_check_time_put = time.time() + 30
 
-        print(f"  ✓ Adjustment #{self.adjustment_count} done | Cumulative PnL: ${self.cumulative_realized_pnl:.2f}")
-        print(f"  ✓ New baselines — Call: ${self.call_entry_price:.2f} | Put: ${self.put_entry_price:.2f}")
+        logger.info(f"  ✓ Adjustment #{self.adjustment_count} done | Cumulative PnL: ${self.cumulative_realized_pnl:.2f}")
+        logger.info(f"  ✓ New baselines — Call: ${self.call_entry_price:.2f} | Put: ${self.put_entry_price:.2f}")
 
     def close_all_positions(self):
-        print("[CLOSING] Closing all positions...")
+        logger.info("[CLOSING] Closing all positions...")
         for label, pos, cv in [
             ("CALL", self.call_position, self.call_contract_value),
             ("PUT", self.put_position, self.put_contract_value)
@@ -378,9 +396,23 @@ class DeltaNeutralStrategy:
             if data and entry and size != 0:
                 pnl = (entry - data['mark_price']) * abs(size) * cv
                 self.cumulative_realized_pnl += pnl
-                print(f"  {label}: Entry=${entry:.2f} Exit=${data['mark_price']:.2f} PnL=${pnl:+.2f}")
+                logger.info(f"  {label}: Entry=${entry:.2f} Exit=${data['mark_price']:.2f} PnL=${pnl:+.2f}")
             place_order(pos['product_id'], pos['symbol'], self.lot_size, 'buy')
 
         time.sleep(2)
         self.ws_manager.stop()
-        print(f"✓ All positions closed | Final PnL: ${self.cumulative_realized_pnl:.2f} | Adjustments: {self.adjustment_count}")
+        logger.info(f"✓ All positions closed | Final PnL: ${self.cumulative_realized_pnl:.2f} | Adjustments: {self.adjustment_count}")
+
+    def monitor(self):
+        self.monitor_and_adjust()
+
+    def close_all(self):
+        self.close_all_positions()
+
+    def stop(self):
+        self.close_all_positions()
+        self.ws_manager.stop()
+
+    @property
+    def pnl(self):
+        return self.total_pnl

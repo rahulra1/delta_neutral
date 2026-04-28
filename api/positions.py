@@ -1,6 +1,9 @@
+import logging
 import requests
 import config
 from auth import get_headers
+
+logger = logging.getLogger(__name__)
 
 
 def get_positions():
@@ -13,7 +16,7 @@ def get_positions():
         result = response.json()
         return result.get('result', []) if result.get('success') else []
     except Exception as e:
-        print(f"Error fetching positions: {e}")
+        logger.error(f"Error fetching positions: {e}")
         return None
 
 

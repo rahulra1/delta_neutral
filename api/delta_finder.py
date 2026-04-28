@@ -1,3 +1,8 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 def find_target_delta_options(option_chain, target_delta, tolerance):
     if not option_chain or not option_chain.get('success'):
         return None, None
@@ -39,16 +44,16 @@ def find_target_delta_options(option_chain, target_delta, tolerance):
         otm_calls = [c for c in calls if c['delta'] <= max_call_delta]
         if otm_calls:
             best_call = otm_calls[0]
-            print(f"⚠ No call within tolerance {tolerance}. Using closest OTM: delta={best_call['delta']:.4f} ({best_call['symbol']})")
+            logger.warning(f"⚠ No call within tolerance {tolerance}. Using closest OTM: delta={best_call['delta']:.4f} ({best_call['symbol']})")
         elif calls:
-            print(f"✗ No suitable OTM call found (closest delta: {calls[0]['delta']:.4f}, max allowed: {max_call_delta:.2f})")
+            logger.warning(f"✗ No suitable OTM call found (closest delta: {calls[0]['delta']:.4f}, max allowed: {max_call_delta:.2f})")
 
     if not best_put:
         otm_puts = [p for p in puts if abs(p['delta']) <= max_put_delta]
         if otm_puts:
             best_put = otm_puts[0]
-            print(f"⚠ No put within tolerance {tolerance}. Using closest OTM: delta={best_put['delta']:.4f} ({best_put['symbol']})")
+            logger.warning(f"⚠ No put within tolerance {tolerance}. Using closest OTM: delta={best_put['delta']:.4f} ({best_put['symbol']})")
         elif puts:
-            print(f"✗ No suitable OTM put found (closest delta: {puts[0]['delta']:.4f}, max allowed: -{max_put_delta:.2f})")
+            logger.warning(f"✗ No suitable OTM put found (closest delta: {puts[0]['delta']:.4f}, max allowed: -{max_put_delta:.2f})")
 
     return best_call, best_put

@@ -2,6 +2,7 @@
 Buy 1 ATM+300 Call, Sell 2 ATM+600 Calls, Buy 1 ATM+1000 Call (hedge).
 Target: 2.5% | SL: 3% | Hold: max 20 days | Zero adjustments."""
 
+import logging
 import time
 from datetime import datetime
 from api import (
@@ -10,9 +11,12 @@ from api import (
     get_position_entry_price
 )
 from websocket import WebSocketManager
+from strategy.base import BaseStrategy
+
+logger = logging.getLogger(__name__)
 
 
-class CallRatioStrategy:
+class CallRatioStrategy(BaseStrategy):
     def __init__(self, asset='BTC', expiry_date='', lot_size=10,
                  buy_offset_pct=2, sell_offset_pct=4, hedge_offset_pct=7,
                  target_pct=5, sl_pct=8, max_credit_pct=1.0,
@@ -48,74 +52,74 @@ class CallRatioStrategy:
         return min(options, key=lambda o: abs(float(o.get('strike_price', 0)) - target_strike))
 
     def initialize(self):
-        print("=" * 70)
-        print("MONTHLY CALL RATIO SPREAD (NO-BRAINER)")
-        print("=" * 70)
-        print(f"Asset: {self.asset} | Expiry: {self.expiry_date} | Lots: {self.lot_size}")
-        print(f"Offsets: Buy +{self.buy_offset_pct}% | Sell +{self.sell_offset_pct}% (x2) | Hedge +{self.hedge_offset_pct}%")
-        print(f"Target: {self.target_pct}% | SL: {self.sl_pct}% | Max Credit: {self.max_credit_pct}%")
-        print("=" * 70)
+        logger.info("=" * 70)
+        logger.info("MONTHLY CALL RATIO SPREAD (NO-BRAINER)")
+        logger.info("=" * 70)
+        logger.info(f"Asset: {self.asset} | Expiry: {self.expiry_date} | Lots: {self.lot_size}")
+        logger.info(f"Offsets: Buy +{self.buy_offset_pct}% | Sell +{self.sell_offset_pct}% (x2) | Hedge +{self.hedge_offset_pct}%")
+        logger.info(f"Target: {self.target_pct}% | SL: {self.sl_pct}% | Max Credit: {self.max_credit_pct}%")
+        logger.info("=" * 70)
 
         # Auto-select expiry if not provided
         if not self.expiry_date:
-            print("[1/5] Auto-selecting nearest monthly expiry...")
+            logger.info("[1/5] Auto-selecting nearest monthly expiry...")
             from api.chain import get_expiries
             expiries = get_expiries(self.asset, min_days=7)
             if not expiries:
-                print("✗ No expiries available")
+                logger.warning("✗ No expiries available")
                 return False
             self.expiry_date = expiries[0]
-            print(f"✓ Selected: {self.expiry_date}")
+            logger.info(f"✓ Selected: {self.expiry_date}")
         else:
-            print(f"[1/5] Using expiry: {self.expiry_date}")
+            logger.info(f"[1/5] Using expiry: {self.expiry_date}")
 
-        print("[2/5] Fetching option chain...")
+        logger.info("[2/5] Fetching option chain...")
         from api.option_chain import get_option_chain as fetch_chain
         raw = fetch_chain(self.expiry_date, self.asset)
         if not raw:
-            print("✗ Failed to fetch option chain")
+            logger.warning("✗ Failed to fetch option chain")
             return False
         # raw is {success: bool, result: [...]} — extract the list
         chain = raw.get('result', []) if isinstance(raw, dict) else raw
         if not chain:
-            print("✗ Empty option chain")
+            logger.warning("✗ Empty option chain")
             return False
 
         # Get spot price
         calls = [o for o in chain if o.get('contract_type') == 'call_options']
         if not calls:
-            print("✗ No call options found")
+            logger.warning("✗ No call options found")
             return False
         spot = float(calls[0].get('spot_price', 0))
         if spot <= 0:
             # Estimate from ATM option
             spot = float(min(calls, key=lambda o: abs(float(o.get('mark_price', 999999))))
                         .get('strike_price', 0))
-        print(f"✓ Spot: {spot:.2f}")
+        logger.info(f"✓ Spot: {spot:.2f}")
 
         # Find strikes — compute from percentage offsets
         buy_strike = spot * (1 + self.buy_offset_pct / 100)
         sell_strike = spot * (1 + self.sell_offset_pct / 100)
         hedge_strike = spot * (1 + self.hedge_offset_pct / 100)
-        print(f"  Computed strikes: Buy={buy_strike:.0f} (+{self.buy_offset_pct}%) | Sell={sell_strike:.0f} (+{self.sell_offset_pct}%) | Hedge={hedge_strike:.0f} (+{self.hedge_offset_pct}%)")
+        logger.info(f"  Computed strikes: Buy={buy_strike:.0f} (+{self.buy_offset_pct}%) | Sell={sell_strike:.0f} (+{self.sell_offset_pct}%) | Hedge={hedge_strike:.0f} (+{self.hedge_offset_pct}%)")
 
-        print(f"[3/5] Finding options...")
+        logger.info(f"[3/5] Finding options...")
         buy_opt = self._find_strike(chain, buy_strike, 'call_options')
         sell_opt = self._find_strike(chain, sell_strike, 'call_options')
         hedge_opt = self._find_strike(chain, hedge_strike, 'call_options')
 
         if not buy_opt or not sell_opt or not hedge_opt:
-            print("✗ Could not find all required strikes")
+            logger.warning("✗ Could not find all required strikes")
             return False
 
         # Check they're different strikes
         if buy_opt['strike_price'] == sell_opt['strike_price']:
-            print("✗ Buy and sell strikes are the same — increase offsets")
+            logger.warning("✗ Buy and sell strikes are the same — increase offsets")
             return False
 
-        print(f"  BUY  1x {buy_opt['symbol']} @ Strike {buy_opt['strike_price']} | ${float(buy_opt.get('mark_price',0)):.2f}")
-        print(f"  SELL 2x {sell_opt['symbol']} @ Strike {sell_opt['strike_price']} | ${float(sell_opt.get('mark_price',0)):.2f}")
-        print(f"  BUY  1x {hedge_opt['symbol']} @ Strike {hedge_opt['strike_price']} | ${float(hedge_opt.get('mark_price',0)):.2f}")
+        logger.info(f"  BUY  1x {buy_opt['symbol']} @ Strike {buy_opt['strike_price']} | ${float(buy_opt.get('mark_price',0)):.2f}")
+        logger.info(f"  SELL 2x {sell_opt['symbol']} @ Strike {sell_opt['strike_price']} | ${float(sell_opt.get('mark_price',0)):.2f}")
+        logger.info(f"  BUY  1x {hedge_opt['symbol']} @ Strike {hedge_opt['strike_price']} | ${float(hedge_opt.get('mark_price',0)):.2f}")
 
         # Get contract values
         for opt in [buy_opt, sell_opt, hedge_opt]:
@@ -127,21 +131,21 @@ class CallRatioStrategy:
         sell_credit = float(sell_opt.get('mark_price', 0)) * 2 * self.lot_size * sell_opt['contract_value']
         hedge_cost = float(hedge_opt.get('mark_price', 0)) * self.lot_size * hedge_opt['contract_value']
         net = sell_credit - buy_cost - hedge_cost
-        print(f"  Net credit/debit: ${net:.2f}")
+        logger.info(f"  Net credit/debit: ${net:.2f}")
 
-        print("[4/5] Placing orders...")
+        logger.info("[4/5] Placing orders...")
         # Buy 1 lot
         r1 = place_order(buy_opt['product_id'], buy_opt['symbol'], self.lot_size, 'buy')
         if not r1:
-            print("✗ Failed to place buy order"); return False
+            logger.warning("✗ Failed to place buy order"); return False
         # Sell 2 lots
         r2 = place_order(sell_opt['product_id'], sell_opt['symbol'], self.lot_size * 2, 'sell')
         if not r2:
-            print("✗ Failed to place sell order"); return False
+            logger.warning("✗ Failed to place sell order"); return False
         # Buy hedge
         r3 = place_order(hedge_opt['product_id'], hedge_opt['symbol'], self.lot_size, 'buy')
         if not r3:
-            print("✗ Failed to place hedge order"); return False
+            logger.warning("✗ Failed to place hedge order"); return False
 
         time.sleep(2)
 
@@ -163,20 +167,20 @@ class CallRatioStrategy:
         if self.deployed_margin <= 0:
             self.deployed_margin = sell_credit * 2
 
-        print("[5/5] Starting WebSocket monitoring...")
+        logger.info("[5/5] Starting WebSocket monitoring...")
         self.ws_manager.start()
         time.sleep(1)
         self.ws_manager.subscribe([l['symbol'] for l in self.legs])
 
-        print("=" * 70)
-        print("✓ CALL RATIO SPREAD INITIALIZED")
-        print(f"  Deployed margin (est): ${self.deployed_margin:.2f}")
-        print(f"  Target: ${self.deployed_margin * self.target_pct / 100:.2f} | SL: ${self.deployed_margin * self.sl_pct / 100:.2f}")
-        print("=" * 70)
+        logger.info("=" * 70)
+        logger.info("✓ CALL RATIO SPREAD INITIALIZED")
+        logger.info(f"  Deployed margin (est): ${self.deployed_margin:.2f}")
+        logger.info(f"  Target: ${self.deployed_margin * self.target_pct / 100:.2f} | SL: ${self.deployed_margin * self.sl_pct / 100:.2f}")
+        logger.info("=" * 70)
         return True
 
     def monitor(self):
-        print(f"[MONITORING] Call Ratio — every {self.monitoring_interval}s. Target {self.target_pct}% | SL {self.sl_pct}%")
+        logger.info(f"[MONITORING] Call Ratio — every {self.monitoring_interval}s. Target {self.target_pct}% | SL {self.sl_pct}%")
         iteration = 0
         try:
             while self.running:
@@ -203,31 +207,35 @@ class CallRatioStrategy:
                 self.total_pnl = round(total_pnl, 2)
                 self.pnl_pct = round(total_pnl / self.deployed_margin * 100, 2) if self.deployed_margin > 0 else 0
 
-                print(f"[{ts}] #{iteration} | PnL: ${self.total_pnl:.2f} ({self.pnl_pct:+.1f}%) | {' | '.join(leg_info)}")
+                logger.info(f"[{ts}] #{iteration} | PnL: ${self.total_pnl:.2f} ({self.pnl_pct:+.1f}%) | {' | '.join(leg_info)}")
 
                 # Check exit conditions
                 if self.pnl_pct >= self.target_pct:
-                    print(f"🎯 TARGET HIT! PnL: ${self.total_pnl:.2f} ({self.pnl_pct:.1f}%)")
+                    logger.info(f"🎯 TARGET HIT! PnL: ${self.total_pnl:.2f} ({self.pnl_pct:.1f}%)")
                     self.close_all()
                     self.status_msg = f'Target hit: {self.pnl_pct:.1f}%'
                     break
                 if self.pnl_pct <= -self.sl_pct:
-                    print(f"🛑 STOP LOSS HIT! PnL: ${self.total_pnl:.2f} ({self.pnl_pct:.1f}%)")
+                    logger.info(f"🛑 STOP LOSS HIT! PnL: ${self.total_pnl:.2f} ({self.pnl_pct:.1f}%)")
                     self.close_all()
                     self.status_msg = f'SL hit: {self.pnl_pct:.1f}%'
                     break
 
                 time.sleep(self.monitoring_interval)
         except KeyboardInterrupt:
-            print("[STOPPED] Manual stop")
+            logger.info("[STOPPED] Manual stop")
             self.close_all()
 
     def close_all(self):
-        print("[CLOSING] All legs...")
+        logger.info("[CLOSING] All legs...")
         for leg in self.legs:
             close_side = 'sell' if leg['side'] == 'buy' else 'buy'
             place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
         time.sleep(2)
         self.ws_manager.stop()
         self.running = False
-        print(f"✓ Closed | Final PnL: ${self.total_pnl:.2f} ({self.pnl_pct:.1f}%)")
+        logger.info(f"✓ Closed | Final PnL: ${self.total_pnl:.2f} ({self.pnl_pct:.1f}%)")
+
+    @property
+    def pnl(self):
+        return self.total_pnl
