@@ -27,6 +27,7 @@ const IND_LIST = [
   { key: 'confluence_scalp', label: 'Scalp', color: '#7c3aed' },
   { key: 'renko_redbar', label: 'Renko', color: '#0ea5e9' },
   { key: 'next_move', label: '🔮 Predict', color: '#d946ef' },
+  { key: 'prev_day_breakout', label: 'PD B/O', color: '#f43f5e' },
 ];
 
 export default function ChartPage() {

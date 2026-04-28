@@ -92,6 +92,9 @@ function SignalPanel({ asset, profileId, signalKey, timeframes, setError, title 
   const [loading, setLoading] = useState(false);
   const [deployed, setDeployed] = useState(false);
   const [strongOnly, setStrongOnly] = useState(false);
+  const [liveSid, setLiveSid] = useState(null);
+  const [liveStatus, setLiveStatus] = useState(null);
+  const pollRef = React.useRef(null);
 
   const lotSize = asset === 'BTC' ? 0.001 : 0.01;
 
@@ -132,10 +135,28 @@ function SignalPanel({ asset, profileId, signalKey, timeframes, setError, title 
 
   const deploy = () => {
     if (!window.confirm(`Deploy ${title} ${asset} ${tf} with ${lots} lots?`)) return;
-    api.post('/strategy-builder/deploy', { name: `${title} ${asset} ${tf}`, underlying: asset, strategy_type: signalKey, timeframe: tf, lots, profile_id: profileId, legs: [], risk: { sl_pct: 0, target_pct: 0 }, execution: { lots } })
-      .then(() => { setDeployed(true); setTimeout(() => setDeployed(false), 5000); })
+    api.post('/futures-signal/start', { signal_key: signalKey, asset, timeframe: tf, lots, scan_interval: 30, max_trades_per_day: 3, profile_id: profileId })
+      .then(r => {
+        const sid = r.data?.sid;
+        setDeployed(true); setLiveSid(sid);
+        if (sid) {
+          pollRef.current = setInterval(() => {
+            api.get(`/futures-signal/logs/${sid}`).then(r => setLiveStatus(r.data)).catch(() => {});
+          }, 5000);
+        }
+      })
       .catch(e => setError(e.response?.data?.error || 'Deploy failed'));
   };
+
+  const stopTrader = () => {
+    if (!liveSid) return;
+    api.post('/futures-signal/stop', { sid: liveSid }).then(() => {
+      setDeployed(false); setLiveSid(null); setLiveStatus(null);
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    });
+  };
+
+  React.useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
   const closed = (backtest?.wins || 0) + (backtest?.losses || 0);
 
@@ -156,9 +177,22 @@ function SignalPanel({ asset, profileId, signalKey, timeframes, setError, title 
       {/* Actions */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, alignItems: 'center', flexWrap: 'wrap' }}>
         <button className="btn" style={{ background: '#f59e0b', color: '#fff' }} onClick={runBacktest} disabled={loading}>{loading ? '⏳...' : '📝 Backtest'}</button>
-        <button className="btn btn-green" onClick={deploy} disabled={loading || deployed}>{deployed ? '✅ Deployed!' : '🚀 Deploy Live'}</button>
+        <button className="btn btn-green" onClick={deploy} disabled={loading || deployed}>{deployed ? '✅ Running' : '🚀 Deploy Live'}</button>
+        {deployed && <button className="btn" style={{ background: '#ef4444', color: '#fff' }} onClick={stopTrader}>⏹ Stop</button>}
         {signalKey === 'sma_vol_breakout' && <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: '.8rem', cursor: 'pointer' }}><input type="checkbox" checked={strongOnly} onChange={e => setStrongOnly(e.target.checked)} /> Strong only</label>}
       </div>
+
+      {/* Live Status */}
+      {deployed && liveStatus && (
+        <div style={{ background: '#0a0a0a', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12, fontFamily: 'monospace', fontSize: '.75rem' }}>
+          <div style={{ fontWeight: 700, marginBottom: 8, color: '#22c55e' }}>🟢 LIVE — {signalKey} {asset} {tf} | Scans: {liveStatus.scan_count || 0} | Trades: {liveStatus.trades_today || 0}/3</div>
+          {(liveStatus.logs || []).length > 0 ? liveStatus.logs.slice(-5).map((t, i) => (
+            <div key={i} style={{ padding: '3px 0', borderBottom: '1px solid #222', color: t.success ? '#22c55e' : '#ef4444' }}>
+              {t.time} | {t.side?.toUpperCase()} @ {t.price} | SL: {t.sl} | TP: {t.tp} | {t.success ? '✓ Filled' : '✗ Failed'}
+            </div>
+          )) : <div style={{ color: '#666' }}>Scanning for signals... no trades yet</div>}
+        </div>
+      )}
 
       {/* Backtest */}
       {backtest && (

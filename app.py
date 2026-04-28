@@ -958,6 +958,12 @@ def api_strategy_detail(sid):
                     'current_mark': round(leg.get('current_mark', leg['entry_price']), 2),
                     'current_pnl': leg.get('current_pnl', 0),
                 })
+        elif sid in _futures_traders:
+            trader = _futures_traders[sid]['trader']
+            entry['pnl'] = 0
+            entry['running'] = trader.running
+            logs = [f"[{t['time']}] {t['side'].upper()} @ {t['price']} | SL: {t['sl']} | TP: {t['tp']} | {'✓ Filled' if t['success'] else '✗ Failed'}" for t in trader.trade_log]
+            logs = [f"[FST] {trader.signal_key} {trader.asset} {trader.timeframe} | Scans: {trader._scan_count} | Trades: {trader.trades_today}/{trader.max_trades_per_day}"] + logs
         else:
             # Option Chain / Strategy Builder / Tracker — use common P&L calculator
             raw_legs = []
@@ -2290,6 +2296,106 @@ def api_tracker_deploy():
     strat.start_monitoring()
 
     return jsonify(sid=strat.sid, status='running')
+
+
+# ── Futures Signal Auto-Trade ──
+
+_futures_traders = {}  # sid -> {trader, user_id}
+
+
+@app.route('/api/futures-signal/start', methods=['POST'])
+@login_required
+def futures_signal_start():
+    from strategy.futures_signal_trader import FuturesSignalTrader
+
+    params = request.json or {}
+    profile_id = params.get('profile_id')
+    api_key, api_secret, _, broker = get_profile_creds(profile_id)
+    if not api_key:
+        return jsonify(error="No API profile selected"), 400
+
+    signal_key = params.get('signal_key')
+    if not signal_key:
+        return jsonify(error="No signal_key provided"), 400
+
+    sid = str(uuid.uuid4())[:8]
+    trader = FuturesSignalTrader(
+        signal_key=signal_key,
+        asset=params.get('asset', 'BTC'),
+        timeframe=params.get('timeframe', '15m'),
+        lots=int(params.get('lots', 1)),
+        scan_interval=int(params.get('scan_interval', 60)),
+        max_trades_per_day=int(params.get('max_trades_per_day', 3)),
+        api_key=api_key, api_secret=api_secret, broker=broker,
+        profile_id=profile_id,
+    )
+    trader.sid = sid
+    trader.start()
+
+    _futures_traders[sid] = {'trader': trader, 'user_id': current_user_id()}
+    track_strategy(sid, 'Futures Signal', f"{params.get('asset','BTC')} {signal_key} {params.get('timeframe','15m')}", current_user_id(), details=params)
+
+    return jsonify(status='started', sid=sid)
+
+
+@app.route('/api/futures-signal/stop', methods=['POST'])
+@login_required
+def futures_signal_stop():
+    sid = (request.json or {}).get('sid')
+    entry = _futures_traders.get(sid)
+    if not entry or entry['user_id'] != current_user_id():
+        return jsonify(error="Not found"), 404
+    entry['trader'].stop()
+    return jsonify(status='stopped')
+
+
+@app.route('/api/futures-signal/status')
+@login_required
+def futures_signal_status():
+    user_id = current_user_id()
+    active = []
+    for sid, entry in _futures_traders.items():
+        if entry['user_id'] == user_id:
+            active.append({'sid': sid, **entry['trader'].status})
+    return jsonify(traders=active)
+
+
+@app.route('/api/futures-signal/logs/<sid>')
+@login_required
+def futures_signal_logs(sid):
+    entry = _futures_traders.get(sid)
+    if not entry or entry['user_id'] != current_user_id():
+        return jsonify(logs=[], running=False)
+    trader = entry['trader']
+    return jsonify(logs=trader.trade_log[-20:], running=trader.running,
+                   scan_count=trader._scan_count, trades_today=trader.trades_today)
+
+
+@app.route('/api/futures-signal/stream/<sid>')
+@login_required
+def futures_signal_stream(sid):
+    import queue as _q
+    entry = _futures_traders.get(sid)
+    if not entry or entry['user_id'] != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
+    trader = entry['trader']
+
+    def generate():
+        last_count = 0
+        while trader.running:
+            sc = trader._scan_count
+            if sc > last_count:
+                last_count = sc
+                msg = f"[Scan #{sc}] {trader.signal_key} {trader.asset} {trader.timeframe} | Trades: {trader.trades_today}/{trader.max_trades_per_day}"
+                if trader.trade_log:
+                    t = trader.trade_log[-1]
+                    msg += f" | Last: {t['side'].upper()} @ {t['price']} {'✓' if t['success'] else '✗'}"
+                yield f"data: {msg}\n\n"
+            time.sleep(5)
+        yield f"event: stopped\ndata: done\n\n"
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 # ── Serve React Frontend (catch-all — must be last) ──

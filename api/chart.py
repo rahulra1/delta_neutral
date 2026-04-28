@@ -1444,6 +1444,94 @@ def calc_next_move(candles):
     }
 
 
+def calc_prev_day_breakout_retest(candles, min_rr=3):
+    """Previous Day High/Low Breakout + Retest with Hammer/Engulfing confirmation.
+    1. Mark previous day's high and low
+    2. Wait for breakout (close above prev high or below prev low)
+    3. Wait for retest of the broken level
+    4. Confirm with bullish/bearish hammer or engulfing pattern
+    5. SL below/above confirmation candle, TP at 1:2 or 1:3 R:R
+    """
+    import datetime as _dt
+    if not candles or len(candles) < 5:
+        return {'type': 'signals', 'signals': []}
+
+    # Group candles by day
+    days = {}
+    for i, c in enumerate(candles):
+        d = _dt.datetime.fromtimestamp(c['t'], _dt.timezone.utc).date()
+        days.setdefault(d, []).append((i, c))
+
+    sorted_days = sorted(days.keys())
+    if len(sorted_days) < 2:
+        return {'type': 'signals', 'signals': []}
+
+    signals = []
+
+    for di in range(1, len(sorted_days)):
+        prev_candles = days[sorted_days[di - 1]]
+        prev_high = max(c['h'] for _, c in prev_candles)
+        prev_low = min(c['l'] for _, c in prev_candles)
+        today = days[sorted_days[di]]
+
+        breakout_high = False
+        breakout_low = False
+
+        for j, (idx, c) in enumerate(today):
+            # Detect breakout
+            if not breakout_high and c['c'] > prev_high:
+                breakout_high = True
+            if not breakout_low and c['c'] < prev_low:
+                breakout_low = True
+
+            if j == 0:
+                continue
+            prev_c = today[j - 1][1]
+            body = abs(c['c'] - c['o'])
+            rng = c['h'] - c['l']
+            if rng <= 0 or body <= 0:
+                continue
+            prev_body = abs(prev_c['c'] - prev_c['o'])
+
+            # === BULLISH: breakout above prev high, retest, hammer/engulfing ===
+            if breakout_high and c['l'] <= prev_high * 1.002:
+                is_bull_hammer = (c['c'] > c['o'] and
+                                  (min(c['o'], c['c']) - c['l']) > body * 2 and
+                                  (c['h'] - max(c['o'], c['c'])) < body * 0.5)
+                is_bull_engulfing = (prev_c['c'] < prev_c['o'] and c['c'] > c['o'] and
+                                     c['c'] > prev_c['o'] and c['o'] < prev_c['c'] and body > prev_body)
+                if is_bull_hammer or is_bull_engulfing:
+                    sl = c['l'] - (rng * 0.05)
+                    risk = c['c'] - sl
+                    if risk > 0:
+                        signals.append({
+                            'time': c['t'], 'type': 'buy', 'price': round(c['c'], 2),
+                            'sl': round(sl, 2), 'tp1': round(c['c'] + risk * min_rr, 2),
+                            'prev_high': round(prev_high, 2), 'prev_low': round(prev_low, 2),
+                        })
+                        breakout_high = False  # one signal per breakout
+
+            # === BEARISH: breakout below prev low, retest, hammer/engulfing ===
+            if breakout_low and c['h'] >= prev_low * 0.998:
+                is_bear_hammer = (c['c'] < c['o'] and
+                                  (c['h'] - max(c['o'], c['c'])) > body * 2 and
+                                  (min(c['o'], c['c']) - c['l']) < body * 0.5)
+                is_bear_engulfing = (prev_c['c'] > prev_c['o'] and c['c'] < c['o'] and
+                                      c['c'] < prev_c['o'] and c['o'] > prev_c['c'] and body > prev_body)
+                if is_bear_hammer or is_bear_engulfing:
+                    sl = c['h'] + (rng * 0.05)
+                    risk = sl - c['c']
+                    if risk > 0:
+                        signals.append({
+                            'time': c['t'], 'type': 'sell', 'price': round(c['c'], 2),
+                            'sl': round(sl, 2), 'tp1': round(c['c'] - risk * min_rr, 2),
+                            'prev_high': round(prev_high, 2), 'prev_low': round(prev_low, 2),
+                        })
+                        breakout_low = False
+
+    return {'type': 'signals', 'signals': signals[-100:]}
+
+
 INDICATOR_FNS = {
     'sma20': lambda c: {'type': 'overlay', 'data': calc_sma(c, 20), 'color': '#6366f1', 'label': 'SMA 20'},
     'sma50': lambda c: {'type': 'overlay', 'data': calc_sma(c, 50), 'color': '#f59e0b', 'label': 'SMA 50'},
@@ -1466,6 +1554,7 @@ INDICATOR_FNS = {
     'confluence_scalp': lambda c: calc_confluence_scalp(c),
     'renko_redbar': lambda c: calc_renko_redbar(c),
     'next_move': lambda c: calc_next_move(c),
+    'prev_day_breakout': lambda c: calc_prev_day_breakout_retest(c),
 }
 
 

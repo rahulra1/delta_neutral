@@ -69,6 +69,10 @@ const STRATEGIES = [
     desc: 'ATR-based Renko trend + Red Bar reversal entry. Skip first candle, trade the trap. OTM option buying.',
     features: ['Renko Line', 'Red Bar Entry', 'EMA 10/30', 'SMA 150'],
     rec: '⏱ Best on 5M/15M · Intraday scalp · BTC, NIFTY, BANKNIFTY' },
+  { key: 'prev_day_breakout', label: 'Prev Day Breakout', icon: '🚀', type: 'Futures',
+    desc: "Mark prev day H/L → wait for breakout → retest with hammer/engulfing confirmation. SL below pattern, 1:2/1:3 R:R.",
+    features: ['Prev Day H/L', 'Breakout + Retest', 'Hammer/Engulfing', '1:2 R:R'],
+    rec: '⏱ Best on 15M/5M · BTC, NIFTY, BANKNIFTY' },
 ];
 
 const DN_FIELDS = [
@@ -286,6 +290,49 @@ export default function Strategy() {
       {activeTab === 'renko_redbar' && (
         <StrategyTemplate signalMode signalKey="renko_redbar" title="Renko Red Bar" icon="🧱" type="Futures"
           description="ATR-based Renko trend + EMA 10/30 + SMA 150. Skip first candle, enter on Red Bar reversal. OTM option buying." profiles={profiles} />
+      )}
+      {activeTab === 'prev_day_breakout' && (
+        <StrategyTemplate title="Prev Day Breakout + Retest" icon="🚀" type="Futures"
+          description="Previous day H/L breakout → retest with bullish/bearish hammer or engulfing confirmation. SL below pattern, 1:3 R:R."
+          profiles={profiles}
+          configFields={[
+            { key: 'timeframe', label: 'Timeframe', type: 'text', default: '15m', hint: '15m or 1h' },
+            { key: 'lots', label: 'Lot Size', type: 'number', default: 10 },
+            { key: 'scan_interval', label: 'Scan Interval (s)', type: 'number', default: 30 },
+            { key: 'max_trades_per_day', label: 'Max Trades/Day', type: 'number', default: 3 },
+          ]}
+          onStart={async (config) => {
+            const { data } = await api.post('/futures-signal/start', { signal_key: 'prev_day_breakout', asset: config.asset, timeframe: config.timeframe, lots: parseInt(config.lots), scan_interval: parseInt(config.scan_interval), max_trades_per_day: parseInt(config.max_trades_per_day), profile_id: config.profile_id });
+            return data;
+          }}
+          onStop={async (sid) => { await api.post('/futures-signal/stop', { sid }); }}
+          statusEndpoint="/futures-signal/logs"
+          streamEndpoint="/futures-signal/stream"
+          renderStatus={(s) => (
+            <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Status</div><div className="value" style={{ color: s.running ? 'var(--green)' : 'var(--muted)' }}>{s.running ? '🟢 Running' : '⏹ Stopped'}</div></div>
+                <div className="stat-card"><div className="label">Scans</div><div className="value">{s.scan_count || 0}</div></div>
+                <div className="stat-card"><div className="label">Trades Today</div><div className="value">{s.trades_today || 0}</div></div>
+                <div className="stat-card"><div className="label">Total Trades</div><div className="value">{(s.logs || []).length}</div></div>
+              </div>
+              {(s.logs || []).length > 0 && (
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                  <thead><tr>{['Time', 'Side', 'Price', 'SL', 'TP', 'Status'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                  <tbody>{(s.logs || []).slice(-10).reverse().map((t, i) => (
+                    <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                      <td style={{ padding: '4px 8px' }}>{t.time}</td>
+                      <td style={{ padding: '4px 8px' }}><span className={`badge ${t.side === 'buy' ? 'badge-green' : 'badge-red'}`}>{t.side?.toUpperCase()}</span></td>
+                      <td style={{ padding: '4px 8px', fontWeight: 600 }}>${t.price}</td>
+                      <td style={{ padding: '4px 8px', color: 'var(--red)' }}>${t.sl}</td>
+                      <td style={{ padding: '4px 8px', color: 'var(--green)' }}>${t.tp}</td>
+                      <td style={{ padding: '4px 8px', fontWeight: 700, color: t.success ? 'var(--green)' : 'var(--red)' }}>{t.success ? '✓ Filled' : '✗ Failed'}</td>
+                    </tr>))}</tbody>
+                </table>
+              )}
+            </div>
+          )}
+        />
       )}
     </div>
   );
