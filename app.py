@@ -1020,6 +1020,19 @@ def api_strategy_detail(sid):
                 adjustments=h.get('adjustments', 0), ended_at=h.get('ended_at', ''),
                 user_id=uid,
             )
+    # Fallback: DB live_strategies
+    db = get_db()
+    row = db.execute('SELECT * FROM live_strategies WHERE sid=? AND user_id=?', (sid, uid)).fetchone()
+    db.close()
+    if row:
+        import json as _j
+        d = dict(row)
+        d['details'] = _j.loads(d.get('details') or '{}')
+        d['legs'] = _j.loads(d.get('legs') or '[]')
+        d['logs'] = _j.loads(d.get('logs') or '[]')
+        d['running'] = d.get('status') == 'running'
+        d['pnl'] = d.get('pnl', 0)
+        return jsonify(**d)
     return jsonify(error='Not found'), 404
 
 

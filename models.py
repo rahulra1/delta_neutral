@@ -323,7 +323,7 @@ _ALLOWED_STRATEGY_COLUMNS = frozenset({
 def update_strategy_db(sid, **kwargs):
     conn = get_db()
     try:
-        for k in ('details', 'legs'):
+        for k in ('details', 'legs', 'logs'):
             if k in kwargs:
                 kwargs[k] = _json.dumps(kwargs[k])
         safe_kwargs = {k: v for k, v in kwargs.items() if k in _ALLOWED_STRATEGY_COLUMNS}

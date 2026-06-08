@@ -67,9 +67,24 @@ class FuturesSignalTrader:
                     self._today = today
                     self.trades_today = 0
                 self._scan_and_trade()
+                # Persist to DB every 10 scans
+                if self._scan_count % 10 == 0 and self.sid:
+                    self._persist()
             except Exception as e:
                 print(f"[FST] ❌ {self.signal_key} error: {e}")
             time.sleep(self.scan_interval)
+        # Final persist on stop
+        if self.sid:
+            self._persist(stopped=True)
+
+    def _persist(self, stopped=False):
+        try:
+            from models import update_strategy_db
+            logs = [f"[{t['time']}] {t['side'].upper()} @ {t['price']} | SL: {t['sl']} | TP: {t['tp']} | {'✓' if t['success'] else '✗'}" for t in self.trade_log]
+            status = 'completed' if stopped else 'running'
+            update_strategy_db(self.sid, status=status, logs=logs)
+        except Exception:
+            pass
 
     def _scan_and_trade(self):
         self._scan_count += 1
