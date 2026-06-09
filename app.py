@@ -687,6 +687,10 @@ def api_all_strategies():
                     entry['pnl'] = round(iv_crush_strategies[sid]['strategy'].total_pnl, 2)
                 elif sid in call_ratio_strategies and call_ratio_strategies[sid].get('strategy'):
                     entry['pnl'] = round(call_ratio_strategies[sid]['strategy'].total_pnl, 2)
+                elif sid in _futures_traders:
+                    trader = _futures_traders[sid]['trader']
+                    entry['running'] = trader.running
+                    entry['legs'] = [{'symbol': l['symbol'], 'side': l['side'], 'size': l['size'], 'entry_price': l['entry_price']} for l in trader.legs]
                 else:
                     # No monitor — compute live P&L from legs
                     raw_legs = entry.get('details', {}).get('legs', [])
@@ -964,6 +968,16 @@ def api_strategy_detail(sid):
             entry['running'] = trader.running
             logs = [f"[{t['time']}] {t['side'].upper()} @ {t['price']} | SL: {t['sl']} | TP: {t['tp']} | {'✓ Filled' if t['success'] else '✗ Failed'}" for t in trader.trade_log]
             logs = [f"[FST] {trader.signal_key} {trader.asset} {trader.timeframe} | Scans: {trader._scan_count} | Trades: {trader.trades_today}/{trader.max_trades_per_day}"] + logs
+            for leg in trader.legs:
+                live_legs.append({
+                    'symbol': leg['symbol'],
+                    'side': leg['side'],
+                    'size': leg['size'],
+                    'entry_price': leg['entry_price'],
+                    'sl': leg.get('sl'),
+                    'tp': leg.get('tp'),
+                    'type': 'futures',
+                })
         else:
             # Option Chain / Strategy Builder / Tracker — use common P&L calculator
             raw_legs = []

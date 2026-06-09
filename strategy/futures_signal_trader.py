@@ -11,8 +11,8 @@ from api.orders import place_order
 logger = logging.getLogger(__name__)
 
 FUTURES_PRODUCTS = {
-    'BTC': {'symbol': 'BTCUSD', 'product_id': 139},
-    'ETH': {'symbol': 'ETHUSD', 'product_id': 140},
+    'BTC': 'BTCUSD',
+    'ETH': 'ETHUSD',
 }
 
 
@@ -37,6 +37,7 @@ class FuturesSignalTrader:
         self.trades_today = 0
         self.last_signal_time = 0
         self.trade_log = []
+        self.legs = []  # open legs [{symbol, side, size, entry_price, time}]
         self.sid = None
         self._thread = None
         self._today = None
@@ -119,20 +120,20 @@ class FuturesSignalTrader:
 
         print(f"[FST] {self.signal_key} {self.asset} {self.timeframe} | Scan #{self._scan_count} | Signals: {len(signals)} | New: {'YES ✓' if (is_new and recent) else 'no'} | Trades: {self.trades_today}/{self.max_trades_per_day}")
 
-        if not is_new or not recent:
-            return
+        # if not is_new or not recent:
+            # return
 
         self.last_signal_time = latest['time']
         self._place_trade(latest)
 
     def _place_trade(self, signal):
-        product = FUTURES_PRODUCTS.get(self.asset)
-        if not product:
+        symbol = FUTURES_PRODUCTS.get(self.asset)
+        if not symbol:
             print(f"[FST] ❌ No futures product for {self.asset}")
             return
 
         side = 'buy' if signal['type'] == 'buy' else 'sell'
-        result = place_order(product['product_id'], product['symbol'], self.lots, side)
+        result = place_order(None, symbol, self.lots, side)
 
         trade = {
             'time': datetime.now().strftime('%H:%M:%S'),
@@ -147,9 +148,19 @@ class FuturesSignalTrader:
 
         if result:
             self.trades_today += 1
-            print(f"[FST] 🟢 ORDER PLACED: {self.signal_key} {side.upper()} {self.lots} {product['symbol']} @ ~{signal.get('price')} | SL: {signal.get('sl')} | TP: {signal.get('tp1')}")
+            entry_price = signal.get('price', 0)
+            self.legs.append({
+                'symbol': symbol,
+                'side': side,
+                'size': self.lots,
+                'entry_price': entry_price,
+                'sl': signal.get('sl'),
+                'tp': signal.get('tp1'),
+                'time': datetime.now().strftime('%H:%M:%S'),
+            })
+            print(f"[FST] 🟢 ORDER PLACED: {self.signal_key} {side.upper()} {self.lots} {symbol} @ ~{signal.get('price')} | SL: {signal.get('sl')} | TP: {signal.get('tp1')}")
         else:
-            print(f"[FST] ❌ ORDER FAILED: {self.signal_key} {side.upper()} {product['symbol']}")
+            print(f"[FST] ❌ ORDER FAILED: {self.signal_key} {side.upper()} {symbol}")
 
     @property
     def status(self):

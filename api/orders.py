@@ -10,12 +10,13 @@ logger = logging.getLogger(__name__)
 def place_order(product_id, product_symbol, size, side, max_retries=3):
     path = '/v2/orders'
     payload = {
-        "product_id": int(product_id),
         "product_symbol": product_symbol,
         "size": int(size),
         "side": side,
         "order_type": "market_order"
     }
+    if product_id is not None:
+        payload["product_id"] = int(product_id)
     payload_str = json.dumps(payload)
     for attempt in range(1, max_retries + 1):
         headers = get_headers('POST', path, '', payload_str)

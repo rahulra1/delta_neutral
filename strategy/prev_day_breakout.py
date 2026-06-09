@@ -10,10 +10,10 @@ from api.orders import place_order
 
 logger = logging.getLogger(__name__)
 
-# Delta Exchange perpetual futures symbols & product IDs
+# Delta Exchange perpetual futures symbols
 FUTURES_PRODUCTS = {
-    'BTC': {'symbol': 'BTCUSD', 'product_id': 139},
-    'ETH': {'symbol': 'ETHUSD', 'product_id': 140},
+    'BTC': 'BTCUSD',
+    'ETH': 'ETHUSD',
 }
 
 
@@ -92,13 +92,13 @@ class PrevDayBreakoutTrader:
         self._place_trade(latest)
 
     def _place_trade(self, signal):
-        product = FUTURES_PRODUCTS.get(self.asset)
-        if not product:
+        symbol = FUTURES_PRODUCTS.get(self.asset)
+        if not symbol:
             logger.warning(f"[PDB] No futures product for {self.asset}")
             return
 
         side = 'buy' if signal['type'] == 'buy' else 'sell'
-        result = place_order(product['product_id'], product['symbol'], self.lots, side)
+        result = place_order(None, symbol, self.lots, side)
 
         ts = datetime.now().strftime('%H:%M:%S')
         trade = {
@@ -113,9 +113,9 @@ class PrevDayBreakoutTrader:
 
         if result:
             self.trades_today += 1
-            logger.info(f"[PDB] ✓ {side.upper()} {self.lots} {product['symbol']} @ ~{signal['price']} | SL: {signal['sl']} | TP: {signal['tp1']}")
+            logger.info(f"[PDB] ✓ {side.upper()} {self.lots} {symbol} @ ~{signal['price']} | SL: {signal['sl']} | TP: {signal['tp1']}")
         else:
-            logger.warning(f"[PDB] ✗ Order failed: {side.upper()} {product['symbol']}")
+            logger.warning(f"[PDB] ✗ Order failed: {side.upper()} {symbol}")
 
     @property
     def status(self):
