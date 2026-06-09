@@ -43,6 +43,11 @@ all_tracked = {}
 # {monitor_id: {monitor, user_id, profile_id}}
 active_monitors = {}
 
+# Forward declarations for strategy dicts (fully defined later in their sections)
+iv_crush_strategies = {}
+call_ratio_strategies = {}
+_futures_traders = {}
+
 # Resume strategies from DB on startup
 def _resume_db_strategies():
     from models import get_db
@@ -80,6 +85,35 @@ def _resume_db_strategies():
                 entry_price=float(leg.get('entry_price') or 0),
                 asset=asset, source=source)
 
+        # 3. Futures Signal — resume scanning (doesn't require legs)
+        if source == 'Futures Signal':
+            from strategy.futures_signal_trader import FuturesSignalTrader
+            trader = FuturesSignalTrader(
+                signal_key=details.get('signal_key', ''),
+                asset=details.get('asset', asset),
+                timeframe=details.get('timeframe', '15m'),
+                lots=int(details.get('lots', 1)),
+                scan_interval=int(details.get('scan_interval', 60)),
+                max_trades_per_day=int(details.get('max_trades_per_day', 3)),
+                api_key='', api_secret='', broker=details.get('broker'),
+                profile_id=profile_id,
+            )
+            trader.sid = sid
+            trader.legs = legs  # restore previously filled legs
+            if profile_id:
+                try:
+                    p = get_profile(int(profile_id), user_id)
+                    if p:
+                        trader._api_key = p['api_key']
+                        trader._api_secret = p['api_secret']
+                        trader._broker = p.get('broker')
+                except Exception:
+                    pass
+            trader.start()
+            _futures_traders[sid] = {'trader': trader, 'user_id': user_id}
+            logger.info(f"[resume] Resumed Futures Signal {sid} — {d['name']}")
+            continue
+
         if not legs:
             continue
 
@@ -108,25 +142,230 @@ def _resume_db_strategies():
             mon._log("🔄 Resumed after restart")
             mon.start()
             logger.info(f"[resume] Resumed monitor {sid} — {d['name']}")
-        # 4. Restore strategies dict (for AlgoX DN) — as TrackedStrategy since
-        #    DeltaNeutralStrategy needs live WebSocket state that can't be restored
+        # 4. Restore AlgoX DN with full DeltaNeutralStrategy (adjustments enabled)
         elif source == 'AlgoX DN':
-            strat = TrackedStrategy(
-                sid=sid, source=source, name=d['name'],
-                user_id=user_id, legs=legs, asset=asset,
-                lot_size=lot_size, max_profit=max_profit, max_loss=max_loss,
-                profile_id=profile_id, interval=d.get('interval', 10),
-                details=details,
-            )
-            strat.started_at = d['started_at']
-            strat.current_pnl = d['pnl'] or 0
-            strat.adjustment_count = d.get('adjustment_count', 0)
-            strat.log("🔄 Resumed after restart (monitoring only — adjustments disabled)")
-            registry.register(strat)
-            strat.start_monitoring()
-            logger.info(f"[resume] Resumed DN strategy {sid} — {d['name']}")
+            call_leg = next((l for l in legs if l.get('type') == 'call'), None)
+            put_leg = next((l for l in legs if l.get('type') == 'put'), None)
+            if not call_leg or not put_leg:
+                # Can't restore without both legs — fall back to monitor-only
+                strat = TrackedStrategy(
+                    sid=sid, source=source, name=d['name'],
+                    user_id=user_id, legs=legs, asset=asset,
+                    lot_size=lot_size, max_profit=max_profit, max_loss=max_loss,
+                    profile_id=profile_id, interval=d.get('interval', 10),
+                    details=details,
+                )
+                strat.started_at = d['started_at']
+                strat.current_pnl = d['pnl'] or 0
+                registry.register(strat)
+                strat.start_monitoring()
+                logger.info(f"[resume] Resumed DN {sid} as monitor-only (incomplete legs)")
+                continue
 
-        # 5. Everything else — use TrackedStrategy
+            # Launch full DN strategy in a background thread (same as /start)
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+                     'log_history': [], 'running': False,
+                     'params': details, 'user_id': user_id, 'profile_id': profile_id}
+            strategies[sid] = entry
+
+            def _resume_dn(sid=sid, entry=entry, details=details, call_leg=call_leg,
+                           put_leg=put_leg, asset=asset, lot_size=lot_size,
+                           profile_id=profile_id, user_id=user_id, d=d):
+                if not _setup_strategy_thread(entry):
+                    entry['running'] = False
+                    return
+                try:
+                    s = DeltaNeutralStrategy(
+                        asset=details.get('asset', asset),
+                        expiry_date=details.get('expiry_date', ''),
+                        target_delta=float(details.get('target_delta', 0.20)),
+                        delta_tolerance=float(details.get('delta_tolerance', 0.05)),
+                        lot_size=int(details.get('lot_size', lot_size)),
+                        premium_threshold=float(details.get('premium_threshold', 40)) / 100,
+                        target_pnl=float(details.get('target_pnl', 25)),
+                        max_adjustments=int(details.get('max_adjustments', 5)),
+                        monitoring_interval=int(details.get('monitoring_interval', 5)),
+                    )
+                    # Restore positions from DB legs (skip order placement)
+                    s.call_position = {'product_id': call_leg['product_id'],
+                                       'symbol': call_leg['symbol'],
+                                       'strike_price': call_leg.get('strike', ''),
+                                       'mark_price': call_leg['entry_price']}
+                    s.put_position = {'product_id': put_leg['product_id'],
+                                      'symbol': put_leg['symbol'],
+                                      'strike_price': put_leg.get('strike', ''),
+                                      'mark_price': put_leg['entry_price']}
+                    s.call_entry_price = call_leg['entry_price']
+                    s.put_entry_price = put_leg['entry_price']
+                    s.call_actual_entry_price = call_leg['entry_price']
+                    s.put_actual_entry_price = put_leg['entry_price']
+                    s.adjustment_count = d.get('adjustment_count', 0) or 0
+                    s.cumulative_realized_pnl = d.get('pnl', 0) or 0
+
+                    entry['strategy'] = s
+                    entry['running'] = True
+
+                    # Start WebSocket for live prices + adjustment triggers
+                    s.ws_manager.start()
+                    import time as _t; _t.sleep(2)
+                    symbols = [s.call_position['symbol'], s.put_position['symbol']]
+                    s.ws_manager.subscribe(symbols)
+
+                    _save_dn_legs(sid, s)
+                    _orig_adjust = s.adjust_position
+                    def _hooked_adjust(*a, **kw):
+                        _orig_adjust(*a, **kw)
+                        _save_dn_legs(sid, s)
+                    s.adjust_position = _hooked_adjust
+
+                    s.monitor_and_adjust()
+                except Exception as e:
+                    logger.error(f"[resume] DN {sid} error: {e}")
+                    if entry.get('strategy'):
+                        entry['strategy'].close_all_positions()
+                finally:
+                    pnl = entry['strategy'].cumulative_realized_pnl if entry.get('strategy') else 0
+                    adj = entry['strategy'].adjustment_count if entry.get('strategy') else 0
+                    if entry.get('strategy'):
+                        _save_dn_legs(sid, entry['strategy'])
+                    record_end(sid, pnl, adj)
+                    update_tracked(sid, status='completed', pnl=round(pnl, 2))
+                    if entry.get('strategy'):
+                        entry['strategy'].ws_manager.stop()
+                    _teardown_strategy_thread(entry)
+
+            t = threading.Thread(target=_resume_dn, daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed DN strategy {sid} with full adjustments")
+
+        # 5. Restore IV Crush with full IVCrushStrategy
+        elif source == 'IV Crush':
+            call_leg = next((l for l in legs if l.get('type') == 'call'), None)
+            put_leg = next((l for l in legs if l.get('type') == 'put'), None)
+            if not call_leg or not put_leg:
+                strat = TrackedStrategy(sid=sid, source=source, name=d['name'],
+                    user_id=user_id, legs=legs, asset=asset, lot_size=lot_size,
+                    max_profit=max_profit, max_loss=max_loss, profile_id=profile_id,
+                    interval=d.get('interval', 10), details=details)
+                strat.started_at = d['started_at']
+                strat.current_pnl = d['pnl'] or 0
+                registry.register(strat)
+                strat.start_monitoring()
+                continue
+
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+                     'log_history': [], 'running': False, 'params': details,
+                     'user_id': user_id, 'profile_id': profile_id}
+            iv_crush_strategies[sid] = entry
+
+            def _resume_iv(sid=sid, entry=entry, details=details, call_leg=call_leg,
+                           put_leg=put_leg, asset=asset, user_id=user_id, d=d):
+                if not _setup_strategy_thread(entry):
+                    entry['running'] = False
+                    return
+                try:
+                    from strategy.iv_crush import IVCrushStrategy
+                    s = IVCrushStrategy(
+                        asset=details.get('asset', asset),
+                        expiry_date=details.get('expiry_date', ''),
+                        lot_size=int(details.get('lot_size', 10)),
+                        iv_rv_threshold=float(details.get('iv_rv_threshold', 1.3)),
+                        max_loss_pct=float(details.get('max_loss_pct', 50)),
+                        target_profit_pct=float(details.get('target_profit_pct', 30)),
+                        monitoring_interval=int(details.get('monitoring_interval', 10)),
+                    )
+                    s.call_position = {'product_id': call_leg['product_id'],
+                                       'symbol': call_leg['symbol'],
+                                       'strike_price': call_leg.get('strike', '')}
+                    s.put_position = {'product_id': put_leg['product_id'],
+                                      'symbol': put_leg['symbol'],
+                                      'strike_price': put_leg.get('strike', '')}
+                    s.call_entry_price = call_leg['entry_price']
+                    s.put_entry_price = put_leg['entry_price']
+                    s.call_contract_value = call_leg.get('contract_value', 0.001)
+                    s.put_contract_value = put_leg.get('contract_value', 0.001)
+                    entry['strategy'] = s
+                    entry['running'] = True
+                    s.ws_manager.start()
+                    import time as _t; _t.sleep(2)
+                    s.ws_manager.subscribe([call_leg['symbol'], put_leg['symbol']])
+                    s.monitor()
+                except Exception as e:
+                    logger.error(f"[resume] IV Crush {sid} error: {e}")
+                finally:
+                    pnl = round(getattr(entry.get('strategy'), 'total_pnl', 0), 2)
+                    record_end(sid, pnl, 0)
+                    update_tracked(sid, status='completed', pnl=pnl)
+                    if entry.get('strategy'):
+                        entry['strategy'].ws_manager.stop()
+                    _teardown_strategy_thread(entry)
+
+            t = threading.Thread(target=_resume_iv, daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed IV Crush {sid} with full monitoring")
+
+        # 6. Restore Call Ratio with full CallRatioStrategy
+        elif source == 'Call Ratio':
+            if len(legs) < 2:
+                strat = TrackedStrategy(sid=sid, source=source, name=d['name'],
+                    user_id=user_id, legs=legs, asset=asset, lot_size=lot_size,
+                    max_profit=max_profit, max_loss=max_loss, profile_id=profile_id,
+                    interval=d.get('interval', 10), details=details)
+                strat.started_at = d['started_at']
+                strat.current_pnl = d['pnl'] or 0
+                registry.register(strat)
+                strat.start_monitoring()
+                continue
+
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+                     'log_history': [], 'running': False, 'params': details,
+                     'user_id': user_id, 'profile_id': profile_id}
+            call_ratio_strategies[sid] = entry
+
+            def _resume_cr(sid=sid, entry=entry, details=details, legs=legs,
+                           asset=asset, user_id=user_id, d=d):
+                if not _setup_strategy_thread(entry):
+                    entry['running'] = False
+                    return
+                try:
+                    from strategy.call_ratio import CallRatioStrategy
+                    s = CallRatioStrategy(
+                        asset=details.get('asset', asset),
+                        expiry_date=details.get('expiry_date', ''),
+                        lot_size=int(details.get('lot_size', 10)),
+                        buy_offset_pct=float(details.get('buy_offset_pct', 2)),
+                        sell_offset_pct=float(details.get('sell_offset_pct', 4)),
+                        hedge_offset_pct=float(details.get('hedge_offset_pct', 7)),
+                        target_pct=float(details.get('target_pct', 5)),
+                        sl_pct=float(details.get('sl_pct', 8)),
+                        monitoring_interval=int(details.get('monitoring_interval', 30)),
+                    )
+                    s.legs = legs
+                    entry['strategy'] = s
+                    entry['running'] = True
+                    s.ws_manager.start()
+                    import time as _t; _t.sleep(2)
+                    s.ws_manager.subscribe([l['symbol'] for l in legs if l.get('symbol')])
+                    s.monitor()
+                except Exception as e:
+                    logger.error(f"[resume] Call Ratio {sid} error: {e}")
+                finally:
+                    pnl = round(getattr(entry.get('strategy'), 'total_pnl', 0), 2)
+                    record_end(sid, pnl, 0)
+                    update_tracked(sid, status='completed', pnl=pnl)
+                    if entry.get('strategy'):
+                        entry['strategy'].ws_manager.stop()
+                    _teardown_strategy_thread(entry)
+
+            t = threading.Thread(target=_resume_cr, daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed Call Ratio {sid} with full monitoring")
+
+        # 7. Restore Futures Signal trader (resume scanning)
+        # 7. Everything else — use TrackedStrategy
         else:
             strat = TrackedStrategy(
                 sid=sid, source=source, name=d['name'],
@@ -1293,7 +1532,6 @@ def api_pnl_series():
 
 # ── IV Crush Strategy Routes ──
 
-iv_crush_strategies = {}  # {sid: {thread, strategy, log_queue, log_history, running, params, user_id}}
 
 def _iv_crush_legs(s):
     """Extract legs list from IVCrushStrategy's call/put positions."""
@@ -1468,7 +1706,6 @@ def _iv_leg(s, leg):
 
 # ── Call Ratio Spread Routes ──
 
-call_ratio_strategies = {}
 
 def run_call_ratio(sid, params):
     entry = call_ratio_strategies[sid]
@@ -2327,7 +2564,6 @@ def api_tracker_deploy():
 
 # ── Futures Signal Auto-Trade ──
 
-_futures_traders = {}  # sid -> {trader, user_id}
 
 
 @app.route('/api/futures-signal/start', methods=['POST'])

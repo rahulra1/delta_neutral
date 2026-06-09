@@ -67,6 +67,7 @@ class FuturesSignalTrader:
                 if today != self._today:
                     self._today = today
                     self.trades_today = 0
+                self._check_tp_sl()
                 self._scan_and_trade()
                 # Persist to DB every 10 scans
                 if self._scan_count % 10 == 0 and self.sid:
@@ -78,12 +79,54 @@ class FuturesSignalTrader:
         if self.sid:
             self._persist(stopped=True)
 
+    def _check_tp_sl(self):
+        """Close legs that hit TP or SL."""
+        if not self.legs:
+            return
+        from api.pricing import get_current_price
+        symbol = FUTURES_PRODUCTS.get(self.asset)
+        closed = []
+        for i, leg in enumerate(self.legs):
+            sl = leg.get('sl')
+            tp = leg.get('tp')
+            if not sl and not tp:
+                continue
+            data = get_current_price(None, self.asset) if not leg.get('product_id') else get_current_price(leg['product_id'], self.asset)
+            if not data:
+                continue
+            price = data['mark_price']
+            hit = None
+            if leg['side'] == 'buy':
+                if tp and price >= float(tp):
+                    hit = 'TP'
+                elif sl and price <= float(sl):
+                    hit = 'SL'
+            else:  # sell
+                if tp and price <= float(tp):
+                    hit = 'TP'
+                elif sl and price >= float(sl):
+                    hit = 'SL'
+            if hit:
+                close_side = 'sell' if leg['side'] == 'buy' else 'buy'
+                result = place_order(None, symbol, leg['size'], close_side)
+                pnl = 0
+                if leg['side'] == 'buy':
+                    pnl = price - leg['entry_price']
+                else:
+                    pnl = leg['entry_price'] - price
+                print(f"[FST] {'🎯' if hit == 'TP' else '🛑'} {hit} HIT: {leg['side'].upper()} {symbol} | Entry: {leg['entry_price']} → Exit: {price:.2f} | PnL: {pnl:+.2f}")
+                closed.append(i)
+        for i in reversed(closed):
+            self.legs.pop(i)
+        if closed and self.sid:
+            self._persist()
+
     def _persist(self, stopped=False):
         try:
             from models import update_strategy_db
             logs = [f"[{t['time']}] {t['side'].upper()} @ {t['price']} | SL: {t['sl']} | TP: {t['tp']} | {'✓' if t['success'] else '✗'}" for t in self.trade_log]
             status = 'completed' if stopped else 'running'
-            update_strategy_db(self.sid, status=status, logs=logs)
+            update_strategy_db(self.sid, status=status, logs=logs, legs=self.legs)
         except Exception:
             pass
 
@@ -159,6 +202,8 @@ class FuturesSignalTrader:
                 'time': datetime.now().strftime('%H:%M:%S'),
             })
             print(f"[FST] 🟢 ORDER PLACED: {self.signal_key} {side.upper()} {self.lots} {symbol} @ ~{signal.get('price')} | SL: {signal.get('sl')} | TP: {signal.get('tp1')}")
+            if self.sid:
+                self._persist()
         else:
             print(f"[FST] ❌ ORDER FAILED: {self.signal_key} {side.upper()} {symbol}")
 
