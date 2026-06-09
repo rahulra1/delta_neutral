@@ -89,6 +89,18 @@ class PositionTracker:
                 pass
         return positions
 
+    def reconcile_with_broker(self, user_id, broker_positions):
+        """Remove tracked positions that no longer exist on broker.
+        broker_positions: list of dicts with 'product_id' and 'size' from get_positions()."""
+        if broker_positions is None:
+            return  # API call failed, don't remove anything
+        active_pids = {p.get('product_id') for p in broker_positions if int(p.get('size', 0)) != 0}
+        with self._lock:
+            self._positions = [
+                p for p in self._positions
+                if p._user_id != user_id or p.product_id in active_pids
+            ]
+
     def get_total_pnl(self, user_id):
         return sum(p.current_pnl for p in self.get_user_positions(user_id))
 

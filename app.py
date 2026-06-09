@@ -909,10 +909,12 @@ def api_all_strategies():
     from api.live_pnl import compute_live_legs
     result = []
     with _state_lock:
-        for sid, t in all_tracked.items():
+        for sid, t in list(all_tracked.items()):
             if t['user_id'] != uid:
                 continue
             entry = dict(t)
+            if entry['status'] in ('completed', 'closed'):
+                continue  # Don't show finished strategies on main page
             if entry['status'] in ('running', 'open (no monitor)'):
                 if sid in strategies and strategies[sid].get('strategy'):
                     s = strategies[sid]['strategy']
@@ -922,13 +924,29 @@ def api_all_strategies():
                     entry['pnl'] = round(mon.current_pnl, 2)
                     if not mon.running:
                         entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(mon.current_pnl, 2))
+                        continue  # skip — just completed
                 elif sid in iv_crush_strategies and iv_crush_strategies[sid].get('strategy'):
-                    entry['pnl'] = round(iv_crush_strategies[sid]['strategy'].total_pnl, 2)
+                    s = iv_crush_strategies[sid]['strategy']
+                    entry['pnl'] = round(s.total_pnl, 2)
+                    if not s.running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.total_pnl, 2))
+                        continue
                 elif sid in call_ratio_strategies and call_ratio_strategies[sid].get('strategy'):
-                    entry['pnl'] = round(call_ratio_strategies[sid]['strategy'].total_pnl, 2)
+                    s = call_ratio_strategies[sid]['strategy']
+                    entry['pnl'] = round(s.total_pnl, 2)
+                    if not s.running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.total_pnl, 2))
+                        continue
                 elif sid in _futures_traders:
                     trader = _futures_traders[sid]['trader']
-                    entry['running'] = trader.running
+                    if not trader.running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed')
+                        continue
+                    entry['running'] = True
                     entry['legs'] = [{'symbol': l['symbol'], 'side': l['side'], 'size': l['size'], 'entry_price': l['entry_price']} for l in trader.legs]
                 else:
                     # No monitor — compute live P&L from legs
@@ -939,9 +957,11 @@ def api_all_strategies():
                         entry['pnl'] = pnl
             result.append(entry)
 
-    # Merge strategies from unified tracker
+    # Merge strategies from unified tracker (only running)
     for ts in registry.get_user_strategies(uid):
         if ts.sid not in {s['sid'] for s in result}:
+            if not ts.running and ts.status in ('completed', 'closed'):
+                continue
             st = ts.get_status()
             st.pop('logs', None)
             result.append(st)
@@ -1055,11 +1075,19 @@ def api_close_strategy(sid):
             if failed:
                 return jsonify(success=False, error=f"Failed to close: {', '.join(failed)}"), 500
             closed = True
+    # Futures Signal trader
+    if not closed and sid in _futures_traders:
+        _futures_traders[sid]['trader'].stop()
+        closed = True
 
     if not closed:
         return jsonify(success=False, error="Failed to close strategy"), 500
 
     update_tracked(sid, status='closed')
+    # Clean up position tracker
+    for leg in all_tracked.get(sid, {}).get('details', {}).get('legs', []):
+        if leg.get('product_id'):
+            position_tracker.close(uid, leg['product_id'])
     return jsonify(success=True, status='closed')
 
 
@@ -2348,10 +2376,7 @@ def api_tracked_positions():
     from api.live_pnl import compute_live_legs
     uid = current_user_id()
 
-    # 1. Get positions from position tracker (Option Chain, Strategy Builder)
-    tracked = position_tracker.to_list(uid, refresh=True)
-
-    # 2. Get positions from broker API if profile provided
+    # 1. Get positions from broker API if profile provided (and reconcile)
     broker_positions = []
     profile_id = request.args.get('profile_id', '')
     if profile_id:
@@ -2362,23 +2387,34 @@ def api_tracked_positions():
         if api_key:
             set_thread_credentials(api_key, api_secret, broker)
             positions = get_positions()
-            for p in positions:
+            # Reconcile: remove tracked positions that broker says are closed
+            if positions is not None:
+                position_tracker.reconcile_with_broker(uid, positions)
+            for p in (positions or []):
                 size = int(p.get('size', 0))
                 if size == 0:
                     continue
                 sym = p.get('product_symbol', '')
                 m = re.match(r'^(C|P)-(\w+)-(\d+)-\d+$', sym)
-                opt_type = 'call' if (m and m.group(1) == 'C') else 'put' if m else 'unknown'
-                strike = m.group(3) if m else '0'
+                if m:
+                    opt_type = 'call' if m.group(1) == 'C' else 'put'
+                    strike = m.group(3)
+                    asset = m.group(2)
+                else:
+                    opt_type = 'futures'
+                    strike = '0'
+                    asset = 'BTC' if 'BTC' in sym else 'ETH' if 'ETH' in sym else 'BTC'
                 side = 'sell' if size < 0 else 'buy'
                 pid = p.get('product_id')
                 entry = float(p.get('entry_price', 0))
-                asset = m.group(2) if m else 'BTC'
                 broker_positions.append({
                     'product_id': pid, 'symbol': sym, 'type': opt_type,
                     'strike': strike, 'side': side, 'size': abs(size),
                     'entry_price': entry, 'asset': asset, 'source': 'Broker',
                 })
+
+    # 2. Get positions from tracker (after reconciliation removed stale ones)
+    tracked = position_tracker.to_list(uid, refresh=True)
 
     # 3. Merge: broker positions + tracked (dedup by product_id)
     seen = set()

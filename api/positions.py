@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 def get_positions():
     path = '/v2/positions/margined'
-    query_string = '?contract_types=call_options,put_options'
+    query_string = '?contract_types=perpetual_futures,call_options,put_options'
     headers = get_headers('GET', path, query_string)
     try:
         response = requests.get(f'{config.BASE_URL}{path}{query_string}', headers=headers, timeout=(3, 27))
