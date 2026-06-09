@@ -120,8 +120,8 @@ class FuturesSignalTrader:
 
         print(f"[FST] {self.signal_key} {self.asset} {self.timeframe} | Scan #{self._scan_count} | Signals: {len(signals)} | New: {'YES ✓' if (is_new and recent) else 'no'} | Trades: {self.trades_today}/{self.max_trades_per_day}")
 
-        # if not is_new or not recent:
-            # return
+        if not is_new or not recent:
+            return
 
         self.last_signal_time = latest['time']
         self._place_trade(latest)
