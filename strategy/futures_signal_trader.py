@@ -36,6 +36,7 @@ class FuturesSignalTrader:
         self.running = False
         self.trades_today = 0
         self.last_signal_time = 0
+        self._pending_signal = None
         self.trade_log = []
         self.legs = []  # open legs [{symbol, side, size, entry_price, time}]
         self.sid = None
@@ -49,9 +50,32 @@ class FuturesSignalTrader:
         self.running = True
         self.trades_today = 0
         self._today = datetime.utcnow().date()
+        self._restore_state()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
         print(f"[FST] ✓ Started | {self.signal_key} {self.asset} {self.timeframe} | Lots: {self.lots} | Scan: {self.scan_interval}s")
+
+    def _restore_state(self):
+        """Restore pending signal and cooldown state from DB."""
+        if not self.sid:
+            return
+        try:
+            from models import get_db
+            import json
+            conn = get_db()
+            row = conn.execute('SELECT details, legs FROM live_strategies WHERE sid=?', (self.sid,)).fetchone()
+            conn.close()
+            if not row:
+                return
+            details = json.loads(row['details'] or '{}')
+            self.last_signal_time = details.get('last_signal_time', 0)
+            self._pending_signal = details.get('pending_signal')
+            self.trades_today = details.get('trades_today', 0)
+            self.legs = json.loads(row['legs'] or '[]')
+            if self._pending_signal:
+                print(f"[FST] ♻ Restored pending {self._pending_signal['type'].upper()} signal @ {self._pending_signal.get('price')}")
+        except Exception:
+            pass
 
     def stop(self):
         self.running = False
@@ -99,15 +123,15 @@ class FuturesSignalTrader:
                 continue
             hit = None
             if leg['side'] == 'buy':
-                if tp and price >= float(tp):
-                    hit = 'TP'
-                elif sl and price <= float(sl):
+                if sl and price <= float(sl):
                     hit = 'SL'
+                elif tp and price >= float(tp):
+                    hit = 'TP'
             else:  # sell
-                if tp and price <= float(tp):
-                    hit = 'TP'
-                elif sl and price >= float(sl):
+                if sl and price >= float(sl):
                     hit = 'SL'
+                elif tp and price <= float(tp):
+                    hit = 'TP'
             if hit:
                 close_side = 'sell' if leg['side'] == 'buy' else 'buy'
                 place_order(None, symbol, leg['size'], close_side)
@@ -131,7 +155,9 @@ class FuturesSignalTrader:
                                         'timeframe': self.timeframe, 'lots': self.lots,
                                         'scan_interval': self.scan_interval,
                                         'max_trades_per_day': self.max_trades_per_day,
-                                        'last_signal_time': self.last_signal_time})
+                                        'last_signal_time': self.last_signal_time,
+                                        'pending_signal': self._pending_signal,
+                                        'trades_today': self.trades_today})
         except Exception:
             pass
 
@@ -140,6 +166,48 @@ class FuturesSignalTrader:
 
         if self.trades_today >= self.max_trades_per_day:
             print(f"[FST] {self.signal_key} {self.asset} {self.timeframe} | Max trades reached ({self.trades_today}/{self.max_trades_per_day})")
+            return
+
+        # Check pending signal price trigger (sma_vol_breakout only)
+        if self._pending_signal:
+            from api.pricing import get_futures_price
+            symbol = FUTURES_PRODUCTS.get(self.asset)
+            if symbol:
+                data = get_futures_price(symbol)
+                if data:
+                    price = data['mark_price']
+                    entry = self._pending_signal.get('price', 0)
+                    sl = self._pending_signal.get('sl', 0)
+                    # Invalidate if price hit SL before entry (like backtest: SL checked first)
+                    if self._pending_signal['type'] == 'buy' and price <= sl:
+                        print(f"[FST] {self.signal_key} | Pending BUY invalidated (price hit SL)")
+                        self._pending_signal = None
+                        self._persist()
+                        return
+                    elif self._pending_signal['type'] == 'sell' and price >= sl:
+                        print(f"[FST] {self.signal_key} | Pending SELL invalidated (price hit SL)")
+                        self._pending_signal = None
+                        self._persist()
+                        return
+                    # Check if entry triggered
+                    triggered = False
+                    if self._pending_signal['type'] == 'buy' and price >= entry:
+                        triggered = True
+                    elif self._pending_signal['type'] == 'sell' and price <= entry:
+                        triggered = True
+                    if triggered:
+                        self.last_signal_time = self._pending_signal['time']
+                        print(f"[FST] {self.signal_key} | ✓ Price triggered @ {price:.2f} (entry: {entry})")
+                        self._place_trade(self._pending_signal)
+                        self._pending_signal = None
+                        return
+            # Expire pending signal after 2x candle duration
+            candle_seconds = {'5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
+            max_wait = candle_seconds.get(self.timeframe, 900) * 2
+            if (time.time() - self._pending_signal['time']) > max_wait:
+                print(f"[FST] {self.signal_key} | Pending signal expired")
+                self._pending_signal = None
+                self._persist()
             return
 
         fn = INDICATOR_FNS.get(self.signal_key)
@@ -171,6 +239,28 @@ class FuturesSignalTrader:
         if not is_new or not recent:
             return
 
+        # Price trigger: sma_vol_breakout entry = breakout candle high/low (pending)
+        # All other strategies entry = candle close (already confirmed, trade immediately)
+        if self.signal_key == 'sma_vol_breakout':
+            from api.pricing import get_futures_price
+            symbol = FUTURES_PRODUCTS.get(self.asset)
+            if symbol:
+                data = get_futures_price(symbol)
+                if data:
+                    price = data['mark_price']
+                    entry = latest.get('price', 0)
+                    if latest['type'] == 'buy' and price < entry:
+                        self._pending_signal = latest
+                        self._persist()
+                        print(f"[FST] {self.signal_key} | BUY pending: price {price:.2f} < entry {entry}")
+                        return
+                    elif latest['type'] == 'sell' and price > entry:
+                        self._pending_signal = latest
+                        self._persist()
+                        print(f"[FST] {self.signal_key} | SELL pending: price {price:.2f} > entry {entry}")
+                        return
+
+        self._pending_signal = None
         self.last_signal_time = latest['time']
         self._place_trade(latest)
 

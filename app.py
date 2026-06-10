@@ -101,6 +101,8 @@ def _resume_db_strategies():
             trader.sid = sid
             trader.legs = legs  # restore previously filled legs
             trader.last_signal_time = details.get('last_signal_time', 0) or 0
+            trader._pending_signal = details.get('pending_signal')
+            trader.trades_today = details.get('trades_today', 0) or 0
             if profile_id:
                 try:
                     p = get_profile(int(profile_id), user_id)
