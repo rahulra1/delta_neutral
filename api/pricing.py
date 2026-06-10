@@ -42,3 +42,30 @@ def get_current_price(product_id, asset='BTC'):
     except Exception as e:
         logger.error(f"Error fetching current price: {e}")
         return None
+
+
+def get_futures_price(symbol='BTCUSD'):
+    """Fetch mark price for a perpetual futures contract by symbol."""
+    now = time.time()
+    cache_key = f'futures_{symbol}'
+    with _cache_lock:
+        cached = _cache.get(cache_key)
+        if cached and now - cached['ts'] < _CACHE_TTL:
+            return cached['data']
+
+    path = f'/v2/tickers/{symbol}'
+    headers = get_headers('GET', path, '')
+    try:
+        response = requests.get(f'{config.BASE_URL}{path}', headers=headers, timeout=(3, 27))
+        response.raise_for_status()
+        result = response.json()
+        if result.get('success') and result.get('result'):
+            ticker = result['result']
+            data = {'mark_price': float(ticker['mark_price']), 'delta': 0}
+            with _cache_lock:
+                _cache[cache_key] = {'data': data, 'ts': now}
+            return data
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching futures price for {symbol}: {e}")
+        return None

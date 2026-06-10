@@ -83,18 +83,20 @@ class FuturesSignalTrader:
         """Close legs that hit TP or SL."""
         if not self.legs:
             return
-        from api.pricing import get_current_price
+        from api.pricing import get_futures_price
         symbol = FUTURES_PRODUCTS.get(self.asset)
+        if not symbol:
+            return
+        data = get_futures_price(symbol)
+        if not data:
+            return
+        price = data['mark_price']
         closed = []
         for i, leg in enumerate(self.legs):
             sl = leg.get('sl')
             tp = leg.get('tp')
             if not sl and not tp:
                 continue
-            data = get_current_price(None, self.asset) if not leg.get('product_id') else get_current_price(leg['product_id'], self.asset)
-            if not data:
-                continue
-            price = data['mark_price']
             hit = None
             if leg['side'] == 'buy':
                 if tp and price >= float(tp):
@@ -109,11 +111,7 @@ class FuturesSignalTrader:
             if hit:
                 close_side = 'sell' if leg['side'] == 'buy' else 'buy'
                 result = place_order(None, symbol, leg['size'], close_side)
-                pnl = 0
-                if leg['side'] == 'buy':
-                    pnl = price - leg['entry_price']
-                else:
-                    pnl = leg['entry_price'] - price
+                pnl = (price - leg['entry_price']) if leg['side'] == 'buy' else (leg['entry_price'] - price)
                 print(f"[FST] {'🎯' if hit == 'TP' else '🛑'} {hit} HIT: {leg['side'].upper()} {symbol} | Entry: {leg['entry_price']} → Exit: {price:.2f} | PnL: {pnl:+.2f}")
                 closed.append(i)
         for i in reversed(closed):

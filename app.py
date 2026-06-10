@@ -1231,20 +1231,35 @@ def api_strategy_detail(sid):
                 })
         elif sid in _futures_traders:
             trader = _futures_traders[sid]['trader']
-            entry['pnl'] = 0
             entry['running'] = trader.running
             logs = [f"[{t['time']}] {t['side'].upper()} @ {t['price']} | SL: {t['sl']} | TP: {t['tp']} | {'✓ Filled' if t['success'] else '✗ Failed'}" for t in trader.trade_log]
             logs = [f"[FST] {trader.signal_key} {trader.asset} {trader.timeframe} | Scans: {trader._scan_count} | Trades: {trader.trades_today}/{trader.max_trades_per_day}"] + logs
+            total_pnl = 0
+            from api.pricing import get_futures_price
+            from strategy.futures_signal_trader import FUTURES_PRODUCTS as FP
+            symbol = FP.get(trader.asset)
+            price_data = get_futures_price(symbol) if symbol else None
+            mark = price_data['mark_price'] if price_data else 0
             for leg in trader.legs:
+                leg_pnl = 0
+                if mark > 0:
+                    if leg['side'] == 'buy':
+                        leg_pnl = (mark - leg['entry_price']) * leg['size']
+                    else:
+                        leg_pnl = (leg['entry_price'] - mark) * leg['size']
+                total_pnl += leg_pnl
                 live_legs.append({
                     'symbol': leg['symbol'],
                     'side': leg['side'],
                     'size': leg['size'],
                     'entry_price': leg['entry_price'],
+                    'current_mark': round(mark, 2),
+                    'current_pnl': round(leg_pnl, 2),
                     'sl': leg.get('sl'),
                     'tp': leg.get('tp'),
                     'type': 'futures',
                 })
+            entry['pnl'] = round(total_pnl, 2)
         else:
             # Option Chain / Strategy Builder / Tracker — use common P&L calculator
             raw_legs = []
