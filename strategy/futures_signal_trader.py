@@ -20,7 +20,7 @@ class FuturesSignalTrader:
     """Scans for signals from any indicator strategy and auto-places futures orders."""
 
     def __init__(self, signal_key, asset='BTC', timeframe='15m', lots=1,
-                 scan_interval=30, max_trades_per_day=3,
+                 scan_interval=30, max_trades_per_day=10,
                  api_key='', api_secret='', broker=None, profile_id=None):
         self.signal_key = signal_key
         self.asset = asset
@@ -110,9 +110,11 @@ class FuturesSignalTrader:
                     hit = 'SL'
             if hit:
                 close_side = 'sell' if leg['side'] == 'buy' else 'buy'
-                result = place_order(None, symbol, leg['size'], close_side)
-                pnl = (price - leg['entry_price']) if leg['side'] == 'buy' else (leg['entry_price'] - price)
-                print(f"[FST] {'🎯' if hit == 'TP' else '🛑'} {hit} HIT: {leg['side'].upper()} {symbol} | Entry: {leg['entry_price']} → Exit: {price:.2f} | PnL: {pnl:+.2f}")
+                place_order(None, symbol, leg['size'], close_side)
+                from config import get_contract_value
+                cv = get_contract_value(self.asset)
+                pnl = ((price - leg['entry_price']) if leg['side'] == 'buy' else (leg['entry_price'] - price)) * leg['size'] * cv
+                print(f"[FST] {'🎯' if hit == 'TP' else '🛑'} {hit} HIT: {leg['side'].upper()} {symbol} | Entry: {leg['entry_price']} → Exit: {price:.2f} | PnL: ${pnl:+.4f}")
                 closed.append(i)
         for i in reversed(closed):
             self.legs.pop(i)
@@ -124,7 +126,12 @@ class FuturesSignalTrader:
             from models import update_strategy_db
             logs = [f"[{t['time']}] {t['side'].upper()} @ {t['price']} | SL: {t['sl']} | TP: {t['tp']} | {'✓' if t['success'] else '✗'}" for t in self.trade_log]
             status = 'completed' if stopped else 'running'
-            update_strategy_db(self.sid, status=status, logs=logs, legs=self.legs)
+            update_strategy_db(self.sid, status=status, logs=logs, legs=self.legs,
+                               details={'signal_key': self.signal_key, 'asset': self.asset,
+                                        'timeframe': self.timeframe, 'lots': self.lots,
+                                        'scan_interval': self.scan_interval,
+                                        'max_trades_per_day': self.max_trades_per_day,
+                                        'last_signal_time': self.last_signal_time})
         except Exception:
             pass
 

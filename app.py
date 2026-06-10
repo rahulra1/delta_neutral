@@ -100,6 +100,7 @@ def _resume_db_strategies():
             )
             trader.sid = sid
             trader.legs = legs  # restore previously filled legs
+            trader.last_signal_time = details.get('last_signal_time', 0) or 0
             if profile_id:
                 try:
                     p = get_profile(int(profile_id), user_id)
@@ -843,6 +844,7 @@ def api_dashboard():
         running_count += sum(1 for sid, e in active_monitors.items() if e.get('user_id') == uid and e['monitor'].running)
         running_count += sum(1 for sid, e in iv_crush_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in call_ratio_strategies.items() if e.get('user_id') == uid and e.get('running'))
+        running_count += sum(1 for sid, e in _futures_traders.items() if e.get('user_id') == uid and e['trader'].running)
     running_count += len(registry.get_running(uid))
     pnls = [t.get('pnl', 0) for t in completed]
     wins = [p for p in pnls if p > 0]
@@ -947,7 +949,22 @@ def api_all_strategies():
                         update_tracked(sid, status='completed')
                         continue
                     entry['running'] = True
-                    entry['legs'] = [{'symbol': l['symbol'], 'side': l['side'], 'size': l['size'], 'entry_price': l['entry_price']} for l in trader.legs]
+                    # Compute live P&L
+                    from api.pricing import get_futures_price
+                    from strategy.futures_signal_trader import FUTURES_PRODUCTS as FP
+                    from config import get_contract_value
+                    sym = FP.get(trader.asset)
+                    pd = get_futures_price(sym) if sym else None
+                    mark = pd['mark_price'] if pd else 0
+                    cv = get_contract_value(trader.asset)
+                    total_pnl = 0
+                    legs_out = []
+                    for l in trader.legs:
+                        lpnl = ((mark - l['entry_price']) if l['side'] == 'buy' else (l['entry_price'] - mark)) * l['size'] * cv if mark else 0
+                        total_pnl += lpnl
+                        legs_out.append({'symbol': l['symbol'], 'side': l['side'], 'size': l['size'], 'entry_price': l['entry_price'], 'current_mark': round(mark, 2), 'current_pnl': round(lpnl, 2)})
+                    entry['pnl'] = round(total_pnl, 2)
+                    entry['legs'] = legs_out
                 else:
                     # No monitor — compute live P&L from legs
                     raw_legs = entry.get('details', {}).get('legs', [])
@@ -1237,16 +1254,18 @@ def api_strategy_detail(sid):
             total_pnl = 0
             from api.pricing import get_futures_price
             from strategy.futures_signal_trader import FUTURES_PRODUCTS as FP
+            from config import get_contract_value
             symbol = FP.get(trader.asset)
             price_data = get_futures_price(symbol) if symbol else None
             mark = price_data['mark_price'] if price_data else 0
+            cv = get_contract_value(trader.asset)
             for leg in trader.legs:
                 leg_pnl = 0
                 if mark > 0:
                     if leg['side'] == 'buy':
-                        leg_pnl = (mark - leg['entry_price']) * leg['size']
+                        leg_pnl = (mark - leg['entry_price']) * leg['size'] * cv
                     else:
-                        leg_pnl = (leg['entry_price'] - mark) * leg['size']
+                        leg_pnl = (leg['entry_price'] - mark) * leg['size'] * cv
                 total_pnl += leg_pnl
                 live_legs.append({
                     'symbol': leg['symbol'],

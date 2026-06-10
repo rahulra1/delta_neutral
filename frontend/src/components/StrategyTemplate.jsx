@@ -135,7 +135,7 @@ function SignalPanel({ asset, profileId, signalKey, timeframes, setError, title 
 
   const deploy = () => {
     if (!window.confirm(`Deploy ${title} ${asset} ${tf} with ${lots} lots?`)) return;
-    api.post('/futures-signal/start', { signal_key: signalKey, asset, timeframe: tf, lots, scan_interval: 30, max_trades_per_day: 3, profile_id: profileId })
+    api.post('/futures-signal/start', { signal_key: signalKey, asset, timeframe: tf, lots, scan_interval: 30, max_trades_per_day: 10, profile_id: profileId })
       .then(r => {
         const sid = r.data?.sid;
         setDeployed(true); setLiveSid(sid);

@@ -23,7 +23,7 @@ def place_order(product_id, product_symbol, size, side, max_retries=3):
         try:
             response = requests.post(f'{config.BASE_URL}{path}', data=payload_str, headers=headers, timeout=(3, 27))
             if not response.ok:
-                logger.warning(f"✗ Order HTTP {response.status_code} for {side.upper()} {size}x {product_symbol} (id={product_id})")
+                logger.warning(f"✗ Order HTTP {response.status_code} for {side.upper()} {size}x {product_symbol}")
             response.raise_for_status()
             result = response.json()
             if result.get('success'):
