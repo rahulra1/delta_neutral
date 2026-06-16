@@ -11,7 +11,7 @@ Every day at 6:30 PM IST:
 
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from api.chart import get_candles, calc_ema
 from api.chain import get_expiries
 from api.option_chain import get_option_chain
@@ -21,6 +21,8 @@ from api.pricing import get_current_price
 from strategy.base import BaseStrategy
 
 logger = logging.getLogger(__name__)
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 ENTRY_HOUR = 18
 ENTRY_MINUTE = 30
@@ -243,20 +245,20 @@ class EMACreditSpread(BaseStrategy):
     # --- Timing ---
 
     def _wait_for_entry_time(self):
-        now = datetime.now()
+        now = datetime.now(IST)
         entry_time = now.replace(hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
         if now >= entry_time:
             return  # already past entry time, trade now
         wait = (entry_time - now).total_seconds()
-        print(f"[EMA Spread] Waiting until {entry_time.strftime('%H:%M')} ({wait/60:.0f}min)...")
+        print(f"[EMA Spread] Waiting until {entry_time.strftime('%H:%M')} IST ({wait/60:.0f}min)...")
         self._interruptible_sleep(wait)
 
     def _sleep_until_tomorrow(self):
-        now = datetime.now()
+        now = datetime.now(IST)
         tomorrow = (now + timedelta(days=1)).replace(
             hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
         wait = (tomorrow - now).total_seconds()
-        print(f"[EMA Spread] Next trade: {tomorrow.strftime('%Y-%m-%d %H:%M')} ({wait/3600:.1f}h)")
+        print(f"[EMA Spread] Next trade: {tomorrow.strftime('%Y-%m-%d %H:%M')} IST ({wait/3600:.1f}h)")
         self._interruptible_sleep(wait)
 
     def _interruptible_sleep(self, seconds):

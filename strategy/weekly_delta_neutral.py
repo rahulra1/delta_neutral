@@ -7,12 +7,14 @@ until the next Friday 9 PM and repeats.
 
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from strategy import DeltaNeutralStrategy
 from strategy.base import BaseStrategy
 from api.chain import get_expiries
 
 logger = logging.getLogger(__name__)
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 # Friday = 4 in weekday() (Monday=0)
 TRADE_DAY = 4  # Friday
@@ -134,7 +136,7 @@ class WeeklyDeltaNeutral(BaseStrategy):
 
     def _wait_for_next_friday(self):
         """Sleep until the next Friday at entry time."""
-        now = datetime.now()
+        now = datetime.now(IST)
         # Find next Friday (or today if it's Friday and before entry time)
         days_ahead = self.trade_day - now.weekday()
         if days_ahead < 0:
@@ -148,7 +150,7 @@ class WeeklyDeltaNeutral(BaseStrategy):
 
         wait = (target_time - now).total_seconds()
         if wait > 60:
-            print(f"[Weekly DN] Next trade: {target_time.strftime('%A %Y-%m-%d %H:%M')} ({wait/3600:.1f}h)")
+            print(f"[Weekly DN] Next trade: {target_time.strftime('%A %Y-%m-%d %H:%M')} IST ({wait/3600:.1f}h)")
         self._interruptible_sleep(wait)
 
     def _interruptible_sleep(self, seconds):
