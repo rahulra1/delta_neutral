@@ -111,6 +111,28 @@ deploy_gamma() {
   cd "$REPO_DIR" && git pull
   cd "$GAMMA_DIR" && git pull
 
+  # Always rewrite service file to pick up env changes
+  cat > /etc/systemd/system/algox-gamma.service << EOF
+[Unit]
+Description=AlgoX Gamma (Staging)
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=${GAMMA_DIR}
+EnvironmentFile=${GAMMA_DIR}/.env
+Environment=ALGOX_DB_PATH=${DATA_DIR}/gamma_users.db
+Environment=ALGOX_HISTORY_FILE=${DATA_DIR}/gamma_trade_history.json
+Environment=ALGOX_ENV=gamma
+ExecStart=${GAMMA_DIR}/venv/bin/gunicorn --bind 127.0.0.1:${GAMMA_PORT} --workers 1 --threads 4 --timeout 120 app:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+
   # Install deps + build frontend
   source venv/bin/activate
   pip install -r requirements.txt -q
