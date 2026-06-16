@@ -2104,6 +2104,7 @@ def run_oi_strategy(sid, params):
 
     try:
         from strategy.oi_strategy import OIStrategy
+        print(f"[OI] Params received: entry_hour={params.get('entry_hour')}, entry_minute={params.get('entry_minute')}")
         s = OIStrategy(
             asset=params.get('asset', 'BTC'),
             lot_size=int(params.get('lot_size', 100)),
@@ -2371,6 +2372,7 @@ def run_ema_spread(sid, params):
 
     try:
         from strategy.ema_credit_spread import EMACreditSpread
+        print(f"[EMA Spread] Params received: entry_hour={params.get('entry_hour')}, entry_minute={params.get('entry_minute')}")
         s = EMACreditSpread(
             asset=params.get('asset', 'BTC'),
             lot_size=int(params.get('lot_size', 100)),

@@ -246,9 +246,9 @@ class EMACreditSpread(BaseStrategy):
         now = datetime.now()
         entry_time = now.replace(hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
         if now >= entry_time:
-            return
+            return  # already past entry time, trade now
         wait = (entry_time - now).total_seconds()
-        print(f"[EMA Spread] Waiting {wait/60:.0f}min until {self.entry_hour}:{self.entry_minute:02d}...")
+        print(f"[EMA Spread] Waiting until {entry_time.strftime('%H:%M')} ({wait/60:.0f}min)...")
         self._interruptible_sleep(wait)
 
     def _sleep_until_tomorrow(self):

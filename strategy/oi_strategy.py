@@ -199,13 +199,13 @@ class OIStrategy(BaseStrategy):
         self.legs.clear()
 
     def _wait_for_entry_time(self):
-        """Sleep until today's entry time (or immediately if past it and no trade yet today)."""
+        """Sleep until today's entry time, or trade immediately on first run if past."""
         now = datetime.now()
         entry_time = now.replace(hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
         if now >= entry_time:
             return  # already past entry time, trade now
         wait = (entry_time - now).total_seconds()
-        print(f"[OI] Waiting {wait/60:.0f}min until {self.entry_hour}:{self.entry_minute:02d} entry time...")
+        print(f"[OI] Waiting until {entry_time.strftime('%H:%M')} ({wait/60:.0f}min)...")
         self._interruptible_sleep(wait)
 
     def _sleep_until_tomorrow(self):
