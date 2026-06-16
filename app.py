@@ -46,6 +46,9 @@ active_monitors = {}
 # Forward declarations for strategy dicts (fully defined later in their sections)
 iv_crush_strategies = {}
 call_ratio_strategies = {}
+oi_strategies = {}
+weekly_dn_strategies = {}
+ema_spread_strategies = {}
 _futures_traders = {}
 
 # Resume strategies from DB on startup
@@ -367,8 +370,138 @@ def _resume_db_strategies():
             t.start()
             logger.info(f"[resume] Resumed Call Ratio {sid} with full monitoring")
 
-        # 7. Restore Futures Signal trader (resume scanning)
-        # 7. Everything else — use TrackedStrategy
+        # 7. Restore OI Strategy
+        elif source == 'OI Strategy':
+            if not legs:
+                continue
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+                     'log_history': [], 'running': False, 'params': details,
+                     'user_id': user_id, 'profile_id': profile_id}
+            oi_strategies[sid] = entry
+
+            def _resume_oi(sid=sid, entry=entry, details=details, legs=legs,
+                           asset=asset, user_id=user_id, d=d):
+                if not _setup_strategy_thread(entry):
+                    entry['running'] = False
+                    return
+                try:
+                    from strategy.oi_strategy import OIStrategy
+                    s = OIStrategy(
+                        asset=details.get('asset', asset),
+                        lot_size=int(details.get('lot_size', 100)),
+                        target_pct=float(details.get('target_pct', 50)) / 100,
+                        stop_loss_pct=float(details.get('stop_loss_pct', 50)) / 100,
+                        monitor_interval=int(details.get('monitoring_interval', 30)),
+                        entry_hour=int(details.get('entry_hour', 18)),
+                        entry_minute=int(details.get('entry_minute', 30)),
+                    )
+                    s.legs = legs
+                    from config import get_contract_value
+                    cv = get_contract_value(asset)
+                    s.max_premium = sum(l['entry_price'] * l['size'] * cv for l in legs)
+                    s._running = True
+                    entry['strategy'] = s
+                    entry['running'] = True
+                    s.monitor()
+                except Exception as e:
+                    logger.error(f"[resume] OI Strategy {sid} error: {e}")
+                finally:
+                    pnl = round(getattr(entry.get('strategy'), '_pnl', 0), 2)
+                    record_end(sid, pnl, 0)
+                    update_tracked(sid, status='completed', pnl=pnl)
+                    _teardown_strategy_thread(entry)
+
+            t = threading.Thread(target=_resume_oi, daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed OI Strategy {sid}")
+
+        # 8. Restore Weekly Delta Neutral
+        elif source == 'Weekly DN':
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+                     'log_history': [], 'running': False, 'params': details,
+                     'user_id': user_id, 'profile_id': profile_id}
+            weekly_dn_strategies[sid] = entry
+
+            def _resume_wdn(sid=sid, entry=entry, details=details, user_id=user_id):
+                if not _setup_strategy_thread(entry):
+                    entry['running'] = False
+                    return
+                try:
+                    from strategy.weekly_delta_neutral import WeeklyDeltaNeutral
+                    s = WeeklyDeltaNeutral(
+                        asset=details.get('asset', 'BTC'),
+                        target_delta=float(details.get('target_delta', 0.20)),
+                        delta_tolerance=float(details.get('delta_tolerance', 0.05)),
+                        lot_size=int(details.get('lot_size', 100)),
+                        premium_threshold=float(details.get('premium_threshold', 40)) / 100,
+                        target_pnl=float(details.get('target_pnl', 25)),
+                        max_adjustments=int(details.get('max_adjustments', 5)),
+                        monitoring_interval=int(details.get('monitoring_interval', 5)),
+                        entry_hour=int(details.get('entry_hour', 21)),
+                        entry_minute=int(details.get('entry_minute', 0)),
+                    )
+                    entry['strategy'] = s
+                    entry['running'] = True
+                    s.initialize()
+                    s.monitor()
+                except Exception as e:
+                    logger.error(f"[resume] Weekly DN {sid} error: {e}")
+                finally:
+                    pnl = round(getattr(entry.get('strategy'), 'cumulative_pnl', 0), 2)
+                    record_end(sid, pnl, 0)
+                    update_tracked(sid, status='completed', pnl=pnl)
+                    _teardown_strategy_thread(entry)
+
+            t = threading.Thread(target=_resume_wdn, daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed Weekly DN {sid}")
+
+        # 9. Restore EMA Credit Spread
+        elif source == 'EMA Spread':
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+                     'log_history': [], 'running': False, 'params': details,
+                     'user_id': user_id, 'profile_id': profile_id}
+            ema_spread_strategies[sid] = entry
+
+            def _resume_ecs(sid=sid, entry=entry, details=details, user_id=user_id):
+                if not _setup_strategy_thread(entry):
+                    entry['running'] = False
+                    return
+                try:
+                    from strategy.ema_credit_spread import EMACreditSpread
+                    s = EMACreditSpread(
+                        asset=details.get('asset', 'BTC'),
+                        lot_size=int(details.get('lot_size', 100)),
+                        sell_delta=float(details.get('sell_delta', 0.20)),
+                        buy_delta=float(details.get('buy_delta', 0.10)),
+                        ema_period=int(details.get('ema_period', 14)),
+                        tp_pct=float(details.get('tp_pct', 90)) / 100,
+                        sl_pct=float(details.get('sl_pct', 100)) / 100,
+                        monitor_interval=int(details.get('monitoring_interval', 30)),
+                        entry_hour=int(details.get('entry_hour', 18)),
+                        entry_minute=int(details.get('entry_minute', 30)),
+                        min_expiry_days=int(details.get('min_expiry_days', 8)),
+                    )
+                    entry['strategy'] = s
+                    entry['running'] = True
+                    s.initialize()
+                    s.monitor()
+                except Exception as e:
+                    logger.error(f"[resume] EMA Spread {sid} error: {e}")
+                finally:
+                    pnl = round(getattr(entry.get('strategy'), 'cumulative_pnl', 0), 4)
+                    record_end(sid, pnl, 0)
+                    update_tracked(sid, status='completed', pnl=round(pnl, 2))
+                    _teardown_strategy_thread(entry)
+
+            t = threading.Thread(target=_resume_ecs, daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed EMA Spread {sid}")
+
+        # 10. Everything else — use TrackedStrategy
         else:
             strat = TrackedStrategy(
                 sid=sid, source=source, name=d['name'],
@@ -1034,6 +1167,12 @@ def api_close_strategy(sid):
             profile_id = iv_crush_strategies[sid].get('profile_id')
         elif sid in call_ratio_strategies:
             profile_id = call_ratio_strategies[sid].get('profile_id')
+        elif sid in oi_strategies:
+            profile_id = oi_strategies[sid].get('profile_id')
+        elif sid in weekly_dn_strategies:
+            profile_id = weekly_dn_strategies[sid].get('profile_id')
+        elif sid in ema_spread_strategies:
+            profile_id = ema_spread_strategies[sid].get('profile_id')
         if not profile_id:
             rs = registry.get(sid)
             if rs:
@@ -1067,6 +1206,24 @@ def api_close_strategy(sid):
             cr['strategy'].running = False
             cr['strategy'].close_all()
             closed = True
+    # OI Strategy
+    if not closed and sid in oi_strategies:
+        oi = oi_strategies[sid]
+        if oi.get('strategy'):
+            oi['strategy'].close_all()
+        closed = True
+    # Weekly DN
+    if not closed and sid in weekly_dn_strategies:
+        wdn = weekly_dn_strategies[sid]
+        if wdn.get('strategy'):
+            wdn['strategy'].close_all()
+        closed = True
+    # EMA Spread
+    if not closed and sid in ema_spread_strategies:
+        ecs = ema_spread_strategies[sid]
+        if ecs.get('strategy'):
+            ecs['strategy'].close_all()
+        closed = True
     # Option Chain monitor
     if not closed and sid in active_monitors:
         active_monitors[sid]['monitor'].stop()
@@ -1888,6 +2045,411 @@ def call_ratio_status(sid):
                           'pnl': l.get('current_pnl', 0)} for l in s.legs])
 
 
+# ── OI Strategy Routes ──
+
+
+def run_oi_strategy(sid, params):
+    entry = oi_strategies[sid]
+    uid = entry['user_id']
+    if not _setup_strategy_thread(entry):
+        entry['log_queue'].put("__STOPPED__")
+        return
+
+    try:
+        from strategy.oi_strategy import OIStrategy
+        s = OIStrategy(
+            asset=params.get('asset', 'BTC'),
+            lot_size=int(params.get('lot_size', 100)),
+            target_pct=float(params.get('target_pct', 50)) / 100,
+            stop_loss_pct=float(params.get('stop_loss_pct', 50)) / 100,
+            monitor_interval=int(params.get('monitoring_interval', 30)),
+            entry_hour=int(params.get('entry_hour', 18)),
+            entry_minute=int(params.get('entry_minute', 30)),
+        )
+        entry['strategy'] = s
+        entry['running'] = True
+        record_start(sid, params, user_id=uid)
+        if not s.initialize():
+            entry['log_queue'].put("✗ Init failed")
+            entry['running'] = False
+            entry['log_queue'].put("__STOPPED__")
+            return
+
+        # Save legs to DB and register positions
+        try:
+            update_strategy_db(sid, legs=s.legs)
+        except Exception:
+            pass
+        for leg in s.legs:
+            position_tracker.open(uid, leg['product_id'], leg['symbol'],
+                type=leg['type'], strike=leg.get('strike', ''), side='sell',
+                size=leg['size'], entry_price=leg['entry_price'],
+                asset=params.get('asset', 'BTC'), source='OI Strategy')
+
+        # Wrap monitor to inject PnL snapshots
+        import strategy.oi_strategy as _oi_mod
+        _orig_sleep = _oi_mod.time.sleep
+        _tick = [0]
+        def _snap_sleep(secs):
+            _orig_sleep(secs)
+            _tick[0] += 1
+            if _tick[0] % 6 == 0:
+                try:
+                    save_pnl_snapshot(uid, sid, round(s._pnl, 2))
+                    update_strategy_db(sid, pnl=round(s._pnl, 2), legs=s.legs)
+                except Exception:
+                    pass
+        _oi_mod.time.sleep = _snap_sleep
+        try:
+            s.monitor()
+        finally:
+            _oi_mod.time.sleep = _orig_sleep
+    except Exception as e:
+        entry['log_queue'].put(f"❌ Error: {e}")
+    finally:
+        s = entry.get('strategy')
+        pnl = round(s.cumulative_pnl + s._pnl, 2) if s else 0
+        record_end(sid, pnl, getattr(s, 'total_days_traded', 0))
+        update_tracked(sid, status='completed', pnl=pnl)
+        _teardown_strategy_thread(entry)
+
+
+@app.route('/api/oi-strategy/start', methods=['POST'])
+@login_required
+def oi_strategy_start():
+    params = request.json
+    profile_id = params.pop('profile_id', None)
+    api_key, api_secret, _, broker = get_profile_creds(profile_id)
+    if not api_key:
+        return jsonify(error="No API profile selected"), 400
+    sid = str(uuid.uuid4())[:8]
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [],
+             'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    oi_strategies[sid] = entry
+    track_strategy(sid, 'OI Strategy', f"{params.get('asset','BTC')} OI Strategy", current_user_id(), details={**params, 'profile_id': profile_id})
+    entry['thread'] = threading.Thread(target=run_oi_strategy, args=(sid, params), daemon=True)
+    entry['thread'].start()
+    return jsonify(status="started", sid=sid)
+
+
+@app.route('/api/oi-strategy/stop', methods=['POST'])
+@login_required
+def oi_strategy_stop():
+    sid = request.json.get('sid')
+    e = oi_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error="Not found"), 404
+    if e.get('strategy'):
+        e['strategy']._running = False
+        e['strategy'].close_all()
+    return jsonify(status="stopping")
+
+
+@app.route('/api/oi-strategy/stream/<sid>')
+@login_required
+def oi_strategy_stream(sid):
+    e = oi_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
+    q = e['log_queue']
+    def generate():
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                if msg == "__STOPPED__":
+                    yield f"event: stopped\ndata: done\n\n"
+                    break
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield f": heartbeat\n\n"
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/oi-strategy/status/<sid>')
+@login_required
+def oi_strategy_status(sid):
+    e = oi_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(running=False)
+    s = e.get('strategy')
+    if not e['running'] or not s:
+        return jsonify(running=False)
+    pnl_pct = (s._pnl / s.max_premium * 100) if s.max_premium > 0 else 0
+    return jsonify(
+        running=True,
+        total_pnl=round(s.pnl, 2),
+        today_pnl=round(s._pnl, 2),
+        max_premium=round(s.max_premium, 2),
+        pnl_pct=round(pnl_pct, 1),
+        cumulative_pnl=round(s.cumulative_pnl, 2),
+        days_traded=s.total_days_traded,
+        max_call_oi_strike=s.max_call_oi_strike,
+        max_put_oi_strike=s.max_put_oi_strike,
+        spot_price=s.spot_price,
+        expiry=s.expiry,
+        entry_hour=s.entry_hour,
+        entry_minute=s.entry_minute,
+        trade_log=s.trade_log[-10:],
+        legs=[{'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
+               'side': l['side'], 'size': l['size'], 'entry_price': round(l['entry_price'], 2)}
+              for l in s.legs],
+    )
+
+
+# ── Weekly Delta Neutral Strategy Routes ──
+
+
+def run_weekly_dn(sid, params):
+    entry = weekly_dn_strategies[sid]
+    uid = entry['user_id']
+    if not _setup_strategy_thread(entry):
+        entry['log_queue'].put("__STOPPED__")
+        return
+
+    try:
+        from strategy.weekly_delta_neutral import WeeklyDeltaNeutral
+        s = WeeklyDeltaNeutral(
+            asset=params.get('asset', 'BTC'),
+            target_delta=float(params.get('target_delta', 0.20)),
+            delta_tolerance=float(params.get('delta_tolerance', 0.05)),
+            lot_size=int(params.get('lot_size', 100)),
+            premium_threshold=float(params.get('premium_threshold', 40)) / 100,
+            target_pnl=float(params.get('target_pnl', 25)),
+            max_adjustments=int(params.get('max_adjustments', 5)),
+            monitoring_interval=int(params.get('monitoring_interval', 5)),
+            entry_hour=int(params.get('entry_hour', 21)),
+            entry_minute=int(params.get('entry_minute', 0)),
+        )
+        entry['strategy'] = s
+        entry['running'] = True
+        record_start(sid, params, user_id=uid)
+        if not s.initialize():
+            entry['log_queue'].put("✗ Init failed")
+            entry['running'] = False
+            entry['log_queue'].put("__STOPPED__")
+            return
+        s.monitor()
+    except Exception as e:
+        entry['log_queue'].put(f"❌ Error: {e}")
+    finally:
+        s = entry.get('strategy')
+        pnl = round(s.cumulative_pnl, 2) if s else 0
+        weeks = s.weeks_traded if s else 0
+        record_end(sid, pnl, weeks)
+        update_tracked(sid, status='completed', pnl=pnl)
+        _teardown_strategy_thread(entry)
+
+
+@app.route('/api/weekly-dn/start', methods=['POST'])
+@login_required
+def weekly_dn_start():
+    params = request.json
+    profile_id = params.pop('profile_id', None)
+    api_key, api_secret, _, broker = get_profile_creds(profile_id)
+    if not api_key:
+        return jsonify(error="No API profile selected"), 400
+    sid = str(uuid.uuid4())[:8]
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [],
+             'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    weekly_dn_strategies[sid] = entry
+    track_strategy(sid, 'Weekly DN', f"{params.get('asset','BTC')} Weekly Delta Neutral", current_user_id(), details={**params, 'profile_id': profile_id})
+    entry['thread'] = threading.Thread(target=run_weekly_dn, args=(sid, params), daemon=True)
+    entry['thread'].start()
+    return jsonify(status="started", sid=sid)
+
+
+@app.route('/api/weekly-dn/stop', methods=['POST'])
+@login_required
+def weekly_dn_stop():
+    sid = request.json.get('sid')
+    e = weekly_dn_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error="Not found"), 404
+    if e.get('strategy'):
+        e['strategy'].close_all()
+    return jsonify(status="stopping")
+
+
+@app.route('/api/weekly-dn/stream/<sid>')
+@login_required
+def weekly_dn_stream(sid):
+    e = weekly_dn_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
+    q = e['log_queue']
+    def generate():
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                if msg == "__STOPPED__":
+                    yield f"event: stopped\ndata: done\n\n"
+                    break
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield f": heartbeat\n\n"
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/weekly-dn/status/<sid>')
+@login_required
+def weekly_dn_status(sid):
+    e = weekly_dn_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(running=False)
+    s = e.get('strategy')
+    if not e['running'] or not s:
+        return jsonify(running=False)
+    return jsonify(
+        running=True,
+        cumulative_pnl=round(s.cumulative_pnl, 2),
+        current_pnl=round(s.pnl, 2),
+        weeks_traded=s.weeks_traded,
+        entry_time=f"{s.entry_hour}:{s.entry_minute:02d}",
+        trade_log=s.trade_log[-10:],
+        has_active_trade=s._current_strategy is not None,
+    )
+
+
+# ── EMA Credit Spread Strategy Routes ──
+
+
+def run_ema_spread(sid, params):
+    entry = ema_spread_strategies[sid]
+    uid = entry['user_id']
+    if not _setup_strategy_thread(entry):
+        entry['log_queue'].put("__STOPPED__")
+        return
+
+    try:
+        from strategy.ema_credit_spread import EMACreditSpread
+        s = EMACreditSpread(
+            asset=params.get('asset', 'BTC'),
+            lot_size=int(params.get('lot_size', 100)),
+            sell_delta=float(params.get('sell_delta', 0.20)),
+            buy_delta=float(params.get('buy_delta', 0.10)),
+            ema_period=int(params.get('ema_period', 14)),
+            tp_pct=float(params.get('tp_pct', 90)) / 100,
+            sl_pct=float(params.get('sl_pct', 100)) / 100,
+            monitor_interval=int(params.get('monitoring_interval', 30)),
+            entry_hour=int(params.get('entry_hour', 18)),
+            entry_minute=int(params.get('entry_minute', 30)),
+            min_expiry_days=int(params.get('min_expiry_days', 8)),
+        )
+        entry['strategy'] = s
+        entry['running'] = True
+        record_start(sid, params, user_id=uid)
+        if not s.initialize():
+            entry['log_queue'].put("✗ Init failed")
+            entry['running'] = False
+            entry['log_queue'].put("__STOPPED__")
+            return
+
+        # Wrap sleep for PnL snapshots
+        import strategy.ema_credit_spread as _ecs_mod
+        _orig_sleep = _ecs_mod.time.sleep
+        _tick = [0]
+        def _snap_sleep(secs):
+            _orig_sleep(secs)
+            _tick[0] += 1
+            if _tick[0] % 6 == 0 and s.legs:
+                try:
+                    save_pnl_snapshot(uid, sid, round(s.pnl, 4))
+                    update_strategy_db(sid, pnl=round(s.pnl, 4), legs=s.legs)
+                except Exception:
+                    pass
+        _ecs_mod.time.sleep = _snap_sleep
+        try:
+            s.monitor()
+        finally:
+            _ecs_mod.time.sleep = _orig_sleep
+    except Exception as e:
+        entry['log_queue'].put(f"❌ Error: {e}")
+    finally:
+        st = entry.get('strategy')
+        pnl = round(st.cumulative_pnl, 4) if st else 0
+        record_end(sid, pnl, getattr(st, 'total_days_traded', 0))
+        update_tracked(sid, status='completed', pnl=round(pnl, 2))
+        _teardown_strategy_thread(entry)
+
+
+@app.route('/api/ema-spread/start', methods=['POST'])
+@login_required
+def ema_spread_start():
+    params = request.json
+    profile_id = params.pop('profile_id', None)
+    api_key, api_secret, _, broker = get_profile_creds(profile_id)
+    if not api_key:
+        return jsonify(error="No API profile selected"), 400
+    sid = str(uuid.uuid4())[:8]
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [],
+             'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    ema_spread_strategies[sid] = entry
+    track_strategy(sid, 'EMA Spread', f"{params.get('asset','BTC')} EMA Credit Spread", current_user_id(), details={**params, 'profile_id': profile_id})
+    entry['thread'] = threading.Thread(target=run_ema_spread, args=(sid, params), daemon=True)
+    entry['thread'].start()
+    return jsonify(status="started", sid=sid)
+
+
+@app.route('/api/ema-spread/stop', methods=['POST'])
+@login_required
+def ema_spread_stop():
+    sid = request.json.get('sid')
+    e = ema_spread_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error="Not found"), 404
+    if e.get('strategy'):
+        e['strategy'].close_all()
+    return jsonify(status="stopping")
+
+
+@app.route('/api/ema-spread/stream/<sid>')
+@login_required
+def ema_spread_stream(sid):
+    e = ema_spread_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
+    q = e['log_queue']
+    def generate():
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                if msg == "__STOPPED__":
+                    yield f"event: stopped\ndata: done\n\n"
+                    break
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield f": heartbeat\n\n"
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/ema-spread/status/<sid>')
+@login_required
+def ema_spread_status(sid):
+    e = ema_spread_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(running=False)
+    s = e.get('strategy')
+    if not e['running'] or not s:
+        return jsonify(running=False)
+    pnl_pct = (s._pnl / s.net_premium * 100) if s.net_premium > 0 else 0
+    return jsonify(
+        running=True,
+        cumulative_pnl=round(s.cumulative_pnl, 4),
+        today_pnl=round(s._pnl, 4),
+        net_premium=round(s.net_premium, 4),
+        pnl_pct=round(pnl_pct, 1),
+        days_traded=s.total_days_traded,
+        entry_time=f"{s.entry_hour}:{s.entry_minute:02d}",
+        trade_log=s.trade_log[-10:],
+        legs=[{'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
+               'side': l['side'], 'delta': l['delta'], 'size': l['size'],
+               'entry_price': round(l['entry_price'], 4)} for l in s.legs],
+    )
+
+
 # ── Option Chain Routes ──
 
 DELTA_ASSETS = {'BTC', 'ETH'}
@@ -2574,6 +3136,12 @@ def api_tracker_close(sid):
         e['strategy'].running = False
         e['strategy'].close_all_positions()
         return jsonify(status='closed')
+    # New strategy dicts
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies):
+        e = dct.get(sid)
+        if e and e.get('user_id') == current_user_id() and e.get('strategy'):
+            e['strategy'].close_all()
+            return jsonify(status='closed')
     # Proxy to peer
     if PEER_PORT:
         try:

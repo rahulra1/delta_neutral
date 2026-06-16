@@ -62,8 +62,8 @@ After=network.target
 User=root
 WorkingDirectory=${GAMMA_DIR}
 EnvironmentFile=${GAMMA_DIR}/.env
-Environment=ALGOX_DB_PATH=${DATA_DIR}/users.db
-Environment=ALGOX_HISTORY_FILE=${DATA_DIR}/trade_history.json
+Environment=ALGOX_DB_PATH=${DATA_DIR}/gamma_users.db
+Environment=ALGOX_HISTORY_FILE=${DATA_DIR}/gamma_trade_history.json
 Environment=ALGOX_ENV=gamma
 ExecStart=${GAMMA_DIR}/venv/bin/gunicorn --bind 127.0.0.1:${GAMMA_PORT} --workers 1 --threads 4 --timeout 120 app:app
 Restart=always

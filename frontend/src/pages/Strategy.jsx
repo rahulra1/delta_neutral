@@ -73,6 +73,18 @@ const STRATEGIES = [
     desc: "Mark prev day H/L → wait for breakout → retest with hammer/engulfing confirmation. SL below pattern, 1:2/1:3 R:R.",
     features: ['Prev Day H/L', 'Breakout + Retest', 'Hammer/Engulfing', '1:2 R:R'],
     rec: '⏱ Best on 15M/5M · BTC, NIFTY, BANKNIFTY' },
+  { key: 'oi_strategy', label: 'OI Strategy', icon: '🔍', type: 'Options',
+    desc: 'Daily option selling at max OI strikes (support/resistance). Auto-trades at 6:30 PM IST, exits on TP/SL.',
+    features: ['Max OI Strikes', 'Daily Auto-Trade', 'Support/Resistance', 'OI Shift Detection'],
+    rec: '⏱ Daily 6:30 PM · BTC options' },
+  { key: 'weekly_dn', label: 'Weekly Delta Neutral', icon: '📅', type: 'Options',
+    desc: 'Runs Delta Neutral strategy every Friday 9 PM IST. Sells strangle, monitors, exits, repeats weekly.',
+    features: ['Weekly Friday 9 PM', 'Short Strangle', 'Auto Rebalance', '3-week expiry'],
+    rec: '⏱ Every Friday · BTC/ETH options' },
+  { key: 'ema_spread', label: 'EMA Credit Spread', icon: '📉', type: 'Options',
+    desc: 'Daily EMA14 direction → bear call or bull put spread. 90% TP / 100% SL of premium. Runs daily at 6:30 PM.',
+    features: ['EMA14 Direction', 'Credit Spread', 'Daily Auto-Trade', '90% TP / 100% SL'],
+    rec: '⏱ Daily 6:30 PM · BTC options' },
 ];
 
 const DN_FIELDS = [
@@ -104,6 +116,40 @@ const CR_FIELDS = [
   { key: 'target_pct', label: 'Target Profit (%)', type: 'number', step: '0.5', default: 5 },
   { key: 'sl_pct', label: 'Stop Loss (%)', type: 'number', step: '0.5', default: 8 },
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 30 },
+];
+
+const OI_FIELDS = [
+  { key: 'lot_size', label: 'Lot Size', type: 'number', default: 100 },
+  { key: 'target_pct', label: 'Target Profit (% of premium)', type: 'number', default: 50 },
+  { key: 'stop_loss_pct', label: 'Stop Loss (% of premium)', type: 'number', default: 50 },
+  { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 30 },
+  { key: 'entry_hour', label: 'Entry Hour (24h)', type: 'number', default: 18 },
+  { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 30 },
+];
+
+const WDN_FIELDS = [
+  { key: 'lot_size', label: 'Lot Size', type: 'number', default: 100 },
+  { key: 'target_delta', label: 'Target Delta', type: 'number', step: '0.01', default: 0.20 },
+  { key: 'delta_tolerance', label: 'Delta Tolerance', type: 'number', step: '0.01', default: 0.05 },
+  { key: 'premium_threshold', label: 'Premium Threshold (%)', type: 'number', default: 40 },
+  { key: 'target_pnl', label: 'Target P&L ($)', type: 'number', default: 25 },
+  { key: 'max_adjustments', label: 'Max Adjustments', type: 'number', default: 5 },
+  { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 5 },
+  { key: 'entry_hour', label: 'Entry Hour (24h)', type: 'number', default: 21 },
+  { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 0 },
+];
+
+const EMA_SPREAD_FIELDS = [
+  { key: 'lot_size', label: 'Lot Size', type: 'number', default: 100 },
+  { key: 'sell_delta', label: 'Sell Delta', type: 'number', step: '0.01', default: 0.20 },
+  { key: 'buy_delta', label: 'Buy Delta', type: 'number', step: '0.01', default: 0.10 },
+  { key: 'ema_period', label: 'EMA Period', type: 'number', default: 14 },
+  { key: 'tp_pct', label: 'Target Profit (% of premium)', type: 'number', default: 90 },
+  { key: 'sl_pct', label: 'Stop Loss (% of premium)', type: 'number', default: 100 },
+  { key: 'min_expiry_days', label: 'Min Expiry Days', type: 'number', default: 8 },
+  { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 30 },
+  { key: 'entry_hour', label: 'Entry Hour (24h)', type: 'number', default: 18 },
+  { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 30 },
 ];
 
 export default function Strategy() {
@@ -333,6 +379,123 @@ export default function Strategy() {
             </div>
           )}
         />
+      )}
+      {activeTab === 'oi_strategy' && (
+        <StrategyTemplate title="OI Strategy" icon="🔍" type="Options" description="Daily option selling at max Open Interest strikes. Runs at 6:30 PM IST." profiles={profiles}
+          configFields={OI_FIELDS}
+          onStart={async (config) => { const { data } = await api.post('/oi-strategy/start', config); return data; }}
+          onStop={async (sid) => { await api.post('/oi-strategy/stop', { sid }); }}
+          statusEndpoint="/oi-strategy/status" streamEndpoint="/oi-strategy/stream"
+          renderStatus={(s) => (
+            <>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Today P&L</div><div className="value" style={{ color: (s.today_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.today_pnl||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Cumulative</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Premium</div><div className="value">${(s.max_premium||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Days Traded</div><div className="value">{s.days_traded || 0}</div></div>
+              </div>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(3,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Max Call OI</div><div className="value">{s.max_call_oi_strike || '-'}</div></div>
+                <div className="stat-card"><div className="label">Max Put OI</div><div className="value">{s.max_put_oi_strike || '-'}</div></div>
+                <div className="stat-card"><div className="label">Spot</div><div className="value">{s.spot_price ? `$${s.spot_price.toFixed(0)}` : '-'}</div></div>
+              </div>
+              {(s.trade_log || []).length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Trade Log</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Date', 'P&L', 'Premium', 'Exit'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{(s.trade_log || []).slice(-10).reverse().map((t, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}>{t.date}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${t.pnl}</td>
+                        <td style={{ padding: '4px 8px' }}>${t.premium}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.exit_reason === 'target' ? '🎯' : t.exit_reason === 'stoploss' ? '🛑' : '⏹'}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )} />
+      )}
+      {activeTab === 'weekly_dn' && (
+        <StrategyTemplate title="Weekly Delta Neutral" icon="📅" type="Options" description="Runs Delta Neutral every Friday 9 PM IST. Auto-repeats weekly." profiles={profiles}
+          configFields={WDN_FIELDS}
+          onStart={async (config) => { const { data } = await api.post('/weekly-dn/start', config); return data; }}
+          onStop={async (sid) => { await api.post('/weekly-dn/stop', { sid }); }}
+          statusEndpoint="/weekly-dn/status" streamEndpoint="/weekly-dn/stream"
+          renderStatus={(s) => (
+            <>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Current P&L</div><div className="value" style={{ color: (s.current_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.current_pnl||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Cumulative</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Weeks Traded</div><div className="value">{s.weeks_traded || 0}</div></div>
+                <div className="stat-card"><div className="label">Active Trade</div><div className="value">{s.has_active_trade ? '🟢 Yes' : '⏸ Waiting'}</div></div>
+              </div>
+              {(s.trade_log || []).length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Weekly Log</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Date', 'P&L', 'Adjustments'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{(s.trade_log || []).slice(-10).reverse().map((t, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}>{t.date}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${t.pnl}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.adjustments}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )} />
+      )}
+      {activeTab === 'ema_spread' && (
+        <StrategyTemplate title="EMA Credit Spread" icon="📉" type="Options" description="Daily EMA14 direction → credit spread. 90% TP / 100% SL. Runs at 6:30 PM IST." profiles={profiles}
+          configFields={EMA_SPREAD_FIELDS}
+          onStart={async (config) => { const { data } = await api.post('/ema-spread/start', config); return data; }}
+          onStop={async (sid) => { await api.post('/ema-spread/stop', { sid }); }}
+          statusEndpoint="/ema-spread/status" streamEndpoint="/ema-spread/stream"
+          renderStatus={(s) => (
+            <>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Today P&L</div><div className="value" style={{ color: (s.today_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.today_pnl||0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Cumulative</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Net Premium</div><div className="value">${(s.net_premium||0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Days Traded</div><div className="value">{s.days_traded || 0}</div></div>
+              </div>
+              {s.legs && s.legs.length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Current Legs</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Side', 'Type', 'Strike', 'Delta', 'Entry'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{s.legs.map((l, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}><span className={`badge ${l.side === 'buy' ? 'badge-green' : 'badge-red'}`}>{l.side.toUpperCase()}</span></td>
+                        <td style={{ padding: '4px 8px' }}>{l.type.toUpperCase()}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>{l.strike}</td>
+                        <td style={{ padding: '4px 8px' }}>{l.delta.toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px' }}>${l.entry_price.toFixed(4)}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+              {(s.trade_log || []).length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Trade Log</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Date', 'Direction', 'P&L', 'Premium', 'Exit'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{(s.trade_log || []).slice(-10).reverse().map((t, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}>{t.date}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.direction === 'bear_call' ? '🐻 Bear Call' : '🐂 Bull Put'}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${t.pnl}</td>
+                        <td style={{ padding: '4px 8px' }}>${t.premium}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.exit_reason === 'target' ? '🎯' : t.exit_reason === 'stoploss' ? '🛑' : '⏹'}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )} />
       )}
     </div>
   );
