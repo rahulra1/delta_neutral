@@ -112,6 +112,8 @@ def init_db():
     )''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_pnl_snap_user_ts ON pnl_snapshots(user_id, ts)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_pnl_snap_sid ON pnl_snapshots(sid, ts)')
+    # Auto-promote first user to admin
+    conn.execute('UPDATE users SET is_admin = 1 WHERE id = 1')
     conn.commit()
     conn.close()
 
