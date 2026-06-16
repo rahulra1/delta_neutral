@@ -230,13 +230,17 @@ class OIStrategy(BaseStrategy):
     def _find_max_oi(self, chain):
         max_call_oi, max_put_oi = 0, 0
         call_strike, put_strike = None, None
+        spot = self.spot_price or 0
         for row in chain:
-            if row.get('call'):
+            strike_val = float(row['strike'])
+            # Calls: only OTM (strike >= spot)
+            if row.get('call') and strike_val >= spot:
                 oi = float(row['call'].get('oi', 0))
                 if oi > max_call_oi:
                     max_call_oi = oi
                     call_strike = row['strike']
-            if row.get('put'):
+            # Puts: only OTM (strike <= spot)
+            if row.get('put') and strike_val <= spot:
                 oi = float(row['put'].get('oi', 0))
                 if oi > max_put_oi:
                     max_put_oi = oi
