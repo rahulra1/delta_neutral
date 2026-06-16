@@ -1077,6 +1077,27 @@ def api_all_strategies():
                         entry['status'] = 'completed'
                         update_tracked(sid, status='completed', pnl=round(s.total_pnl, 2))
                         continue
+                elif sid in oi_strategies and oi_strategies[sid].get('strategy'):
+                    s = oi_strategies[sid]['strategy']
+                    entry['pnl'] = round(s.pnl, 2)
+                    if not s._running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.pnl, 2))
+                        continue
+                elif sid in weekly_dn_strategies and weekly_dn_strategies[sid].get('strategy'):
+                    s = weekly_dn_strategies[sid]['strategy']
+                    entry['pnl'] = round(s.pnl, 2)
+                    if not s._running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.pnl, 2))
+                        continue
+                elif sid in ema_spread_strategies and ema_spread_strategies[sid].get('strategy'):
+                    s = ema_spread_strategies[sid]['strategy']
+                    entry['pnl'] = round(s.pnl, 4)
+                    if not s._running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.pnl, 4))
+                        continue
                 elif sid in _futures_traders:
                     trader = _futures_traders[sid]['trader']
                     if not trader.running:
@@ -1405,6 +1426,32 @@ def api_strategy_detail(sid):
                     'current_mark': round(leg.get('current_mark', leg['entry_price']), 2),
                     'current_pnl': leg.get('current_pnl', 0),
                 })
+        elif sid in oi_strategies and oi_strategies[sid].get('strategy'):
+            oi = oi_strategies[sid]
+            strat = oi['strategy']
+            entry['pnl'] = round(strat.pnl, 2)
+            entry['running'] = oi.get('running', False)
+            logs = oi.get('log_history', [])
+            for leg in strat.legs:
+                live_legs.append({'symbol': leg['symbol'], 'type': leg['type'], 'strike': leg['strike'],
+                    'side': 'sell', 'size': leg['size'], 'entry_price': round(leg['entry_price'], 4),
+                    'current_mark': 0, 'current_pnl': 0})
+        elif sid in weekly_dn_strategies and weekly_dn_strategies[sid].get('strategy'):
+            wdn = weekly_dn_strategies[sid]
+            strat = wdn['strategy']
+            entry['pnl'] = round(strat.pnl, 2)
+            entry['running'] = wdn.get('running', False)
+            logs = wdn.get('log_history', [])
+        elif sid in ema_spread_strategies and ema_spread_strategies[sid].get('strategy'):
+            ecs = ema_spread_strategies[sid]
+            strat = ecs['strategy']
+            entry['pnl'] = round(strat.pnl, 4)
+            entry['running'] = ecs.get('running', False)
+            logs = ecs.get('log_history', [])
+            for leg in strat.legs:
+                live_legs.append({'symbol': leg['symbol'], 'type': leg['type'], 'strike': leg['strike'],
+                    'side': leg['side'], 'size': leg['size'], 'entry_price': round(leg['entry_price'], 4),
+                    'current_mark': 0, 'current_pnl': 0, 'delta': leg.get('delta', 0)})
         elif sid in _futures_traders:
             trader = _futures_traders[sid]['trader']
             entry['running'] = trader.running
@@ -3104,6 +3151,12 @@ def api_tracker_logs(sid):
         strat = e.get('strategy')
         pnl = round(strat.total_pnl, 2) if strat else 0
         return jsonify(sid=sid, logs=logs[-last:], running=e.get('running', False), pnl=pnl, status='running' if e.get('running') else 'completed')
+    # Check new strategy dicts
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies):
+        e = dct.get(sid)
+        if e and e.get('user_id') == current_user_id():
+            logs = list(e.get('log_history', []))
+            return jsonify(sid=sid, logs=logs[-last:], running=e.get('running', False), pnl=0, status='running' if e.get('running') else 'completed')
     # Check active monitors (Option Chain / Strategy Builder)
     m = active_monitors.get(sid)
     if m and m.get('user_id') == current_user_id():
