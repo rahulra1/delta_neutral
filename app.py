@@ -971,13 +971,19 @@ def api_dashboard():
                     t['pnl'] = round(call_ratio_strategies[sid]['strategy'].total_pnl, 2)
                 # Check OI Strategy
                 elif sid in oi_strategies and oi_strategies[sid].get('strategy'):
-                    t['pnl'] = round(oi_strategies[sid]['strategy'].pnl, 2)
+                    s = oi_strategies[sid]['strategy']
+                    t['pnl'] = round(s.pnl, 2)
+                    t['cumulative_pnl'] = round(s.cumulative_pnl, 2)
                 # Check Weekly DN
                 elif sid in weekly_dn_strategies and weekly_dn_strategies[sid].get('strategy'):
-                    t['pnl'] = round(weekly_dn_strategies[sid]['strategy'].pnl, 2)
+                    s = weekly_dn_strategies[sid]['strategy']
+                    t['pnl'] = round(s.pnl, 2)
+                    t['cumulative_pnl'] = round(s.cumulative_pnl, 2)
                 # Check EMA Spread
                 elif sid in ema_spread_strategies and ema_spread_strategies[sid].get('strategy'):
-                    t['pnl'] = round(ema_spread_strategies[sid]['strategy'].pnl, 4)
+                    s = ema_spread_strategies[sid]['strategy']
+                    t['pnl'] = round(s.pnl, 4)
+                    t['cumulative_pnl'] = round(s.cumulative_pnl, 4)
                 # Check unified tracker
                 rs = registry.get(sid)
                 if rs and rs.running:

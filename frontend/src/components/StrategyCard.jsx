@@ -41,6 +41,7 @@ export default function StrategyCard({ strategy: s, onClick, onClose, onLogs, co
         </div>
         <div style={{ textAlign: 'right' }}>
           <div style={{ fontWeight: 800, fontSize: '1.1rem', color: pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${pnl.toFixed(2)}</div>
+          {s.cumulative_pnl != null && <div style={{ fontSize: '.72rem', color: 'var(--muted)' }}>Cumulative: ${(s.cumulative_pnl || 0).toFixed(2)}</div>}
           {s.adjustment_count > 0 && <div style={{ fontSize: '.7rem', color: 'var(--muted)' }}>Adj: {s.adjustment_count}</div>}
         </div>
       </div>
