@@ -203,16 +203,16 @@ class EMACreditSpread(BaseStrategy):
                     else:
                         pnl += (data['mark_price'] - leg['entry_price']) * leg['size'] * cv
 
-            if cycle % 10 == 0:
-                print(f"[EMA D{day_num}] PnL: ${pnl:+.4f} ({pnl/premium*100:+.1f}%)")
+            if cycle % 3 == 0:
+                print(f"[EMA Day{day_num}] PnL: ${pnl:+.4f} ({pnl/premium*100:+.1f}%)")
 
             if pnl >= target:
-                print(f"[EMA D{day_num}] 🎯 TP hit: ${pnl:.4f}")
+                print(f"[EMA Day{day_num}] 🎯 TP hit: ${pnl:.4f}")
                 self._close_day_legs(day_legs)
                 self._record_day(day_num, pnl, premium, 'target', direction)
                 return
             if pnl <= -sl:
-                print(f"[EMA D{day_num}] 🛑 SL hit: ${pnl:.4f}")
+                print(f"[EMA Day{day_num}] 🛑 SL hit: ${pnl:.4f}")
                 self._close_day_legs(day_legs)
                 self._record_day(day_num, pnl, premium, 'stoploss', direction)
                 return

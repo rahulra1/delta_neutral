@@ -155,16 +155,16 @@ class OIStrategy(BaseStrategy):
                 if data:
                     pnl += (leg['entry_price'] - data['mark_price']) * leg['size'] * cv
 
-            if cycle % 10 == 0:
-                print(f"[OI D{day_num}] PnL: ${pnl:+.2f} ({pnl/premium*100:+.1f}%)")
+            if cycle % 3 == 0:
+                print(f"[OI Day{day_num}] PnL: ${pnl:+.2f} ({pnl/premium*100:+.1f}%)")
 
             if pnl >= target:
-                print(f"[OI D{day_num}] 🎯 Target hit: ${pnl:.2f}")
+                print(f"[OI Day{day_num}] 🎯 Target hit: ${pnl:.2f}")
                 self._close_day_legs(day_legs)
                 self._record_day(day_num, pnl, premium, 'target')
                 return
             if pnl <= -sl:
-                print(f"[OI D{day_num}] 🛑 SL hit: ${pnl:.2f}")
+                print(f"[OI Day{day_num}] 🛑 SL hit: ${pnl:.2f}")
                 self._close_day_legs(day_legs)
                 self._record_day(day_num, pnl, premium, 'stoploss')
                 return

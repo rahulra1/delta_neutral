@@ -969,6 +969,15 @@ def api_dashboard():
                 # Check Call Ratio
                 elif sid in call_ratio_strategies and call_ratio_strategies[sid].get('strategy'):
                     t['pnl'] = round(call_ratio_strategies[sid]['strategy'].total_pnl, 2)
+                # Check OI Strategy
+                elif sid in oi_strategies and oi_strategies[sid].get('strategy'):
+                    t['pnl'] = round(oi_strategies[sid]['strategy'].pnl, 2)
+                # Check Weekly DN
+                elif sid in weekly_dn_strategies and weekly_dn_strategies[sid].get('strategy'):
+                    t['pnl'] = round(weekly_dn_strategies[sid]['strategy'].pnl, 2)
+                # Check EMA Spread
+                elif sid in ema_spread_strategies and ema_spread_strategies[sid].get('strategy'):
+                    t['pnl'] = round(ema_spread_strategies[sid]['strategy'].pnl, 4)
                 # Check unified tracker
                 rs = registry.get(sid)
                 if rs and rs.running:
@@ -979,6 +988,9 @@ def api_dashboard():
         running_count += sum(1 for sid, e in active_monitors.items() if e.get('user_id') == uid and e['monitor'].running)
         running_count += sum(1 for sid, e in iv_crush_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in call_ratio_strategies.items() if e.get('user_id') == uid and e.get('running'))
+        running_count += sum(1 for sid, e in oi_strategies.items() if e.get('user_id') == uid and e.get('running'))
+        running_count += sum(1 for sid, e in weekly_dn_strategies.items() if e.get('user_id') == uid and e.get('running'))
+        running_count += sum(1 for sid, e in ema_spread_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in _futures_traders.items() if e.get('user_id') == uid and e['trader'].running)
     running_count += len(registry.get_running(uid))
     pnls = [t.get('pnl', 0) for t in completed]
@@ -1313,6 +1325,12 @@ def api_close_all_strategies():
                 profile_id = iv_crush_strategies[sid].get('profile_id')
             elif sid in call_ratio_strategies:
                 profile_id = call_ratio_strategies[sid].get('profile_id')
+            elif sid in oi_strategies:
+                profile_id = oi_strategies[sid].get('profile_id')
+            elif sid in weekly_dn_strategies:
+                profile_id = weekly_dn_strategies[sid].get('profile_id')
+            elif sid in ema_spread_strategies:
+                profile_id = ema_spread_strategies[sid].get('profile_id')
             if not profile_id:
                 rs = registry.get(sid)
                 if rs:
@@ -1336,6 +1354,21 @@ def api_close_all_strategies():
         if not closed and sid in call_ratio_strategies and call_ratio_strategies[sid].get('strategy'):
             call_ratio_strategies[sid]['strategy'].running = False
             call_ratio_strategies[sid]['strategy'].close_all()
+            closed = True
+        if not closed and sid in oi_strategies:
+            oi = oi_strategies[sid]
+            if oi.get('strategy'):
+                oi['strategy'].close_all()
+            closed = True
+        if not closed and sid in weekly_dn_strategies:
+            wdn = weekly_dn_strategies[sid]
+            if wdn.get('strategy'):
+                wdn['strategy'].close_all()
+            closed = True
+        if not closed and sid in ema_spread_strategies:
+            ecs = ema_spread_strategies[sid]
+            if ecs.get('strategy'):
+                ecs['strategy'].close_all()
             closed = True
         if not closed and sid in active_monitors:
             active_monitors[sid]['monitor'].stop()
