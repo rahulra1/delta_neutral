@@ -399,9 +399,19 @@ def _resume_db_strategies():
                     from config import get_contract_value
                     cv = get_contract_value(asset)
                     s.max_premium = sum(l['entry_price'] * l['size'] * cv for l in legs)
+                    s.cumulative_pnl = float(details.get('cumulative_pnl', 0))
+                    s.total_days_traded = int(details.get('total_days_traded', 0))
+                    s.trade_log = details.get('trade_log', [])
                     s._running = True
                     entry['strategy'] = s
                     entry['running'] = True
+                    # Resume monitoring for any open legs
+                    if legs:
+                        import threading as _thr
+                        premium = sum(l['entry_price'] * l['size'] * cv for l in legs)
+                        day_num = s.total_days_traded or 1
+                        _thr.Thread(target=s._monitor_day_trade,
+                                    args=(legs, premium, day_num), daemon=True).start()
                     s.monitor()
                 except Exception as e:
                     logger.error(f"[resume] OI Strategy {sid} error: {e}")
@@ -443,6 +453,9 @@ def _resume_db_strategies():
                     )
                     entry['strategy'] = s
                     entry['running'] = True
+                    s.cumulative_pnl = float(details.get('cumulative_pnl', 0))
+                    s.weeks_traded = int(details.get('weeks_traded', 0))
+                    s.trade_log = details.get('trade_log', [])
                     s.initialize()
                     s.monitor()
                 except Exception as e:
@@ -465,7 +478,7 @@ def _resume_db_strategies():
                      'user_id': user_id, 'profile_id': profile_id}
             ema_spread_strategies[sid] = entry
 
-            def _resume_ecs(sid=sid, entry=entry, details=details, user_id=user_id):
+            def _resume_ecs(sid=sid, entry=entry, details=details, user_id=user_id, legs=legs):
                 if not _setup_strategy_thread(entry):
                     entry['running'] = False
                     return
@@ -486,7 +499,24 @@ def _resume_db_strategies():
                     )
                     entry['strategy'] = s
                     entry['running'] = True
+                    s.cumulative_pnl = float(details.get('cumulative_pnl', 0))
+                    s.total_days_traded = int(details.get('total_days_traded', 0))
+                    s.trade_log = details.get('trade_log', [])
+                    s.legs = legs or []
                     s.initialize()
+                    # Resume monitoring for open legs
+                    if legs:
+                        import threading as _thr
+                        from config import get_contract_value
+                        cv = get_contract_value(details.get('asset', 'BTC'))
+                        sell_legs = [l for l in legs if l.get('side') == 'sell']
+                        buy_legs = [l for l in legs if l.get('side') == 'buy']
+                        premium = sum((l['entry_price'] for l in sell_legs), 0) - sum((l['entry_price'] for l in buy_legs), 0)
+                        premium *= int(details.get('lot_size', 100)) * cv
+                        day_num = s.total_days_traded or 1
+                        direction = 'bear_call' if any(l.get('type') == 'call' for l in legs) else 'bull_put'
+                        _thr.Thread(target=s._monitor_day_trade,
+                                    args=(legs, premium, day_num, direction), daemon=True).start()
                     s.monitor()
                 except Exception as e:
                     logger.error(f"[resume] EMA Spread {sid} error: {e}")
@@ -2182,8 +2212,12 @@ def run_oi_strategy(sid, params):
             _tick[0] += 1
             if _tick[0] % 6 == 0:
                 try:
-                    save_pnl_snapshot(uid, sid, round(s._pnl, 2))
-                    update_strategy_db(sid, pnl=round(s._pnl, 2), legs=s.legs)
+                    save_pnl_snapshot(uid, sid, round(s.pnl, 2))
+                    update_strategy_db(sid, pnl=round(s.pnl, 2), legs=s.legs,
+                        details={**params, 'profile_id': entry.get('profile_id'),
+                                 'cumulative_pnl': s.cumulative_pnl,
+                                 'total_days_traded': s.total_days_traded,
+                                 'trade_log': s.trade_log[-50:]})
                 except Exception:
                     pass
         _oi_mod.time.sleep = _snap_sleep
@@ -2316,7 +2350,27 @@ def run_weekly_dn(sid, params):
             entry['running'] = False
             entry['log_queue'].put("__STOPPED__")
             return
-        s.monitor()
+        # Wrap sleep to persist state periodically
+        import strategy.weekly_delta_neutral as _wdn_mod
+        _orig_sleep = _wdn_mod.time.sleep
+        _tick = [0]
+        def _snap_sleep(secs):
+            _orig_sleep(secs)
+            _tick[0] += 1
+            if _tick[0] % 6 == 0:
+                try:
+                    update_strategy_db(sid, pnl=round(s.pnl, 2),
+                        details={**params, 'profile_id': entry.get('profile_id'),
+                                 'cumulative_pnl': s.cumulative_pnl,
+                                 'weeks_traded': s.weeks_traded,
+                                 'trade_log': s.trade_log[-50:]})
+                except Exception:
+                    pass
+        _wdn_mod.time.sleep = _snap_sleep
+        try:
+            s.monitor()
+        finally:
+            _wdn_mod.time.sleep = _orig_sleep
     except Exception as e:
         entry['log_queue'].put(f"❌ Error: {e}")
     finally:
@@ -2441,10 +2495,14 @@ def run_ema_spread(sid, params):
         def _snap_sleep(secs):
             _orig_sleep(secs)
             _tick[0] += 1
-            if _tick[0] % 6 == 0 and s.legs:
+            if _tick[0] % 6 == 0:
                 try:
                     save_pnl_snapshot(uid, sid, round(s.pnl, 4))
-                    update_strategy_db(sid, pnl=round(s.pnl, 4), legs=s.legs)
+                    update_strategy_db(sid, pnl=round(s.pnl, 4), legs=s.legs,
+                        details={**params, 'profile_id': entry.get('profile_id'),
+                                 'cumulative_pnl': s.cumulative_pnl,
+                                 'total_days_traded': s.total_days_traded,
+                                 'trade_log': s.trade_log[-50:]})
                 except Exception:
                     pass
         _ecs_mod.time.sleep = _snap_sleep
