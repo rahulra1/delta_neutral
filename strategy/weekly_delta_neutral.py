@@ -42,10 +42,11 @@ class WeeklyDeltaNeutral(BaseStrategy):
         self.entry_minute = entry_minute
 
         self._running = False
-        self._current_strategy = None
+        self._active_strategies = []
+        self._active_threads = []
         self.weeks_traded = 0
         self.cumulative_pnl = 0.0
-        self.trade_log = []  # [{date, pnl, adjustments, exit_reason}]
+        self.trade_log = []
 
     def initialize(self):
         self._running = True
@@ -54,50 +55,47 @@ class WeeklyDeltaNeutral(BaseStrategy):
         return True
 
     def monitor(self):
-        """Main weekly loop."""
+        """Main weekly loop — spawns a new monitored trade each Friday."""
+        import threading
         while self._running:
             self._wait_for_next_friday()
             if not self._running:
                 break
 
-            print(f"\n[Weekly DN] ═══ Week {self.weeks_traded + 1} | {datetime.now().strftime('%Y-%m-%d %H:%M')} ═══")
+            self.weeks_traded += 1
+            week_num = self.weeks_traded
+            tag = f"[Weekly DN Week{week_num}]"
 
-            # Pick nearest expiry for this week's trade
+            print(f"\n{tag} ═══ {datetime.now(IST).strftime('%Y-%m-%d %H:%M')} IST ═══")
+
             expiry = self._get_expiry()
             if not expiry:
-                print("[Weekly DN] No expiry found — skipping this week")
+                print(f"{tag} No expiry found — skipping")
                 continue
 
-            # Run the delta neutral strategy
-            pnl, adjustments = self._run_weekly_trade(expiry)
-
-            self.cumulative_pnl += pnl
-            self.weeks_traded += 1
-            self.trade_log.append({
-                'date': datetime.now().strftime('%Y-%m-%d'),
-                'pnl': round(pnl, 2),
-                'adjustments': adjustments,
-            })
-            print(f"[Weekly DN] Week done | PnL: ${pnl:+.2f} | Cumulative: ${self.cumulative_pnl:+.2f} | Weeks: {self.weeks_traded}")
+            print(f"{tag} Expiry: {expiry}")
+            t = threading.Thread(target=self._run_weekly_trade_thread,
+                                 args=(expiry, week_num), daemon=True)
+            t.start()
+            self._active_threads.append(t)
 
     def close_all(self):
         self._running = False
-        if self._current_strategy:
-            self._current_strategy.running = False
-            self._current_strategy.close_all_positions()
-            self._current_strategy = None
+        for s in self._active_strategies:
+            s.running = False
+            s.close_all_positions()
+            s.ws_manager.stop()
+        self._active_strategies.clear()
 
     @property
     def pnl(self):
-        current = 0
-        if self._current_strategy:
-            current = self._current_strategy.total_pnl
+        current = sum(s.total_pnl for s in self._active_strategies)
         return self.cumulative_pnl + current
 
     # --- Internal ---
 
-    def _run_weekly_trade(self, expiry):
-        """Create and run a DeltaNeutralStrategy for this week. Returns (pnl, adjustments)."""
+    def _run_weekly_trade_thread(self, expiry, week_num):
+        """Run a single week's DN strategy in its own thread."""
         s = DeltaNeutralStrategy(
             asset=self.asset,
             expiry_date=expiry,
@@ -109,25 +107,34 @@ class WeeklyDeltaNeutral(BaseStrategy):
             max_adjustments=self.max_adjustments,
             monitoring_interval=self.monitoring_interval,
         )
-        self._current_strategy = s
+        self._active_strategies.append(s)
 
         if not s.initialize():
-            print("[Weekly DN] ✗ Strategy init failed this week")
+            print(f"[Weekly DN W{week_num}] ✗ Init failed")
             s.ws_manager.stop()
-            self._current_strategy = None
-            return 0, 0
+            self._active_strategies.remove(s)
+            return
 
         try:
             s.monitor_and_adjust()
         except Exception as e:
-            print(f"[Weekly DN] Error: {e}")
+            print(f"[Weekly DN W{week_num}] Error: {e}")
             s.close_all_positions()
 
         s.ws_manager.stop()
         pnl = s.cumulative_realized_pnl
         adj = s.adjustment_count
-        self._current_strategy = None
-        return pnl, adj
+        if s in self._active_strategies:
+            self._active_strategies.remove(s)
+
+        self.cumulative_pnl += pnl
+        self.trade_log.append({
+            'date': datetime.now(IST).strftime('%Y-%m-%d'),
+            'week': week_num,
+            'pnl': round(pnl, 2),
+            'adjustments': adj,
+        })
+        print(f"[Weekly DN W{week_num}] Done | PnL: ${pnl:+.2f} | Adj: {adj} | Cumulative: ${self.cumulative_pnl:+.2f}")
 
     def _get_expiry(self):
         """Get expiry approximately 3 weeks out (2 weekly expiries ahead)."""

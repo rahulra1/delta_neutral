@@ -71,116 +71,98 @@ class EMACreditSpread(BaseStrategy):
         return True
 
     def monitor(self):
-        """Main daily loop."""
+        """Main daily loop — spawns a new monitored trade each day."""
+        import threading
         while self._running:
-            self._wait_for_entry_time()
+            self._wait_for_next_entry()
             if not self._running:
                 break
 
-            print(f"\n[EMA Spread] ═══ Day {self.total_days_traded + 1} | {datetime.now().strftime('%Y-%m-%d %H:%M')} ═══")
-            success = self._take_daily_trade()
-            if not success:
-                print("[EMA Spread] No trade today — retrying tomorrow")
-                self._sleep_until_tomorrow()
+            self.total_days_traded += 1
+            day_num = self.total_days_traded
+            tag = f"[EMA Day{day_num}]"
+
+            print(f"\n{tag} ═══ {datetime.now(IST).strftime('%Y-%m-%d %H:%M')} IST ═══")
+            day_legs, day_premium, direction = self._open_daily_trade(tag)
+            if not day_legs:
+                print(f"{tag} No trade today")
                 continue
 
-            exit_reason = self._monitor_until_exit()
-
-            day_pnl = self._pnl
-            self.cumulative_pnl += day_pnl
-            self.total_days_traded += 1
-            self.trade_log.append({
-                'date': datetime.now().strftime('%Y-%m-%d'),
-                'pnl': round(day_pnl, 2),
-                'premium': round(self.net_premium, 4),
-                'exit_reason': exit_reason,
-                'direction': 'bear_call' if any(l['type'] == 'call' for l in self.legs) else 'bull_put',
-            })
-            print(f"[EMA Spread] Day done | PnL: ${day_pnl:+.4f} | Cumulative: ${self.cumulative_pnl:+.4f} | Days: {self.total_days_traded}")
-
-            self.legs = []
-            self.net_premium = 0.0
-            self._pnl = 0.0
-            self._sleep_until_tomorrow()
+            t = threading.Thread(target=self._monitor_day_trade,
+                                 args=(day_legs, day_premium, day_num, direction), daemon=True)
+            t.start()
 
     def close_all(self):
         self._running = False
-        self._close_legs()
+        for leg in list(self.legs):
+            close_side = 'buy' if leg['side'] == 'sell' else 'sell'
+            place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
+        self.legs.clear()
 
     @property
     def pnl(self):
-        return self.cumulative_pnl + self._pnl
+        from config import get_contract_value
+        cv = get_contract_value(self.asset)
+        open_pnl = 0.0
+        for leg in self.legs:
+            data = get_current_price(leg['product_id'], self.asset)
+            if data:
+                if leg['side'] == 'sell':
+                    open_pnl += (leg['entry_price'] - data['mark_price']) * leg['size'] * cv
+                else:
+                    open_pnl += (data['mark_price'] - leg['entry_price']) * leg['size'] * cv
+        return self.cumulative_pnl + open_pnl
 
     # --- Daily trade ---
 
-    def _take_daily_trade(self):
-        """Check EMA direction and place credit spread."""
-        # 1. Get daily candles and EMA14
+    def _open_daily_trade(self, tag):
+        """Check EMA, place spread. Returns (legs, premium, direction) or ([], 0, '')."""
         candles = get_candles(self.asset, '1d')
         if not candles or len(candles) < self.ema_period + 1:
-            print("[EMA Spread] ✗ Not enough candle data")
-            return False
+            print(f"{tag} ✗ Not enough candle data")
+            return [], 0, ''
 
         ema_values = calc_ema(candles, self.ema_period)
         if not ema_values:
-            print("[EMA Spread] ✗ EMA calculation failed")
-            return False
+            return [], 0, ''
 
         current_price = candles[-1]['c']
         ema_current = ema_values[-1]['value']
         bearish = current_price < ema_current
+        direction = 'bear_call' if bearish else 'bull_put'
+        print(f"{tag} Price: {current_price} | EMA{self.ema_period}: {ema_current} | {'BEARISH' if bearish else 'BULLISH'}")
 
-        direction = "BEARISH (price < EMA)" if bearish else "BULLISH (price > EMA)"
-        print(f"[EMA Spread] Price: {current_price} | EMA{self.ema_period}: {ema_current} | {direction}")
-
-        # 2. Get expiry ≥8 days out
         expiries = get_expiries(self.asset, min_days=self.min_expiry_days)
         if not expiries:
-            print("[EMA Spread] ✗ No expiry found")
-            return False
+            return [], 0, ''
         expiry = expiries[0]
-        print(f"[EMA Spread] Expiry: {expiry}")
+        print(f"{tag} Expiry: {expiry}")
 
-        # 3. Get option chain and find legs
         chain = get_option_chain(expiry, self.asset)
         if not chain:
-            print("[EMA Spread] ✗ Failed to fetch option chain")
-            return False
+            return [], 0, ''
 
         sell_call, sell_put = find_target_delta_options(chain, self.sell_delta, 0.05)
         buy_call, buy_put = find_target_delta_options(chain, self.buy_delta, 0.05)
 
         if bearish:
-            # Bear call spread: sell 20Δ call, buy 10Δ call
-            sell_leg, buy_leg = sell_call, buy_call
-            opt_type = 'call'
+            sell_leg, buy_leg, opt_type = sell_call, buy_call, 'call'
         else:
-            # Bull put spread: sell 20Δ put, buy 10Δ put
-            sell_leg, buy_leg = sell_put, buy_put
-            opt_type = 'put'
+            sell_leg, buy_leg, opt_type = sell_put, buy_put, 'put'
 
-        if not sell_leg or not buy_leg:
-            print(f"[EMA Spread] ✗ Could not find {opt_type} legs at required deltas")
-            return False
+        if not sell_leg or not buy_leg or sell_leg['product_id'] == buy_leg['product_id']:
+            return [], 0, ''
 
-        if sell_leg['product_id'] == buy_leg['product_id']:
-            print(f"[EMA Spread] ✗ Sell and buy legs are the same option — skipping")
-            return False
-
-        # 4. Place orders: sell first, then buy
         sell_result = place_order(sell_leg['product_id'], sell_leg['symbol'], self.lot_size, 'sell')
         if not sell_result:
-            print(f"[EMA Spread] ✗ Failed to sell {sell_leg['symbol']}")
-            return False
+            return [], 0, ''
 
         buy_result = place_order(buy_leg['product_id'], buy_leg['symbol'], self.lot_size, 'buy')
         if not buy_result:
-            # Rollback sell
             place_order(sell_leg['product_id'], sell_leg['symbol'], self.lot_size, 'buy')
-            print(f"[EMA Spread] ✗ Failed to buy hedge — rolled back sell")
-            return False
+            return [], 0, ''
 
-        self.legs = [
+        day_legs = [
             {'symbol': sell_leg['symbol'], 'product_id': sell_leg['product_id'],
              'side': 'sell', 'type': opt_type, 'delta': sell_leg['delta'],
              'strike': sell_leg['strike_price'], 'entry_price': sell_leg['mark_price'], 'size': self.lot_size},
@@ -189,76 +171,83 @@ class EMACreditSpread(BaseStrategy):
              'strike': buy_leg['strike_price'], 'entry_price': buy_leg['mark_price'], 'size': self.lot_size},
         ]
 
-        # Net premium = sold premium - bought premium
         from config import get_contract_value
         cv = get_contract_value(self.asset)
-        self.net_premium = (sell_leg['mark_price'] - buy_leg['mark_price']) * self.lot_size * cv
+        premium = (sell_leg['mark_price'] - buy_leg['mark_price']) * self.lot_size * cv
 
-        print(f"[EMA Spread] ✓ SELL {opt_type.upper()} {sell_leg['strike_price']} (Δ{sell_leg['delta']:.2f}) @ {sell_leg['mark_price']}")
-        print(f"[EMA Spread] ✓ BUY  {opt_type.upper()} {buy_leg['strike_price']} (Δ{buy_leg['delta']:.2f}) @ {buy_leg['mark_price']}")
-        print(f"[EMA Spread] Net premium: ${self.net_premium:.4f} | TP: ${self.net_premium*self.tp_pct:.4f} | SL: -${self.net_premium*self.sl_pct:.4f}")
-        return True
+        print(f"{tag} ✓ SELL {opt_type.upper()} {sell_leg['strike_price']} (Δ{sell_leg['delta']:.2f}) @ {sell_leg['mark_price']}")
+        print(f"{tag} ✓ BUY  {opt_type.upper()} {buy_leg['strike_price']} (Δ{buy_leg['delta']:.2f}) @ {buy_leg['mark_price']}")
+        print(f"{tag} Net premium: ${premium:.4f} | TP: ${premium*self.tp_pct:.4f} | SL: -${premium*self.sl_pct:.4f}")
 
-    def _monitor_until_exit(self):
-        """Monitor spread PnL until TP/SL."""
-        target = self.net_premium * self.tp_pct
-        sl = self.net_premium * self.sl_pct
+        self.legs.extend(day_legs)
+        return day_legs, premium, direction
+
+    def _monitor_day_trade(self, day_legs, premium, day_num, direction):
+        """Monitor a single day's spread in its own thread."""
+        from config import get_contract_value
+        cv = get_contract_value(self.asset)
+        target = premium * self.tp_pct
+        sl = premium * self.sl_pct
         cycle = 0
-        while self._running and self.legs:
+
+        while self._running:
             time.sleep(self.monitor_interval)
-            self._update_pnl()
             cycle += 1
 
+            pnl = 0.0
+            for leg in day_legs:
+                data = get_current_price(leg['product_id'], self.asset)
+                if data:
+                    if leg['side'] == 'sell':
+                        pnl += (leg['entry_price'] - data['mark_price']) * leg['size'] * cv
+                    else:
+                        pnl += (data['mark_price'] - leg['entry_price']) * leg['size'] * cv
+
             if cycle % 10 == 0:
-                print(f"[EMA Spread] PnL: ${self._pnl:+.4f} ({self._pnl/self.net_premium*100:+.1f}%) | TP: ${target:.4f} | SL: -${sl:.4f}")
+                print(f"[EMA D{day_num}] PnL: ${pnl:+.4f} ({pnl/premium*100:+.1f}%)")
 
-            if self._pnl >= target:
-                print(f"[EMA Spread] 🎯 TP hit: ${self._pnl:.4f} ({self._pnl/self.net_premium*100:.0f}%)")
-                self._close_legs()
-                return 'target'
-            if self._pnl <= -sl:
-                print(f"[EMA Spread] 🛑 SL hit: ${self._pnl:.4f} ({self._pnl/self.net_premium*100:.0f}%)")
-                self._close_legs()
-                return 'stoploss'
-        return 'manual_stop'
+            if pnl >= target:
+                print(f"[EMA D{day_num}] 🎯 TP hit: ${pnl:.4f}")
+                self._close_day_legs(day_legs)
+                self._record_day(day_num, pnl, premium, 'target', direction)
+                return
+            if pnl <= -sl:
+                print(f"[EMA D{day_num}] 🛑 SL hit: ${pnl:.4f}")
+                self._close_day_legs(day_legs)
+                self._record_day(day_num, pnl, premium, 'stoploss', direction)
+                return
 
-    def _close_legs(self):
-        for leg in self.legs:
+    def _close_day_legs(self, day_legs):
+        for leg in day_legs:
             close_side = 'buy' if leg['side'] == 'sell' else 'sell'
             place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
-        self.legs = []
+            if leg in self.legs:
+                self.legs.remove(leg)
 
-    def _update_pnl(self):
-        from config import get_contract_value
-        cv = get_contract_value(self.asset)
-        total = 0.0
-        for leg in self.legs:
-            data = get_current_price(leg['product_id'], self.asset)
-            if data:
-                current = data['mark_price']
-                if leg['side'] == 'sell':
-                    total += (leg['entry_price'] - current) * leg['size'] * cv
-                else:
-                    total += (current - leg['entry_price']) * leg['size'] * cv
-        self._pnl = total
+    def _record_day(self, day_num, pnl, premium, exit_reason, direction):
+        self.cumulative_pnl += pnl
+        self.trade_log.append({
+            'date': datetime.now(IST).strftime('%Y-%m-%d'),
+            'day': day_num,
+            'pnl': round(pnl, 4),
+            'premium': round(premium, 4),
+            'exit_reason': exit_reason,
+            'direction': direction,
+        })
+        print(f"[EMA D{day_num}] Closed | PnL: ${pnl:+.4f} | Cumulative: ${self.cumulative_pnl:+.4f}")
 
     # --- Timing ---
 
-    def _wait_for_entry_time(self):
+    def _wait_for_next_entry(self):
         now = datetime.now(IST)
-        entry_time = now.replace(hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
-        if now >= entry_time:
-            return  # already past entry time, trade now
-        wait = (entry_time - now).total_seconds()
-        print(f"[EMA Spread] Waiting until {entry_time.strftime('%H:%M')} IST ({wait/60:.0f}min)...")
-        self._interruptible_sleep(wait)
-
-    def _sleep_until_tomorrow(self):
-        now = datetime.now(IST)
-        tomorrow = (now + timedelta(days=1)).replace(
-            hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
-        wait = (tomorrow - now).total_seconds()
-        print(f"[EMA Spread] Next trade: {tomorrow.strftime('%Y-%m-%d %H:%M')} IST ({wait/3600:.1f}h)")
+        entry_today = now.replace(hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
+        if now < entry_today:
+            target = entry_today
+        else:
+            target = entry_today + timedelta(days=1)
+        wait = (target - now).total_seconds()
+        if wait > 60:
+            print(f"[EMA Spread] Next trade at {target.strftime('%Y-%m-%d %H:%M')} IST ({wait/3600:.1f}h)")
         self._interruptible_sleep(wait)
 
     def _interruptible_sleep(self, seconds):

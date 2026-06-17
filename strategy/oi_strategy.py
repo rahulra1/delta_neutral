@@ -59,6 +59,7 @@ class OIStrategy(BaseStrategy):
         self.total_days_traded = 0
         self.cumulative_pnl = 0.0
         self.trade_log = []  # [{date, pnl, legs, exit_reason}]
+        self._active_threads = []
 
     def initialize(self):
         """Start the daily loop."""
@@ -68,155 +69,180 @@ class OIStrategy(BaseStrategy):
         return True
 
     def monitor(self):
-        """Main daily loop — waits for entry time, trades, monitors, repeats."""
+        """Main daily loop — spawns a new monitored trade each day at entry time."""
+        import threading
         while self._running:
-            # Wait until entry hour
-            self._wait_for_entry_time()
+            self._wait_for_next_entry()
             if not self._running:
                 break
 
-            # Take today's trade
-            print(f"\n[OI] ═══ Day {self.total_days_traded + 1} | {datetime.now().strftime('%Y-%m-%d %H:%M')} ═══")
-            success = self._take_daily_trade()
-            if not success:
-                print("[OI] No trade today — retrying tomorrow")
-                self._sleep_until_tomorrow()
+            self.total_days_traded += 1
+            day_num = self.total_days_traded
+            tag = f"[OI Day{day_num}]"
+
+            print(f"\n{tag} ═══ {datetime.now(IST).strftime('%Y-%m-%d %H:%M')} IST ═══")
+
+            day_legs, day_premium = self._open_daily_trade(tag)
+            if not day_legs:
+                print(f"{tag} No trade today")
                 continue
 
-            # Monitor until exit
-            exit_reason = self._monitor_until_exit()
+            t = threading.Thread(target=self._monitor_day_trade,
+                                 args=(day_legs, day_premium, day_num), daemon=True)
+            t.start()
+            self._active_threads.append(t)
 
-            # Record
-            day_pnl = self._pnl
-            self.cumulative_pnl += day_pnl
-            self.total_days_traded += 1
-            self.trade_log.append({
-                'date': datetime.now().strftime('%Y-%m-%d'),
-                'pnl': round(day_pnl, 2),
-                'premium': round(self.max_premium, 2),
-                'exit_reason': exit_reason,
-            })
-            print(f"[OI] Day done | PnL: ${day_pnl:+.2f} | Cumulative: ${self.cumulative_pnl:+.2f} | Days: {self.total_days_traded}")
-
-            # Reset for next day
-            self.legs = []
-            self.max_premium = 0.0
-            self._pnl = 0.0
-
-            # Sleep until next day's entry
-            self._sleep_until_tomorrow()
-
-    def close_all(self):
-        """Close all open legs."""
-        self._running = False
-        for leg in self.legs:
-            result = place_order(leg['product_id'], leg['symbol'], leg['size'], 'buy')
-            if result:
-                print(f"[OI] Closed {leg['type']} @ strike {leg['strike']}")
-            else:
-                logger.warning(f"Failed to close {leg['symbol']}")
-        self.legs.clear()
-
-    @property
-    def pnl(self):
-        return self.cumulative_pnl + self._pnl
-
-    # --- Daily trade logic ---
-
-    def _take_daily_trade(self):
-        """Analyze OI and place today's trade. Returns True on success."""
+    def _open_daily_trade(self, tag):
+        """Analyze OI and place today's trade. Returns (legs, premium) or ([], 0)."""
         expiries = get_expiries(self.asset, min_days=1)
         if not expiries:
-            logger.error("No expiries found")
-            return False
+            return [], 0
         self.expiry = expiries[0]
 
         chain, spot, _ = get_option_chain_full(self.expiry, self.asset)
         if not chain or not spot:
-            logger.error("Failed to fetch option chain")
-            return False
+            return [], 0
         self.spot_price = spot
         self.max_call_oi_strike, self.max_put_oi_strike = self._find_max_oi(chain)
 
         if not self.max_call_oi_strike or not self.max_put_oi_strike:
-            logger.error("Could not determine max OI strikes")
-            return False
+            return [], 0
 
-        print(f"[OI] Spot: {spot:.2f} | Max Call OI: {self.max_call_oi_strike} (resistance) | Max Put OI: {self.max_put_oi_strike} (support)")
+        print(f"{tag} Spot: {spot:.2f} | Max Call OI: {self.max_call_oi_strike} (resistance) | Max Put OI: {self.max_put_oi_strike} (support)")
 
         call_dist = abs(spot - float(self.max_call_oi_strike)) / spot
         put_dist = abs(spot - float(self.max_put_oi_strike)) / spot
 
-        trades_placed = False
+        day_legs = []
         if put_dist <= PROXIMITY_PCT and call_dist > PROXIMITY_PCT:
-            trades_placed = self._sell_option(chain, 'put', self.max_put_oi_strike)
+            day_legs = self._sell_option_return(chain, 'put', self.max_put_oi_strike, tag)
         elif call_dist <= PROXIMITY_PCT and put_dist > PROXIMITY_PCT:
-            trades_placed = self._sell_option(chain, 'call', self.max_call_oi_strike)
+            day_legs = self._sell_option_return(chain, 'call', self.max_call_oi_strike, tag)
         else:
-            t1 = self._sell_option(chain, 'call', self.max_call_oi_strike)
-            t2 = self._sell_option(chain, 'put', self.max_put_oi_strike)
-            trades_placed = t1 or t2
+            l1 = self._sell_option_return(chain, 'call', self.max_call_oi_strike, tag)
+            l2 = self._sell_option_return(chain, 'put', self.max_put_oi_strike, tag)
+            day_legs = l1 + l2
 
-        if not trades_placed:
-            return False
+        if not day_legs:
+            return [], 0
 
         from config import get_contract_value
         cv = get_contract_value(self.asset)
-        self.max_premium = sum(leg['entry_price'] * leg['size'] * cv for leg in self.legs)
-        print(f"[OI] Premium: ${self.max_premium:.2f} | Target: +${self.max_premium*self.target_pct:.2f} | SL: -${self.max_premium*self.stop_loss_pct:.2f}")
-        return True
+        premium = sum(l['entry_price'] * l['size'] * cv for l in day_legs)
+        print(f"{tag} Premium: ${premium:.2f} | TP: +${premium*self.target_pct:.2f} | SL: -${premium*self.stop_loss_pct:.2f}")
 
-    def _monitor_until_exit(self):
-        """Monitor current trade until target/SL. Returns exit reason string."""
-        target = self.max_premium * self.target_pct
-        sl = self.max_premium * self.stop_loss_pct
+        # Add to shared legs list for visibility
+        self.legs.extend(day_legs)
+        return day_legs, premium
+
+    def _monitor_day_trade(self, day_legs, premium, day_num):
+        """Monitor a single day's trade until TP/SL. Runs in its own thread."""
+        from config import set_thread_credentials, get_contract_value
+        # Inherit credentials if needed (thread-local)
+        target = premium * self.target_pct
+        sl = premium * self.stop_loss_pct
+        cv = get_contract_value(self.asset)
         cycle = 0
-        while self._running and self.legs:
+
+        while self._running:
             time.sleep(self.monitor_interval)
-            self._update_pnl()
             cycle += 1
 
+            # Compute PnL for this day's legs
+            pnl = 0.0
+            for leg in day_legs:
+                data = get_current_price(leg['product_id'], self.asset)
+                if data:
+                    pnl += (leg['entry_price'] - data['mark_price']) * leg['size'] * cv
+
             if cycle % 10 == 0:
-                print(f"[OI] PnL: ${self._pnl:+.2f} ({self._pnl/self.max_premium*100:+.1f}%) | Legs: {len(self.legs)}")
+                print(f"[OI D{day_num}] PnL: ${pnl:+.2f} ({pnl/premium*100:+.1f}%)")
 
-            if self._pnl >= target:
-                print(f"[OI] 🎯 Target hit: ${self._pnl:.2f}")
-                self._close_legs()
-                return 'target'
-            if self._pnl <= -sl:
-                print(f"[OI] 🛑 Stop loss hit: ${self._pnl:.2f}")
-                self._close_legs()
-                return 'stoploss'
+            if pnl >= target:
+                print(f"[OI D{day_num}] 🎯 Target hit: ${pnl:.2f}")
+                self._close_day_legs(day_legs)
+                self._record_day(day_num, pnl, premium, 'target')
+                return
+            if pnl <= -sl:
+                print(f"[OI D{day_num}] 🛑 SL hit: ${pnl:.2f}")
+                self._close_day_legs(day_legs)
+                self._record_day(day_num, pnl, premium, 'stoploss')
+                return
 
-            # OI shift check every 5 min worth of cycles
-            if cycle % max(1, 300 // self.monitor_interval) == 0:
-                self._check_oi_shift()
+    def _close_day_legs(self, day_legs):
+        """Close legs for a specific day's trade."""
+        for leg in day_legs:
+            place_order(leg['product_id'], leg['symbol'], leg['size'], 'buy')
+            # Remove from shared legs list
+            if leg in self.legs:
+                self.legs.remove(leg)
 
-        return 'manual_stop'
+    def _record_day(self, day_num, pnl, premium, exit_reason):
+        self.cumulative_pnl += pnl
+        self.trade_log.append({
+            'date': datetime.now(IST).strftime('%Y-%m-%d'),
+            'day': day_num,
+            'pnl': round(pnl, 2),
+            'premium': round(premium, 2),
+            'exit_reason': exit_reason,
+        })
+        print(f"[OI D{day_num}] Closed | PnL: ${pnl:+.2f} | Cumulative: ${self.cumulative_pnl:+.2f}")
 
-    def _close_legs(self):
-        """Close legs without stopping the daily loop."""
-        for leg in self.legs:
+    def _sell_option_return(self, chain, opt_type, strike, tag='[OI]'):
+        """Sell an option and return the leg dict (or empty list)."""
+        for row in chain:
+            if row['strike'] != strike:
+                continue
+            opt = row.get(opt_type)
+            if not opt:
+                return []
+            result = place_order(opt['product_id'], opt['symbol'], self.lot_size, 'sell')
+            if result:
+                leg = {
+                    'symbol': opt['symbol'],
+                    'product_id': opt['product_id'],
+                    'side': 'sell',
+                    'strike': strike,
+                    'type': opt_type,
+                    'entry_price': opt['mark_price'],
+                    'size': self.lot_size,
+                }
+                print(f"{tag} ✓ SOLD {opt_type.upper()} @ strike {strike} | Premium: {opt['mark_price']}")
+                return [leg]
+            return []
+        return []
+
+    def close_all(self):
+        """Close all open legs across all day trades."""
+        self._running = False
+        for leg in list(self.legs):
             place_order(leg['product_id'], leg['symbol'], leg['size'], 'buy')
         self.legs.clear()
 
-    def _wait_for_entry_time(self):
-        """Sleep until today's entry time, or trade immediately on first run if past."""
-        now = datetime.now(IST)
-        entry_time = now.replace(hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
-        if now >= entry_time:
-            return  # already past entry time, trade now
-        wait = (entry_time - now).total_seconds()
-        print(f"[OI] Waiting until {entry_time.strftime('%H:%M')} IST ({wait/60:.0f}min)...")
-        self._interruptible_sleep(wait)
+    @property
+    def pnl(self):
+        from config import get_contract_value
+        cv = get_contract_value(self.asset)
+        open_pnl = 0.0
+        for leg in self.legs:
+            data = get_current_price(leg['product_id'], self.asset)
+            if data:
+                open_pnl += (leg['entry_price'] - data['mark_price']) * leg['size'] * cv
+        return self.cumulative_pnl + open_pnl
 
-    def _sleep_until_tomorrow(self):
-        """Sleep until tomorrow's entry time."""
+    # --- Daily trade logic ---
+
+    def _wait_for_next_entry(self):
+        """Sleep until the next occurrence of entry time (today if not yet passed, else tomorrow)."""
         now = datetime.now(IST)
-        tomorrow_entry = (now + timedelta(days=1)).replace(
-            hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
-        wait = (tomorrow_entry - now).total_seconds()
-        print(f"[OI] Next trade at {tomorrow_entry.strftime('%Y-%m-%d %H:%M')} IST ({wait/3600:.1f}h)")
+        entry_today = now.replace(hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
+        if now < entry_today:
+            target = entry_today
+        else:
+            target = entry_today + timedelta(days=1)
+        wait = (target - now).total_seconds()
+        if wait > 60:
+            print(f"[OI] Next trade at {target.strftime('%Y-%m-%d %H:%M')} IST ({wait/3600:.1f}h)")
         self._interruptible_sleep(wait)
 
     def _interruptible_sleep(self, seconds):
@@ -233,72 +259,14 @@ class OIStrategy(BaseStrategy):
         spot = self.spot_price or 0
         for row in chain:
             strike_val = float(row['strike'])
-            # Calls: only OTM (strike >= spot)
             if row.get('call') and strike_val >= spot:
                 oi = float(row['call'].get('oi', 0))
                 if oi > max_call_oi:
                     max_call_oi = oi
                     call_strike = row['strike']
-            # Puts: only OTM (strike <= spot)
             if row.get('put') and strike_val <= spot:
                 oi = float(row['put'].get('oi', 0))
                 if oi > max_put_oi:
                     max_put_oi = oi
                     put_strike = row['strike']
         return call_strike, put_strike
-
-    def _sell_option(self, chain, opt_type, strike):
-        for row in chain:
-            if row['strike'] != strike:
-                continue
-            opt = row.get(opt_type)
-            if not opt:
-                return False
-            result = place_order(opt['product_id'], opt['symbol'], self.lot_size, 'sell')
-            if result:
-                self.legs.append({
-                    'symbol': opt['symbol'],
-                    'product_id': opt['product_id'],
-                    'side': 'sell',
-                    'strike': strike,
-                    'type': opt_type,
-                    'entry_price': opt['mark_price'],
-                    'size': self.lot_size,
-                })
-                print(f"[OI] ✓ SOLD {opt_type.upper()} @ strike {strike} | Premium: {opt['mark_price']}")
-                return True
-            return False
-        return False
-
-    def _update_pnl(self):
-        from config import get_contract_value
-        cv = get_contract_value(self.asset)
-        total = 0.0
-        for leg in self.legs:
-            data = get_current_price(leg['product_id'], self.asset)
-            if data:
-                total += (leg['entry_price'] - data['mark_price']) * leg['size'] * cv
-        self._pnl = total
-
-    def _check_oi_shift(self):
-        chain, spot, _ = get_option_chain_full(self.expiry, self.asset)
-        if not chain:
-            return
-        new_call, new_put = self._find_max_oi(chain)
-        if not new_call or not new_put:
-            return
-        shifted = False
-        if new_call != self.max_call_oi_strike:
-            if abs(float(new_call) - float(self.max_call_oi_strike)) / float(self.max_call_oi_strike) > OI_SHIFT_THRESHOLD:
-                print(f"[OI] ⚠ Call OI shifted: {self.max_call_oi_strike} → {new_call}")
-                self.max_call_oi_strike = new_call
-                shifted = True
-        if new_put != self.max_put_oi_strike:
-            if abs(float(new_put) - float(self.max_put_oi_strike)) / float(self.max_put_oi_strike) > OI_SHIFT_THRESHOLD:
-                print(f"[OI] ⚠ Put OI shifted: {self.max_put_oi_strike} → {new_put}")
-                self.max_put_oi_strike = new_put
-                shifted = True
-        if shifted:
-            print("[OI] OI structure shifted — closing and re-entering")
-            self._close_legs()
-            self._take_daily_trade()
