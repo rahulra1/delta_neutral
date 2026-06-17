@@ -404,6 +404,8 @@ def _resume_db_strategies():
                     s.trade_log = details.get('trade_log', [])
                     s._running = True
                     entry['strategy'] = s
+                    s._log_queue = entry['log_queue']
+                    s._log_history = entry['log_history']
                     entry['running'] = True
                     # Resume monitoring for any open legs
                     if legs:
@@ -498,6 +500,8 @@ def _resume_db_strategies():
                         min_expiry_days=int(details.get('min_expiry_days', 8)),
                     )
                     entry['strategy'] = s
+                    s._log_queue = entry['log_queue']
+                    s._log_history = entry['log_history']
                     entry['running'] = True
                     s.cumulative_pnl = float(details.get('cumulative_pnl', 0))
                     s.total_days_traded = int(details.get('total_days_traded', 0))
@@ -2183,6 +2187,8 @@ def run_oi_strategy(sid, params):
             entry_hour=int(params.get('entry_hour', 18)),
             entry_minute=int(params.get('entry_minute', 30)),
         )
+        s._log_queue = entry['log_queue']
+        s._log_history = entry['log_history']
         entry['strategy'] = s
         entry['running'] = True
         record_start(sid, params, user_id=uid)
@@ -2479,6 +2485,8 @@ def run_ema_spread(sid, params):
             entry_minute=int(params.get('entry_minute', 30)),
             min_expiry_days=int(params.get('min_expiry_days', 8)),
         )
+        s._log_queue = entry['log_queue']
+        s._log_history = entry['log_history']
         entry['strategy'] = s
         entry['running'] = True
         record_start(sid, params, user_id=uid)

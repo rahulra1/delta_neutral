@@ -185,6 +185,11 @@ class EMACreditSpread(BaseStrategy):
     def _monitor_day_trade(self, day_legs, premium, day_num, direction):
         """Monitor a single day's spread in its own thread."""
         from config import get_contract_value
+        # Route logs to the strategy's log queue
+        if hasattr(self, '_log_queue') and self._log_queue:
+            from app import LogCapture
+            LogCapture._local.log_queue = self._log_queue
+            LogCapture._local.log_history = self._log_history
         cv = get_contract_value(self.asset)
         target = premium * self.tp_pct
         sl = premium * self.sl_pct

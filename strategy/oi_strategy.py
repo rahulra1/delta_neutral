@@ -138,7 +138,11 @@ class OIStrategy(BaseStrategy):
     def _monitor_day_trade(self, day_legs, premium, day_num):
         """Monitor a single day's trade until TP/SL. Runs in its own thread."""
         from config import set_thread_credentials, get_contract_value
-        # Inherit credentials if needed (thread-local)
+        # Route logs to the strategy's log queue
+        if hasattr(self, '_log_queue') and self._log_queue:
+            from app import LogCapture
+            LogCapture._local.log_queue = self._log_queue
+            LogCapture._local.log_history = self._log_history
         target = premium * self.target_pct
         sl = premium * self.stop_loss_pct
         cv = get_contract_value(self.asset)
