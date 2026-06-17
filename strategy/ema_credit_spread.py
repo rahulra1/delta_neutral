@@ -32,7 +32,7 @@ EMA_PERIOD = 14
 TP_PCT = 0.90
 SL_PCT = 1.00
 LOT_SIZE = 100
-MONITOR_INTERVAL = 30
+MONITOR_INTERVAL = 5
 MIN_EXPIRY_DAYS = 8
 
 
@@ -200,16 +200,19 @@ class EMACreditSpread(BaseStrategy):
             cycle += 1
 
             pnl = 0.0
+            leg_details = []
             for leg in day_legs:
                 data = get_current_price(leg['product_id'], self.asset)
                 if data:
                     if leg['side'] == 'sell':
-                        pnl += (leg['entry_price'] - data['mark_price']) * leg['size'] * cv
+                        leg_pnl = (leg['entry_price'] - data['mark_price']) * leg['size'] * cv
                     else:
-                        pnl += (data['mark_price'] - leg['entry_price']) * leg['size'] * cv
+                        leg_pnl = (data['mark_price'] - leg['entry_price']) * leg['size'] * cv
+                    pnl += leg_pnl
+                    leg_details.append(f"{leg['side'].upper()} {leg['strike']}: ${leg_pnl:+.4f}")
 
-            if cycle % 3 == 0:
-                print(f"[EMA Day{day_num}] PnL: ${pnl:+.4f} ({pnl/premium*100:+.1f}%)")
+            legs_str = ' | '.join(leg_details) if leg_details else ''
+            print(f"[EMA Day{day_num}] PnL: ${pnl:+.4f} ({pnl/premium*100:+.1f}%) | Cum: ${self.cumulative_pnl:+.4f} | {legs_str}")
 
             if pnl >= target:
                 print(f"[EMA Day{day_num}] 🎯 TP hit: ${pnl:.4f}")

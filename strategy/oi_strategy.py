@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 
 PROXIMITY_PCT = 0.02
-MONITORING_INTERVAL = 30
+MONITORING_INTERVAL = 5
 TARGET_PCT = 0.50
 STOP_LOSS_PCT = 0.50
 LOT_SIZE = 100
@@ -154,13 +154,16 @@ class OIStrategy(BaseStrategy):
 
             # Compute PnL for this day's legs
             pnl = 0.0
+            leg_details = []
             for leg in day_legs:
                 data = get_current_price(leg['product_id'], self.asset)
                 if data:
-                    pnl += (leg['entry_price'] - data['mark_price']) * leg['size'] * cv
+                    leg_pnl = (leg['entry_price'] - data['mark_price']) * leg['size'] * cv
+                    pnl += leg_pnl
+                    leg_details.append(f"{leg['type'].upper()} {leg['strike']}: ${leg_pnl:+.2f}")
 
-            if cycle % 3 == 0:
-                print(f"[OI Day{day_num}] PnL: ${pnl:+.2f} ({pnl/premium*100:+.1f}%)")
+            legs_str = ' | '.join(leg_details) if leg_details else ''
+            print(f"[OI Day{day_num}] PnL: ${pnl:+.2f} ({pnl/premium*100:+.1f}%) | Cum: ${self.cumulative_pnl:+.2f} | {legs_str}")
 
             if pnl >= target:
                 print(f"[OI Day{day_num}] 🎯 Target hit: ${pnl:.2f}")

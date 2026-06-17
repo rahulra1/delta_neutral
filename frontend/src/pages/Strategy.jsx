@@ -122,7 +122,7 @@ const OI_FIELDS = [
   { key: 'lot_size', label: 'Lot Size', type: 'number', default: 100 },
   { key: 'target_pct', label: 'Target Profit (% of premium)', type: 'number', default: 50 },
   { key: 'stop_loss_pct', label: 'Stop Loss (% of premium)', type: 'number', default: 50 },
-  { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 30 },
+  { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 5 },
   { key: 'entry_hour', label: 'Entry Hour (24h)', type: 'number', default: 18 },
   { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 30 },
 ];
@@ -147,7 +147,7 @@ const EMA_SPREAD_FIELDS = [
   { key: 'tp_pct', label: 'Target Profit (% of premium)', type: 'number', default: 90 },
   { key: 'sl_pct', label: 'Stop Loss (% of premium)', type: 'number', default: 100 },
   { key: 'min_expiry_days', label: 'Min Expiry Days', type: 'number', default: 8 },
-  { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 30 },
+  { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 5 },
   { key: 'entry_hour', label: 'Entry Hour (24h)', type: 'number', default: 18 },
   { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 30 },
 ];
