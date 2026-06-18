@@ -184,7 +184,10 @@ class EMACreditSpread(BaseStrategy):
 
     def _monitor_day_trade(self, day_legs, premium, day_num, direction):
         """Monitor a single day's spread in its own thread."""
-        from config import get_contract_value
+        from config import get_contract_value, set_thread_credentials
+        # Set thread-local credentials for API calls
+        if hasattr(self, '_api_key') and self._api_key:
+            set_thread_credentials(self._api_key, self._api_secret, self._broker)
         # Route logs to the strategy's log queue
         if hasattr(self, '_log_queue') and self._log_queue:
             from app import LogCapture

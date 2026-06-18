@@ -406,6 +406,10 @@ def _resume_db_strategies():
                     entry['strategy'] = s
                     s._log_queue = entry['log_queue']
                     s._log_history = entry['log_history']
+                    import config as _cfg
+                    s._api_key = _cfg.get_api_key()
+                    s._api_secret = _cfg.get_api_secret()
+                    s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
                     entry['running'] = True
                     # Resume monitoring for any open legs
                     if legs:
@@ -502,6 +506,10 @@ def _resume_db_strategies():
                     entry['strategy'] = s
                     s._log_queue = entry['log_queue']
                     s._log_history = entry['log_history']
+                    import config as _cfg
+                    s._api_key = _cfg.get_api_key()
+                    s._api_secret = _cfg.get_api_secret()
+                    s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
                     entry['running'] = True
                     s.cumulative_pnl = float(details.get('cumulative_pnl', 0))
                     s.total_days_traded = int(details.get('total_days_traded', 0))
@@ -1254,6 +1262,7 @@ def api_close_strategy(sid):
             profile_id = all_tracked[sid]['details']['profile_id']
 
     api_key, api_secret, _, broker = get_profile_creds(profile_id)
+    logger.info(f"[close] sid={sid} profile_id={profile_id} broker={broker}")
     if api_key:
         set_thread_credentials(api_key, api_secret, broker)
 
@@ -2189,6 +2198,10 @@ def run_oi_strategy(sid, params):
         )
         s._log_queue = entry['log_queue']
         s._log_history = entry['log_history']
+        import config as _cfg
+        s._api_key = _cfg.get_api_key()
+        s._api_secret = _cfg.get_api_secret()
+        s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
         entry['strategy'] = s
         entry['running'] = True
         record_start(sid, params, user_id=uid)
@@ -2487,6 +2500,10 @@ def run_ema_spread(sid, params):
         )
         s._log_queue = entry['log_queue']
         s._log_history = entry['log_history']
+        import config as _cfg
+        s._api_key = _cfg.get_api_key()
+        s._api_secret = _cfg.get_api_secret()
+        s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
         entry['strategy'] = s
         entry['running'] = True
         record_start(sid, params, user_id=uid)
