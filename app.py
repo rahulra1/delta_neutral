@@ -1621,6 +1621,19 @@ def api_strategy_detail(sid):
                 live_legs.append({'symbol': leg['symbol'], 'type': leg['type'], 'strike': leg['strike'],
                     'side': leg['side'], 'size': leg['size'], 'entry_price': round(leg['entry_price'], 4),
                     'current_mark': 0, 'current_pnl': 0, 'delta': leg.get('delta', 0)})
+        elif sid in strangle_strategies and strangle_strategies[sid].get('strategy'):
+            st = strangle_strategies[sid]
+            strat = st['strategy']
+            entry['pnl'] = round(strat.pnl, 2)
+            entry['cumulative_pnl'] = round(strat.cumulative_pnl, 2)
+            entry['running'] = st.get('running', False)
+            logs = st.get('log_history', [])
+            entry['trade_log'] = strat.trade_log[-20:]
+            entry['days_traded'] = strat.total_days_traded
+            for leg in strat.legs:
+                live_legs.append({'symbol': leg['symbol'], 'type': leg['type'], 'strike': leg['strike'],
+                    'side': 'sell', 'size': leg['size'], 'entry_price': round(leg['entry_price'], 2),
+                    'current_mark': 0, 'current_pnl': 0, 'stopped': leg.get('stopped', False)})
         elif sid in _futures_traders:
             trader = _futures_traders[sid]['trader']
             entry['running'] = trader.running
