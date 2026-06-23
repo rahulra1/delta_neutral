@@ -2503,7 +2503,7 @@ def strangle_start():
         return jsonify(error="No API profile selected"), 400
     sid = str(uuid.uuid4())[:8]
     entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [],
-             'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+             'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     strangle_strategies[sid] = entry
     track_strategy(sid, 'Daily Strangle', f"{params.get('asset','BTC')} 0DTE Strangle", current_user_id(), details={**params, 'profile_id': profile_id})
     entry['thread'] = threading.Thread(target=run_strangle_strategy, args=(sid, params), daemon=True)
@@ -2555,9 +2555,11 @@ def strangle_status(sid):
     e = strangle_strategies.get(sid)
     if not e or e.get('user_id') != current_user_id():
         return jsonify(running=False)
-    s = e.get('strategy')
-    if not e['running'] or not s:
+    if not e['running']:
         return jsonify(running=False)
+    s = e.get('strategy')
+    if not s:
+        return jsonify(running=True, total_pnl=0, cumulative_pnl=0, days_traded=0, trade_log=[], legs=[])
     return jsonify(
         running=True,
         total_pnl=round(s.pnl, 2),

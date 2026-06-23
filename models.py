@@ -114,6 +114,11 @@ def init_db():
     conn.execute('CREATE INDEX IF NOT EXISTS idx_pnl_snap_sid ON pnl_snapshots(sid, ts)')
     # Auto-promote first user to admin
     conn.execute('UPDATE users SET is_admin = 1 WHERE id = 1')
+    # Settings key-value store
+    conn.execute('''CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )''')
     conn.commit()
     conn.close()
 
@@ -391,3 +396,17 @@ def get_pnl_snapshots(user_id, sid=None, since=None):
     finally:
         conn.close()
     return [dict(r) for r in rows]
+
+
+def get_setting(key, default=None):
+    conn = get_db()
+    row = conn.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
+    conn.close()
+    return row['value'] if row else default
+
+
+def set_setting(key, value):
+    conn = get_db()
+    conn.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, value))
+    conn.commit()
+    conn.close()
