@@ -47,6 +47,7 @@ active_monitors = {}
 iv_crush_strategies = {}
 call_ratio_strategies = {}
 oi_strategies = {}
+strangle_strategies = {}
 weekly_dn_strategies = {}
 ema_spread_strategies = {}
 _futures_traders = {}
@@ -543,7 +544,63 @@ def _resume_db_strategies():
             t.start()
             logger.info(f"[resume] Resumed EMA Spread {sid}")
 
-        # 10. Everything else — use TrackedStrategy
+        # 10. Resume Daily Strangle
+        elif source == 'Daily Strangle':
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+                     'log_history': [], 'running': False, 'params': details,
+                     'user_id': user_id, 'profile_id': profile_id}
+            strangle_strategies[sid] = entry
+
+            def _resume_strangle(sid=sid, entry=entry, details=details, user_id=user_id, legs=legs):
+                if not _setup_strategy_thread(entry):
+                    entry['running'] = False
+                    return
+                try:
+                    from strategy.daily_strangle import DailyStrangle
+                    s = DailyStrangle(
+                        asset=details.get('asset', 'BTC'),
+                        lot_size=int(details.get('lot_size', 100)),
+                        target_premium=float(details.get('target_premium', 100)),
+                        sl_pct=float(details.get('sl_pct', 105)) / 100,
+                        entry_hour=int(details.get('entry_hour', 9)),
+                        entry_minute=int(details.get('entry_minute', 0)),
+                        exit_hour=int(details.get('exit_hour', 17)),
+                        exit_minute=int(details.get('exit_minute', 15)),
+                        monitor_interval=int(details.get('monitoring_interval', 10)),
+                    )
+                    entry['strategy'] = s
+                    s._log_queue = entry['log_queue']
+                    s._log_history = entry['log_history']
+                    import config as _cfg
+                    s._api_key = _cfg.get_api_key()
+                    s._api_secret = _cfg.get_api_secret()
+                    s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
+                    entry['running'] = True
+                    s.cumulative_pnl = float(details.get('cumulative_pnl', 0))
+                    s.total_days_traded = int(details.get('total_days_traded', 0))
+                    s.trade_log = details.get('trade_log', [])
+                    s.legs = legs or []
+                    s.initialize()
+                    if legs:
+                        import threading as _thr
+                        day_num = s.total_days_traded or 1
+                        _thr.Thread(target=s._monitor_day,
+                                    args=(legs, day_num), daemon=True).start()
+                    s.monitor()
+                except Exception as e:
+                    logger.error(f"[resume] Daily Strangle {sid} error: {e}")
+                finally:
+                    pnl = round(getattr(entry.get('strategy'), 'cumulative_pnl', 0), 2)
+                    record_end(sid, pnl, 0)
+                    update_tracked(sid, status='completed', pnl=pnl)
+                    _teardown_strategy_thread(entry)
+
+            t = threading.Thread(target=_resume_strangle, daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed Daily Strangle {sid}")
+
+        # 11. Everything else — use TrackedStrategy
         else:
             strat = TrackedStrategy(
                 sid=sid, source=source, name=d['name'],
@@ -1026,6 +1083,11 @@ def api_dashboard():
                     s = ema_spread_strategies[sid]['strategy']
                     t['pnl'] = round(s.pnl, 4)
                     t['cumulative_pnl'] = round(s.cumulative_pnl, 4)
+                # Check Daily Strangle
+                elif sid in strangle_strategies and strangle_strategies[sid].get('strategy'):
+                    s = strangle_strategies[sid]['strategy']
+                    t['pnl'] = round(s.pnl, 2)
+                    t['cumulative_pnl'] = round(s.cumulative_pnl, 2)
                 # Check unified tracker
                 rs = registry.get(sid)
                 if rs and rs.running:
@@ -1039,6 +1101,7 @@ def api_dashboard():
         running_count += sum(1 for sid, e in oi_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in weekly_dn_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in ema_spread_strategies.items() if e.get('user_id') == uid and e.get('running'))
+        running_count += sum(1 for sid, e in strangle_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in _futures_traders.items() if e.get('user_id') == uid and e['trader'].running)
     running_count += len(registry.get_running(uid))
     pnls = [t.get('pnl', 0) for t in completed]
@@ -1158,6 +1221,13 @@ def api_all_strategies():
                         entry['status'] = 'completed'
                         update_tracked(sid, status='completed', pnl=round(s.pnl, 4))
                         continue
+                elif sid in strangle_strategies and strangle_strategies[sid].get('strategy'):
+                    s = strangle_strategies[sid]['strategy']
+                    entry['pnl'] = round(s.pnl, 2)
+                    if not s._running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.pnl, 2))
+                        continue
                 elif sid in _futures_traders:
                     trader = _futures_traders[sid]['trader']
                     if not trader.running:
@@ -1254,6 +1324,8 @@ def api_close_strategy(sid):
             profile_id = weekly_dn_strategies[sid].get('profile_id')
         elif sid in ema_spread_strategies:
             profile_id = ema_spread_strategies[sid].get('profile_id')
+        elif sid in strangle_strategies:
+            profile_id = strangle_strategies[sid].get('profile_id')
         if not profile_id:
             rs = registry.get(sid)
             if rs:
@@ -1305,6 +1377,12 @@ def api_close_strategy(sid):
         ecs = ema_spread_strategies[sid]
         if ecs.get('strategy'):
             ecs['strategy'].close_all()
+        closed = True
+    # Daily Strangle
+    if not closed and sid in strangle_strategies:
+        st = strangle_strategies[sid]
+        if st.get('strategy'):
+            st['strategy'].close_all()
         closed = True
     # Option Chain monitor
     if not closed and sid in active_monitors:
@@ -1380,6 +1458,10 @@ def api_close_all_strategies():
                 profile_id = weekly_dn_strategies[sid].get('profile_id')
             elif sid in ema_spread_strategies:
                 profile_id = ema_spread_strategies[sid].get('profile_id')
+            elif sid in ema_spread_strategies:
+                profile_id = ema_spread_strategies[sid].get('profile_id')
+            elif sid in strangle_strategies:
+                profile_id = strangle_strategies[sid].get('profile_id')
             if not profile_id:
                 rs = registry.get(sid)
                 if rs:
@@ -1418,6 +1500,11 @@ def api_close_all_strategies():
             ecs = ema_spread_strategies[sid]
             if ecs.get('strategy'):
                 ecs['strategy'].close_all()
+            closed = True
+        if not closed and sid in strangle_strategies:
+            st = strangle_strategies[sid]
+            if st.get('strategy'):
+                st['strategy'].close_all()
             closed = True
         if not closed and sid in active_monitors:
             active_monitors[sid]['monitor'].stop()
@@ -2333,6 +2420,149 @@ def oi_strategy_status(sid):
         trade_log=s.trade_log[-10:],
         legs=[{'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
                'side': l['side'], 'size': l['size'], 'entry_price': round(l['entry_price'], 2)}
+              for l in s.legs],
+    )
+
+
+# ── Daily Strangle Strategy Routes ──
+
+
+def run_strangle_strategy(sid, params):
+    entry = strangle_strategies[sid]
+    uid = entry['user_id']
+    if not _setup_strategy_thread(entry):
+        entry['log_queue'].put("__STOPPED__")
+        return
+
+    try:
+        from strategy.daily_strangle import DailyStrangle
+        s = DailyStrangle(
+            asset=params.get('asset', 'BTC'),
+            lot_size=int(params.get('lot_size', 100)),
+            target_premium=float(params.get('target_premium', 100)),
+            sl_pct=float(params.get('sl_pct', 105)) / 100,
+            entry_hour=int(params.get('entry_hour', 9)),
+            entry_minute=int(params.get('entry_minute', 0)),
+            exit_hour=int(params.get('exit_hour', 17)),
+            exit_minute=int(params.get('exit_minute', 15)),
+            monitor_interval=int(params.get('monitoring_interval', 10)),
+        )
+        s._log_queue = entry['log_queue']
+        s._log_history = entry['log_history']
+        import config as _cfg
+        s._api_key = _cfg.get_api_key()
+        s._api_secret = _cfg.get_api_secret()
+        s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
+        entry['strategy'] = s
+        entry['running'] = True
+        record_start(sid, params, user_id=uid)
+        if not s.initialize():
+            entry['log_queue'].put("✗ Init failed")
+            entry['running'] = False
+            entry['log_queue'].put("__STOPPED__")
+            return
+
+        import strategy.daily_strangle as _ds_mod
+        _orig_sleep = _ds_mod.time.sleep
+        _tick = [0]
+        def _snap_sleep(secs):
+            _orig_sleep(secs)
+            _tick[0] += 1
+            if _tick[0] % 6 == 0:
+                try:
+                    save_pnl_snapshot(uid, sid, round(s.pnl, 2))
+                    update_strategy_db(sid, pnl=round(s.pnl, 2), legs=s.legs,
+                        details={**params, 'profile_id': entry.get('profile_id'),
+                                 'cumulative_pnl': s.cumulative_pnl,
+                                 'total_days_traded': s.total_days_traded,
+                                 'trade_log': s.trade_log[-50:]})
+                except Exception:
+                    pass
+        _ds_mod.time.sleep = _snap_sleep
+        try:
+            s.monitor()
+        finally:
+            _ds_mod.time.sleep = _orig_sleep
+    except Exception as e:
+        entry['log_queue'].put(f"❌ Error: {e}")
+    finally:
+        s = entry.get('strategy')
+        pnl = round(s.cumulative_pnl, 2) if s else 0
+        record_end(sid, pnl, getattr(s, 'total_days_traded', 0))
+        update_tracked(sid, status='completed', pnl=pnl)
+        _teardown_strategy_thread(entry)
+
+
+@app.route('/api/strangle/start', methods=['POST'])
+@login_required
+def strangle_start():
+    params = request.json
+    profile_id = params.pop('profile_id', None)
+    api_key, api_secret, _, broker = get_profile_creds(profile_id)
+    if not api_key:
+        return jsonify(error="No API profile selected"), 400
+    sid = str(uuid.uuid4())[:8]
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [],
+             'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    strangle_strategies[sid] = entry
+    track_strategy(sid, 'Daily Strangle', f"{params.get('asset','BTC')} 0DTE Strangle", current_user_id(), details={**params, 'profile_id': profile_id})
+    entry['thread'] = threading.Thread(target=run_strangle_strategy, args=(sid, params), daemon=True)
+    entry['thread'].start()
+    return jsonify(status="started", sid=sid)
+
+
+@app.route('/api/strangle/stop', methods=['POST'])
+@login_required
+def strangle_stop():
+    sid = request.json.get('sid')
+    e = strangle_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error="Not found"), 404
+    if e.get('strategy'):
+        e['strategy']._running = False
+        e['strategy'].close_all()
+    return jsonify(status="stopping")
+
+
+@app.route('/api/strangle/stream/<sid>')
+@login_required
+def strangle_stream(sid):
+    e = strangle_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
+    q = e['log_queue']
+    def generate():
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                if msg == "__STOPPED__":
+                    yield f"event: stopped\ndata: done\n\n"
+                    break
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield f": heartbeat\n\n"
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/strangle/status/<sid>')
+@login_required
+def strangle_status(sid):
+    e = strangle_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(running=False)
+    s = e.get('strategy')
+    if not e['running'] or not s:
+        return jsonify(running=False)
+    return jsonify(
+        running=True,
+        total_pnl=round(s.pnl, 2),
+        cumulative_pnl=round(s.cumulative_pnl, 2),
+        days_traded=s.total_days_traded,
+        trade_log=s.trade_log[-10:],
+        legs=[{'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
+               'side': l['side'], 'size': l['size'], 'entry_price': round(l['entry_price'], 2),
+               'stopped': l.get('stopped', False)}
               for l in s.legs],
     )
 

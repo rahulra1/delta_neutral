@@ -9,7 +9,11 @@ logger = logging.getLogger(__name__)
 
 
 def get_expiries(asset='BTC', min_days=0):
-    """Fetch available option expiry dates."""
+    """Fetch available option expiry dates.
+
+    Daily options on Delta Exchange expire at 5:30 PM IST (12:00 UTC).
+    Today's expiry is included if current time is before 5:30 PM IST.
+    """
     path = '/v2/products'
     query_string = '?contract_types=call_options&states=live&page_size=500'
     headers = get_headers('GET', path, query_string)
@@ -19,7 +23,15 @@ def get_expiries(asset='BTC', min_days=0):
         data = resp.json()
         if not data.get('success'):
             return []
-        cutoff = datetime.utcnow() + timedelta(days=min_days)
+        now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+        # Today's expiry is valid until 5:30 PM IST
+        expiry_cutoff_hour = 17
+        expiry_cutoff_minute = 30
+        if now_ist.hour < expiry_cutoff_hour or (now_ist.hour == expiry_cutoff_hour and now_ist.minute < expiry_cutoff_minute):
+            cutoff_date = now_ist.date()
+        else:
+            cutoff_date = now_ist.date() + timedelta(days=1)
+        cutoff_date += timedelta(days=min_days)
         expiries = set()
         for p in data.get('result', []):
             sym = p.get('symbol', '')
@@ -32,7 +44,7 @@ def get_expiries(asset='BTC', min_days=0):
                 exp_dt = datetime.strptime(m.group(1), '%d%m%y')
             except ValueError:
                 continue
-            if exp_dt >= cutoff:
+            if exp_dt.date() >= cutoff_date:
                 expiries.add((exp_dt, exp_dt.strftime('%d-%m-%Y')))
         return [e[1] for e in sorted(expiries, key=lambda x: x[0])]
     except Exception as e:
