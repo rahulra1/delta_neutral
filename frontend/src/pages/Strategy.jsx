@@ -74,9 +74,9 @@ const STRATEGIES = [
     features: ['Prev Day H/L', 'Breakout + Retest', 'Hammer/Engulfing', '1:2 R:R'],
     rec: '⏱ Best on 15M/5M · BTC, NIFTY, BANKNIFTY' },
   { key: 'daily_strangle', label: 'Daily Strangle', icon: '🎯', type: 'Options',
-    desc: '0DTE short strangle: sell ~$100 call + put at 9 AM, 105% SL per leg, exit 5:15 PM. Daily recurring.',
-    features: ['0DTE Expiry', '9AM Entry / 5PM Exit', '105% SL Per Leg', 'Daily Auto-Trade'],
-    rec: '⏱ Daily 9:00 AM · BTC options · $900 margin for 1 BTC' },
+    desc: '0DTE short strangle: sell ~$100 call + put at 9 AM, 100% SL per leg (premium doubles), exit 5:15 PM. Daily recurring.',
+    features: ['0DTE Expiry', '9AM Entry / 5PM Exit', '100% SL Per Leg', 'Daily Auto-Trade'],
+    rec: '⏱ Daily 9:00 AM · BTC options · $200 margin for 0.1 BTC' },
   { key: 'oi_strategy', label: 'OI Strategy', icon: '🔍', type: 'Options',
     desc: 'Daily option selling at max OI strikes (support/resistance). Auto-trades at 6:30 PM IST, exits on TP/SL.',
     features: ['Max OI Strikes', 'Daily Auto-Trade', 'Support/Resistance', 'OI Shift Detection'],
@@ -396,7 +396,7 @@ export default function Strategy() {
         />
       )}
       {activeTab === 'daily_strangle' && (
-        <StrategyTemplate title="Daily Strangle (0DTE)" icon="🎯" type="Options" description="Sell ~$100 call + put at 9 AM IST, 105% SL per leg, exit 5:15 PM. Daily recurring." profiles={profiles}
+        <StrategyTemplate title="Daily Strangle (0DTE)" icon="🎯" type="Options" description="Sell ~$100 call + put at 9 AM IST, 100% SL per leg, exit 5:15 PM. Daily recurring." profiles={profiles}
           configFields={STRANGLE_FIELDS}
           onStart={async (config) => { const { data } = await api.post('/strangle/start', config); return data; }}
           onStop={async (sid) => { await api.post('/strangle/stop', { sid }); }}
@@ -418,7 +418,7 @@ export default function Strategy() {
                         <td style={{ padding: '4px 8px' }}><span className={`badge ${l.type === 'call' ? 'badge-green' : 'badge-red'}`}>{l.type.toUpperCase()}</span></td>
                         <td style={{ padding: '4px 8px', fontWeight: 600 }}>{l.strike}</td>
                         <td style={{ padding: '4px 8px' }}>${l.entry_price.toFixed(2)}</td>
-                        <td style={{ padding: '4px 8px', color: 'var(--red)' }}>${(l.entry_price * 1.05).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px', color: 'var(--red)' }}>${(l.entry_price * 2).toFixed(2)}</td>
                         <td style={{ padding: '4px 8px' }}>{l.stopped ? <span className="badge badge-red">Stopped</span> : <span className="badge badge-green">Active</span>}</td>
                       </tr>))}</tbody>
                   </table>
