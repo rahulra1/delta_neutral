@@ -2531,7 +2531,11 @@ def strangle_stream(sid):
     if not e or e.get('user_id') != current_user_id():
         return Response("data: Not found\n\n", mimetype='text/event-stream')
     q = e['log_queue']
+    history = e.get('log_history', [])
     def generate():
+        # Send buffered history first
+        for msg in list(history):
+            yield f"data: {msg}\n\n"
         while True:
             try:
                 msg = q.get(timeout=30)
