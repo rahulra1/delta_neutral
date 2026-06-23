@@ -159,7 +159,7 @@ const EMA_SPREAD_FIELDS = [
 const STRANGLE_FIELDS = [
   { key: 'lot_size', label: 'Lot Size', type: 'number', default: 100 },
   { key: 'target_premium', label: 'Target Premium ($)', type: 'number', default: 100, hint: 'Premium per leg to sell' },
-  { key: 'sl_pct', label: 'Stop Loss (%)', type: 'number', default: 105, hint: '105 = SL at 105% of entry price' },
+  { key: 'sl_pct', label: 'Stop Loss (%)', type: 'number', default: 200, hint: '200 = SL when premium doubles (loss = 100% of premium)' },
   { key: 'entry_hour', label: 'Entry Hour (24h IST)', type: 'number', default: 9 },
   { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 0 },
   { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 17 },

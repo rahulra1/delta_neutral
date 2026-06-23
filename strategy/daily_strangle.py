@@ -18,7 +18,7 @@ from strategy.base import BaseStrategy
 IST = timezone(timedelta(hours=5, minutes=30))
 
 TARGET_PREMIUM = 100  # $100 per leg
-SL_PCT = 1.05        # 105% of entry price = stop loss trigger
+SL_PCT = 2.00        # 200% of entry price = SL trigger (loss = 100% of premium)
 ENTRY_HOUR = 9
 ENTRY_MINUTE = 0
 EXIT_HOUR = 17

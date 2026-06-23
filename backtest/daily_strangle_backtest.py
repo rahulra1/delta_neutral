@@ -21,8 +21,10 @@ from datetime import datetime, timezone, timedelta
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # Strategy params
-ENTRY_PREMIUM = 100      # $100 per leg
-SL_PCT = 0.05            # 5% of premium = $5 SL per leg
+ENTRY_PREMIUM = 100      # $100 mark price per leg
+SL_PCT = 1.00            # 100% of premium = SL triggers when premium doubles to $200
+LOT_SIZE = 100           # 100 contracts
+CONTRACT_VALUE = 0.001   # 0.001 BTC per contract → 100 lots = 0.1 BTC
 ENTRY_HOUR = 9
 ENTRY_MINUTE = 0
 EXIT_HOUR = 17
@@ -31,11 +33,8 @@ EXIT_MINUTE = 0
 # Option model params
 # For BTC at ~$100k with 60% IV, 0DTE, $100 premium ≈ strike ~2.5% OTM
 OTM_PCT = 0.025  # 2.5% OTM for ~$100 premium
-# Premium sensitivity: if price moves X% toward strike, premium increases by roughly:
-# For 0DTE options, gamma is very high. Approximate: premium doubles when price reaches strike.
-# SL at 105% means premium went from $100 to $105. That's a 5% increase.
-# With high gamma near expiry, ~20% of the distance to strike causes 5% premium rise.
-SL_TRIGGER_PCT = 0.20  # if price moves 20% of distance-to-strike, SL triggers
+# Premium sensitivity: for 0DTE, premium doubles when price moves ~50% of distance to strike
+SL_TRIGGER_PCT = 0.50  # if price moves 50% of distance-to-strike, SL triggers (premium doubled)
 
 
 def run_backtest():
@@ -98,9 +97,10 @@ def run_backtest():
                     put_sl_hit = True
                     put_sl_time = c['dt']
 
-        # Calculate P&L
-        call_pnl = -(ENTRY_PREMIUM * SL_PCT) if call_sl_hit else ENTRY_PREMIUM * _theta_decay(session, call_strike, entry_price, 'call')
-        put_pnl = -(ENTRY_PREMIUM * SL_PCT) if put_sl_hit else ENTRY_PREMIUM * _theta_decay(session, put_strike, entry_price, 'put')
+        # Calculate P&L (premium × lots × contract_value)
+        multiplier = LOT_SIZE * CONTRACT_VALUE
+        call_pnl = -(ENTRY_PREMIUM * SL_PCT * multiplier) if call_sl_hit else ENTRY_PREMIUM * _theta_decay(session, call_strike, entry_price, 'call') * multiplier
+        put_pnl = -(ENTRY_PREMIUM * SL_PCT * multiplier) if put_sl_hit else ENTRY_PREMIUM * _theta_decay(session, put_strike, entry_price, 'put') * multiplier
         day_pnl = call_pnl + put_pnl
         total_pnl += day_pnl
 
