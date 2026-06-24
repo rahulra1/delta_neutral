@@ -54,6 +54,7 @@ class HybridSwitch(BaseStrategy):
 
         self.legs = []
         self._legs_lock = threading.Lock()
+        self._session_threads = []
         self._pnl = 0.0
         self.cumulative_pnl = 0.0
         self.total_days_traded = 0
@@ -75,13 +76,20 @@ class HybridSwitch(BaseStrategy):
             day_num = self.total_days_traded
             tag = f"[Hybrid D{day_num}]"
             print(f"\n{tag} ═══ {datetime.now(IST).strftime('%Y-%m-%d %H:%M')} IST ═══")
-            self._run_session(tag, day_num)
+            t = threading.Thread(target=self._run_session, args=(tag, day_num))
+            t.start()
+            self._session_threads = [th for th in self._session_threads if th.is_alive()]
+            self._session_threads.append(t)
 
     def _run_session(self, tag, day_num):
-        """Run one full BTST session synchronously."""
+        """Run one full BTST session in its own thread."""
+        from config import set_thread_credentials
         if hasattr(self, '_api_key') and self._api_key:
-            from config import set_thread_credentials
             set_thread_credentials(self._api_key, self._api_secret, self._broker)
+        if hasattr(self, '_log_queue') and self._log_queue:
+            from app import LogCapture
+            LogCapture._local.log_queue = self._log_queue
+            LogCapture._local.log_history = self._log_history
 
         cv = get_contract_value(self.asset)
         expiries = get_expiries(self.asset, min_days=1)
@@ -127,7 +135,7 @@ class HybridSwitch(BaseStrategy):
         # Monitor session
         buy_legs = []  # activated lazy legs
         session_pnl = 0.0
-        session_start = datetime.now(IST)
+        expiry_date_obj = datetime.strptime(expiry, '%d-%m-%Y').date()
 
         while self._running:
             now = datetime.now(IST)
@@ -140,10 +148,10 @@ class HybridSwitch(BaseStrategy):
                 time.sleep(self.monitor_interval)
                 continue
 
-            # Exit time (next day 5:15 PM) — only after at least 4 hours from entry
-            if (now - session_start).total_seconds() > 4 * 3600:
+            # Exit on expiry day (D-0) at 5:15 PM
+            if now.date() == expiry_date_obj:
                 if now.hour > self.exit_hour or (now.hour == self.exit_hour and now.minute >= self.exit_minute):
-                    print(f"{tag} ⏰ Exit time — closing all")
+                    print(f"{tag} ⏰ Exit time (expiry day) — closing all")
                     break
 
             # Check sell legs for SL
@@ -175,12 +183,12 @@ class HybridSwitch(BaseStrategy):
                     continue
                 current = data['mark_price']
 
-                # Update high watermark and trail
-                if current > leg.get('high', leg['entry_price']):
-                    leg['high'] = current
-                    new_trail_sl = current - self.trail_points
-                    if new_trail_sl > leg['sl_price']:
-                        leg['sl_price'] = new_trail_sl
+                # Trail SL point-for-point: if price moves up by X, SL moves up by X
+                move = current - leg['entry_price']
+                if move > 0:
+                    new_sl = leg['base_sl'] + move
+                    if new_sl > leg['sl_price']:
+                        leg['sl_price'] = new_sl
 
                 # Check SL
                 if current <= leg['sl_price']:
@@ -252,7 +260,7 @@ class HybridSwitch(BaseStrategy):
             'symbol': opt['symbol'], 'product_id': opt['product_id'],
             'side': 'buy', 'type': opt_type, 'strike': opt['strike'],
             'entry_price': opt['mark_price'], 'size': buy_size,
-            'sl_price': sl_price, 'high': opt['mark_price'],
+            'sl_price': sl_price, 'base_sl': sl_price,
             'active': True, 'role': 'buy_switch',
         }
         print(f"{tag} ⚡ BUY {buy_size} lots {opt_type.upper()} {opt['strike']} @ ${opt['mark_price']:.2f} | SL: ${sl_price:.2f} | Trail: ${self.trail_points}")
@@ -278,6 +286,9 @@ class HybridSwitch(BaseStrategy):
                     close_side = 'buy' if leg['side'] == 'sell' else 'sell'
                     place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
             self.legs.clear()
+        for t in self._session_threads:
+            t.join(timeout=30)
+        self._session_threads.clear()
 
     @property
     def pnl(self):
