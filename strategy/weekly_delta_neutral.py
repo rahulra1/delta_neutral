@@ -62,6 +62,14 @@ class WeeklyDeltaNeutral(BaseStrategy):
             if not self._running:
                 break
 
+            # Force-close any still-running trade from previous week
+            for s in list(self._active_strategies):
+                print(f"[Weekly DN] Closing previous week's trade before new entry")
+                s.running = False
+                s.close_all_positions()
+                s.ws_manager.stop()
+                self._active_strategies.remove(s)
+
             self.weeks_traded += 1
             week_num = self.weeks_traded
             tag = f"[Weekly DN Week{week_num}]"
@@ -142,9 +150,17 @@ class WeeklyDeltaNeutral(BaseStrategy):
         return expiries[0] if expiries else None
 
     def _wait_for_next_friday(self):
-        """Sleep until the next Friday at entry time."""
+        """Sleep until the next Friday at entry time.
+        If started on Friday within 2 hours after entry time, trade immediately."""
         now = datetime.now(IST)
-        # Find next Friday (or today if it's Friday and before entry time)
+        # Check if we're on the trade day within a grace window (within 2 hours of entry)
+        if now.weekday() == self.trade_day:
+            entry_time = now.replace(hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
+            if timedelta(0) <= (now - entry_time) <= timedelta(hours=2):
+                # We're within the trade window — go immediately
+                return
+
+        # Find next Friday
         days_ahead = self.trade_day - now.weekday()
         if days_ahead < 0:
             days_ahead += 7
