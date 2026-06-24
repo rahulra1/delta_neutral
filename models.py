@@ -400,13 +400,20 @@ def get_pnl_snapshots(user_id, sid=None, since=None):
 
 def get_setting(key, default=None):
     conn = get_db()
-    row = conn.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
-    conn.close()
-    return row['value'] if row else default
+    try:
+        row = conn.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
+        return row['value'] if row else default
+    except Exception:
+        return default
+    finally:
+        conn.close()
 
 
 def set_setting(key, value):
     conn = get_db()
-    conn.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, value))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+        conn.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, value))
+        conn.commit()
+    finally:
+        conn.close()

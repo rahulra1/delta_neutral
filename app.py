@@ -48,6 +48,7 @@ iv_crush_strategies = {}
 call_ratio_strategies = {}
 oi_strategies = {}
 strangle_strategies = {}
+hybrid_strategies = {}
 weekly_dn_strategies = {}
 ema_spread_strategies = {}
 _futures_traders = {}
@@ -600,7 +601,60 @@ def _resume_db_strategies():
             t.start()
             logger.info(f"[resume] Resumed Daily Strangle {sid}")
 
-        # 11. Everything else — use TrackedStrategy
+        # 11. Resume Hybrid Switch
+        elif source == 'Hybrid Switch':
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+                     'log_history': [], 'running': False, 'params': details,
+                     'user_id': user_id, 'profile_id': profile_id}
+            hybrid_strategies[sid] = entry
+
+            def _resume_hybrid(sid=sid, entry=entry, details=details, user_id=user_id):
+                if not _setup_strategy_thread(entry):
+                    entry['running'] = False
+                    return
+                try:
+                    from strategy.hybrid_switch import HybridSwitch
+                    s = HybridSwitch(
+                        asset=details.get('asset', 'BTC'),
+                        lot_size=int(details.get('lot_size', 1)),
+                        buy_multiplier=int(details.get('buy_multiplier', 10)),
+                        sell_sl_pct=float(details.get('sell_sl_pct', 200)) / 100,
+                        buy_sl_pct=float(details.get('buy_sl_pct', 50)) / 100,
+                        trail_points=float(details.get('trail_points', 10)),
+                        otm_index=int(details.get('otm_index', 5)),
+                        entry_hour=int(details.get('entry_hour', 19)),
+                        entry_minute=int(details.get('entry_minute', 15)),
+                        exit_hour=int(details.get('exit_hour', 17)),
+                        exit_minute=int(details.get('exit_minute', 15)),
+                        monitor_interval=int(details.get('monitoring_interval', 10)),
+                    )
+                    entry['strategy'] = s
+                    s._log_queue = entry['log_queue']
+                    s._log_history = entry['log_history']
+                    import config as _cfg
+                    s._api_key = _cfg.get_api_key()
+                    s._api_secret = _cfg.get_api_secret()
+                    s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
+                    entry['running'] = True
+                    s.cumulative_pnl = float(details.get('cumulative_pnl', 0))
+                    s.total_days_traded = int(details.get('total_days_traded', 0))
+                    s.trade_log = details.get('trade_log', [])
+                    s.initialize()
+                    s.monitor()
+                except Exception as e:
+                    logger.error(f"[resume] Hybrid Switch {sid} error: {e}")
+                finally:
+                    pnl = round(getattr(entry.get('strategy'), 'cumulative_pnl', 0), 2)
+                    record_end(sid, pnl, 0)
+                    update_tracked(sid, status='completed', pnl=pnl)
+                    _teardown_strategy_thread(entry)
+
+            t = threading.Thread(target=_resume_hybrid, daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed Hybrid Switch {sid}")
+
+        # 12. Everything else — use TrackedStrategy
         else:
             strat = TrackedStrategy(
                 sid=sid, source=source, name=d['name'],
@@ -1088,6 +1142,11 @@ def api_dashboard():
                     s = strangle_strategies[sid]['strategy']
                     t['pnl'] = round(s.pnl, 2)
                     t['cumulative_pnl'] = round(s.cumulative_pnl, 2)
+                # Check Hybrid Switch
+                elif sid in hybrid_strategies and hybrid_strategies[sid].get('strategy'):
+                    s = hybrid_strategies[sid]['strategy']
+                    t['pnl'] = round(s.pnl, 2)
+                    t['cumulative_pnl'] = round(s.cumulative_pnl, 2)
                 # Check unified tracker
                 rs = registry.get(sid)
                 if rs and rs.running:
@@ -1102,6 +1161,7 @@ def api_dashboard():
         running_count += sum(1 for sid, e in weekly_dn_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in ema_spread_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in strangle_strategies.items() if e.get('user_id') == uid and e.get('running'))
+        running_count += sum(1 for sid, e in hybrid_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in _futures_traders.items() if e.get('user_id') == uid and e['trader'].running)
     running_count += len(registry.get_running(uid))
     pnls = [t.get('pnl', 0) for t in completed]
@@ -1228,6 +1288,13 @@ def api_all_strategies():
                         entry['status'] = 'completed'
                         update_tracked(sid, status='completed', pnl=round(s.pnl, 2))
                         continue
+                elif sid in hybrid_strategies and hybrid_strategies[sid].get('strategy'):
+                    s = hybrid_strategies[sid]['strategy']
+                    entry['pnl'] = round(s.pnl, 2)
+                    if not s._running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.pnl, 2))
+                        continue
                 elif sid in _futures_traders:
                     trader = _futures_traders[sid]['trader']
                     if not trader.running:
@@ -1326,6 +1393,8 @@ def api_close_strategy(sid):
             profile_id = ema_spread_strategies[sid].get('profile_id')
         elif sid in strangle_strategies:
             profile_id = strangle_strategies[sid].get('profile_id')
+        elif sid in hybrid_strategies:
+            profile_id = hybrid_strategies[sid].get('profile_id')
         if not profile_id:
             rs = registry.get(sid)
             if rs:
@@ -1383,6 +1452,12 @@ def api_close_strategy(sid):
         st = strangle_strategies[sid]
         if st.get('strategy'):
             st['strategy'].close_all()
+        closed = True
+    # Hybrid Switch
+    if not closed and sid in hybrid_strategies:
+        hs = hybrid_strategies[sid]
+        if hs.get('strategy'):
+            hs['strategy'].close_all()
         closed = True
     # Option Chain monitor
     if not closed and sid in active_monitors:
@@ -1462,6 +1537,8 @@ def api_close_all_strategies():
                 profile_id = ema_spread_strategies[sid].get('profile_id')
             elif sid in strangle_strategies:
                 profile_id = strangle_strategies[sid].get('profile_id')
+            elif sid in hybrid_strategies:
+                profile_id = hybrid_strategies[sid].get('profile_id')
             if not profile_id:
                 rs = registry.get(sid)
                 if rs:
@@ -1505,6 +1582,11 @@ def api_close_all_strategies():
             st = strangle_strategies[sid]
             if st.get('strategy'):
                 st['strategy'].close_all()
+            closed = True
+        if not closed and sid in hybrid_strategies:
+            hs = hybrid_strategies[sid]
+            if hs.get('strategy'):
+                hs['strategy'].close_all()
             closed = True
         if not closed and sid in active_monitors:
             active_monitors[sid]['monitor'].stop()
@@ -1634,6 +1716,19 @@ def api_strategy_detail(sid):
                 live_legs.append({'symbol': leg['symbol'], 'type': leg['type'], 'strike': leg['strike'],
                     'side': 'sell', 'size': leg['size'], 'entry_price': round(leg['entry_price'], 2),
                     'current_mark': 0, 'current_pnl': 0, 'stopped': leg.get('stopped', False)})
+        elif sid in hybrid_strategies and hybrid_strategies[sid].get('strategy'):
+            hs = hybrid_strategies[sid]
+            strat = hs['strategy']
+            entry['pnl'] = round(strat.pnl, 2)
+            entry['cumulative_pnl'] = round(strat.cumulative_pnl, 2)
+            entry['running'] = hs.get('running', False)
+            logs = hs.get('log_history', [])
+            entry['trade_log'] = strat.trade_log[-20:]
+            entry['days_traded'] = strat.total_days_traded
+            for leg in strat.legs:
+                live_legs.append({'symbol': leg['symbol'], 'type': leg['type'], 'strike': leg['strike'],
+                    'side': leg['side'], 'size': leg['size'], 'entry_price': round(leg['entry_price'], 2),
+                    'current_mark': 0, 'current_pnl': 0, 'role': leg.get('role', ''), 'active': leg.get('active', False)})
         elif sid in _futures_traders:
             trader = _futures_traders[sid]['trader']
             entry['running'] = trader.running
@@ -2586,6 +2681,155 @@ def strangle_status(sid):
     )
 
 
+# ── Hybrid Switch BTST Strategy Routes ──
+
+
+def run_hybrid_strategy(sid, params):
+    entry = hybrid_strategies[sid]
+    uid = entry['user_id']
+    if not _setup_strategy_thread(entry):
+        entry['log_queue'].put("__STOPPED__")
+        return
+    try:
+        from strategy.hybrid_switch import HybridSwitch
+        s = HybridSwitch(
+            asset=params.get('asset', 'BTC'),
+            lot_size=int(params.get('lot_size', 1)),
+            buy_multiplier=int(params.get('buy_multiplier', 10)),
+            sell_sl_pct=float(params.get('sell_sl_pct', 200)) / 100,
+            buy_sl_pct=float(params.get('buy_sl_pct', 50)) / 100,
+            trail_points=float(params.get('trail_points', 10)),
+            otm_index=int(params.get('otm_index', 5)),
+            entry_hour=int(params.get('entry_hour', 19)),
+            entry_minute=int(params.get('entry_minute', 15)),
+            exit_hour=int(params.get('exit_hour', 17)),
+            exit_minute=int(params.get('exit_minute', 15)),
+            monitor_interval=int(params.get('monitoring_interval', 10)),
+        )
+        s._log_queue = entry['log_queue']
+        s._log_history = entry['log_history']
+        import config as _cfg
+        s._api_key = _cfg.get_api_key()
+        s._api_secret = _cfg.get_api_secret()
+        s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
+        entry['strategy'] = s
+        entry['running'] = True
+        record_start(sid, params, user_id=uid)
+        if not s.initialize():
+            entry['log_queue'].put("✗ Init failed")
+            entry['running'] = False
+            entry['log_queue'].put("__STOPPED__")
+            return
+        import strategy.hybrid_switch as _hs_mod
+        _orig_sleep = _hs_mod.time.sleep
+        _tick = [0]
+        def _snap_sleep(secs):
+            _orig_sleep(secs)
+            _tick[0] += 1
+            if _tick[0] % 6 == 0:
+                try:
+                    save_pnl_snapshot(uid, sid, round(s.pnl, 2))
+                    update_strategy_db(sid, pnl=round(s.pnl, 2), legs=s.legs,
+                        details={**params, 'profile_id': entry.get('profile_id'),
+                                 'cumulative_pnl': s.cumulative_pnl,
+                                 'total_days_traded': s.total_days_traded,
+                                 'trade_log': s.trade_log[-50:]})
+                except Exception:
+                    pass
+        _hs_mod.time.sleep = _snap_sleep
+        try:
+            s.monitor()
+        finally:
+            _hs_mod.time.sleep = _orig_sleep
+    except Exception as e:
+        entry['log_queue'].put(f"❌ Error: {e}")
+    finally:
+        s = entry.get('strategy')
+        pnl = round(s.cumulative_pnl, 2) if s else 0
+        record_end(sid, pnl, getattr(s, 'total_days_traded', 0))
+        update_tracked(sid, status='completed', pnl=pnl)
+        _teardown_strategy_thread(entry)
+
+
+@app.route('/api/hybrid/start', methods=['POST'])
+@login_required
+def hybrid_start():
+    params = request.json
+    profile_id = params.pop('profile_id', None)
+    api_key, api_secret, _, broker = get_profile_creds(profile_id)
+    if not api_key:
+        return jsonify(error="No API profile selected"), 400
+    sid = str(uuid.uuid4())[:8]
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [],
+             'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    hybrid_strategies[sid] = entry
+    track_strategy(sid, 'Hybrid Switch', f"{params.get('asset','BTC')} Hybrid BTST", current_user_id(), details={**params, 'profile_id': profile_id})
+    entry['thread'] = threading.Thread(target=run_hybrid_strategy, args=(sid, params), daemon=True)
+    entry['thread'].start()
+    return jsonify(status="started", sid=sid)
+
+
+@app.route('/api/hybrid/stop', methods=['POST'])
+@login_required
+def hybrid_stop():
+    sid = request.json.get('sid')
+    e = hybrid_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error="Not found"), 404
+    if e.get('strategy'):
+        e['strategy']._running = False
+        e['strategy'].close_all()
+    return jsonify(status="stopping")
+
+
+@app.route('/api/hybrid/stream/<sid>')
+@login_required
+def hybrid_stream(sid):
+    e = hybrid_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
+    q = e['log_queue']
+    history = e.get('log_history', [])
+    def generate():
+        for msg in list(history):
+            yield f"data: {msg}\n\n"
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                if msg == "__STOPPED__":
+                    yield f"event: stopped\ndata: done\n\n"
+                    break
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield f": heartbeat\n\n"
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/hybrid/status/<sid>')
+@login_required
+def hybrid_status(sid):
+    e = hybrid_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(running=False)
+    if not e['running']:
+        return jsonify(running=False)
+    s = e.get('strategy')
+    if not s:
+        return jsonify(running=True, total_pnl=0, cumulative_pnl=0, days_traded=0, trade_log=[], legs=[])
+    return jsonify(
+        running=True,
+        total_pnl=round(s.pnl, 2),
+        cumulative_pnl=round(s.cumulative_pnl, 2),
+        days_traded=s.total_days_traded,
+        trade_log=s.trade_log[-10:],
+        legs=[{'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
+               'side': l['side'], 'size': l['size'], 'entry_price': round(l['entry_price'], 2),
+               'role': l.get('role', ''), 'active': l.get('active', False)}
+              for l in s.legs],
+    )
+
+
 # ── Weekly Delta Neutral Strategy Routes ──
 
 
@@ -3378,6 +3622,35 @@ def api_admin_set_admin():
     return jsonify(status='ok')
 
 
+@app.route('/api/admin/enabled-strategies')
+@login_required
+@admin_required
+def api_admin_get_enabled():
+    from models import get_setting
+    import json as _json
+    val = get_setting('enabled_strategies')
+    return jsonify(enabled=_json.loads(val) if val else None)
+
+
+@app.route('/api/admin/enabled-strategies', methods=['POST'])
+@login_required
+@admin_required
+def api_admin_set_enabled():
+    from models import set_setting
+    import json as _json
+    enabled = request.json.get('enabled')
+    set_setting('enabled_strategies', _json.dumps(enabled))
+    return jsonify(status='ok')
+
+
+@app.route('/api/enabled-strategies')
+def api_public_enabled():
+    from models import get_setting
+    import json as _json
+    val = get_setting('enabled_strategies')
+    return jsonify(enabled=_json.loads(val) if val else None)
+
+
 @app.route('/api/admin/user-history/<int:uid>')
 @login_required
 @admin_required
@@ -3525,7 +3798,7 @@ def api_tracker_logs(sid):
         pnl = round(strat.total_pnl, 2) if strat else 0
         return jsonify(sid=sid, logs=logs[-last:], running=e.get('running', False), pnl=pnl, status='running' if e.get('running') else 'completed')
     # Check new strategy dicts
-    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, strangle_strategies):
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, strangle_strategies, hybrid_strategies):
         e = dct.get(sid)
         if e and e.get('user_id') == current_user_id():
             logs = list(e.get('log_history', []))
@@ -3563,7 +3836,7 @@ def api_tracker_close(sid):
         e['strategy'].close_all_positions()
         return jsonify(status='closed')
     # New strategy dicts
-    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, strangle_strategies):
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, strangle_strategies, hybrid_strategies):
         e = dct.get(sid)
         if e and e.get('user_id') == current_user_id() and e.get('strategy'):
             e['strategy'].close_all()

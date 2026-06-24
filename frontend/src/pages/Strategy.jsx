@@ -77,6 +77,10 @@ const STRATEGIES = [
     desc: '0DTE short strangle: sell ~$100 call + put at 9 AM, 100% SL per leg (premium doubles), exit 5:15 PM. Daily recurring.',
     features: ['0DTE Expiry', '9AM Entry / 5PM Exit', '100% SL Per Leg', 'Daily Auto-Trade'],
     rec: '⏱ Daily 9:00 AM · BTC options · $200 margin for 0.1 BTC' },
+  { key: 'hybrid_switch', label: 'Hybrid Switch BTST', icon: '⚡', type: 'Options',
+    desc: 'Sell strangle at 7:15 PM, on SL hit switch to 10x buying with trailing SL. Holds across 2 sessions (BTST).',
+    features: ['BTST (2 Sessions)', 'Non-Directional → Directional', '10x Buy on SL', 'Trailing SL'],
+    rec: '⏱ Daily 7:15 PM · D2 expiry · ₹10,000 capital' },
   { key: 'oi_strategy', label: 'OI Strategy', icon: '🔍', type: 'Options',
     desc: 'Daily option selling at max OI strikes (support/resistance). Auto-trades at 6:30 PM IST, exits on TP/SL.',
     features: ['Max OI Strikes', 'Daily Auto-Trade', 'Support/Resistance', 'OI Shift Detection'],
@@ -162,6 +166,20 @@ const STRANGLE_FIELDS = [
   { key: 'sl_pct', label: 'Stop Loss (%)', type: 'number', default: 200, hint: '200 = SL when premium doubles (loss = 100% of premium)' },
   { key: 'entry_hour', label: 'Entry Hour (24h IST)', type: 'number', default: 9 },
   { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 0 },
+  { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 17 },
+  { key: 'exit_minute', label: 'Exit Minute', type: 'number', default: 15 },
+  { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 10 },
+];
+
+const HYBRID_FIELDS = [
+  { key: 'lot_size', label: 'Sell Lot Size', type: 'number', default: 1, hint: 'Lots for selling legs' },
+  { key: 'buy_multiplier', label: 'Buy Multiplier', type: 'number', default: 10, hint: 'Multiply lots on switch (e.g. 10x)' },
+  { key: 'otm_index', label: 'OTM Index', type: 'number', default: 5, hint: 'OTM5 = 5th strike from ATM' },
+  { key: 'sell_sl_pct', label: 'Sell SL (%)', type: 'number', default: 200, hint: '200 = premium doubles' },
+  { key: 'buy_sl_pct', label: 'Buy SL (%)', type: 'number', default: 50, hint: '50 = lose half premium' },
+  { key: 'trail_points', label: 'Trail Points ($)', type: 'number', default: 10, hint: 'Trailing SL on buy legs' },
+  { key: 'entry_hour', label: 'Entry Hour (24h IST)', type: 'number', default: 19 },
+  { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 15 },
   { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 17 },
   { key: 'exit_minute', label: 'Exit Minute', type: 'number', default: 15 },
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 10 },
@@ -434,6 +452,54 @@ export default function Strategy() {
                         <td style={{ padding: '4px 8px' }}>{t.date}</td>
                         <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${t.pnl}</td>
                         <td style={{ padding: '4px 8px' }}>{t.exit_reason === 'both_sl' ? '🛑 Both SL' : t.exit_reason === 'one_sl' ? '⚠️ One SL' : '⏰ EOD Exit'}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )} />
+      )}
+      {activeTab === 'hybrid_switch' && (
+        <StrategyTemplate title="Hybrid Switch BTST" icon="⚡" type="Options" description="Sell strangle at 7:15 PM, on SL hit switch to 10x buying with trailing SL. BTST." profiles={profiles}
+          configFields={HYBRID_FIELDS}
+          onStart={async (config) => { const { data } = await api.post('/hybrid/start', config); return data; }}
+          onStop={async (sid) => { await api.post('/hybrid/stop', { sid }); }}
+          statusEndpoint="/hybrid/status" streamEndpoint="/hybrid/stream"
+          renderStatus={(s) => (
+            <>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(3,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Total P&L</div><div className="value" style={{ color: (s.total_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.total_pnl||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Cumulative</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Days Traded</div><div className="value">{s.days_traded || 0}</div></div>
+              </div>
+              {s.legs && s.legs.length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Active Legs</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Role', 'Type', 'Strike', 'Size', 'Entry', 'Status'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{s.legs.map((l, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}><span className={`badge ${l.role === 'sell' ? 'badge-red' : 'badge-green'}`}>{l.role === 'sell' ? 'SELL' : '⚡ BUY'}</span></td>
+                        <td style={{ padding: '4px 8px' }}>{l.type.toUpperCase()}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>{l.strike}</td>
+                        <td style={{ padding: '4px 8px' }}>{l.size}</td>
+                        <td style={{ padding: '4px 8px' }}>${l.entry_price.toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px' }}>{l.active ? <span className="badge badge-green">Active</span> : <span className="badge badge-red">Closed</span>}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+              {(s.trade_log || []).length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Trade Log</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Date', 'P&L', 'Sell Legs', 'Buy Activated'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{(s.trade_log || []).slice(-10).reverse().map((t, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}>{t.date}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${t.pnl}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.sell_legs}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.buy_legs_activated || 0}</td>
                       </tr>))}</tbody>
                   </table>
                 </div>
