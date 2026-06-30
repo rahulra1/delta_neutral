@@ -240,6 +240,7 @@ class HybridSwitch(BaseStrategy):
             'buy_legs_activated': len(buy_legs),
         })
         print(f"{tag} Done | PnL: ${session_pnl:+.2f} | Cumulative: ${self.cumulative_pnl:+.2f}")
+        self._persist_state()
 
     def _activate_buy_leg(self, tag, expiry, opt_type, current_price):
         """Activate a lazy buy leg after sell SL hit."""
@@ -305,6 +306,48 @@ class HybridSwitch(BaseStrategy):
                     else:
                         open_pnl += (data['mark_price'] - leg['entry_price']) * leg['size'] * cv
         return self.cumulative_pnl + open_pnl
+
+    def _persist_state(self):
+        """Save state to DB so it survives server restarts."""
+        try:
+            from models import update_strategy_db
+            import json
+            sid = getattr(self, '_sid', None)
+            if not sid:
+                try:
+                    from app import hybrid_strategies
+                    for s_id, entry in hybrid_strategies.items():
+                        if entry.get('strategy') is self:
+                            sid = s_id
+                            self._sid = sid
+                            break
+                except Exception:
+                    pass
+            if not sid:
+                return
+            details = {
+                'asset': self.asset, 'lot_size': self.lot_size,
+                'buy_multiplier': self.buy_multiplier,
+                'sell_sl_pct': int(self.sell_sl_pct * 100),
+                'buy_sl_pct': int(self.buy_sl_pct * 100),
+                'trail_points': self.trail_points,
+                'otm_index': self.otm_index,
+                'entry_hour': self.entry_hour, 'entry_minute': self.entry_minute,
+                'exit_hour': self.exit_hour, 'exit_minute': self.exit_minute,
+                'monitoring_interval': self.monitor_interval,
+                'cumulative_pnl': self.cumulative_pnl,
+                'total_days_traded': self.total_days_traded,
+                'trade_log': self.trade_log[-50:],
+            }
+            legs_data = []
+            for leg in self.legs:
+                legs_data.append({k: v for k, v in leg.items()
+                                  if not callable(v) and k != '_lock'})
+            update_strategy_db(sid, details=json.dumps(details),
+                               legs=json.dumps(legs_data),
+                               pnl=round(self.cumulative_pnl, 2))
+        except Exception as e:
+            logger.warning(f"[Hybrid] Persist state failed: {e}")
 
     def _wait_for_next_entry(self):
         now = datetime.now(IST)

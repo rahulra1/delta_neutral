@@ -198,6 +198,7 @@ class DailyStrangle(BaseStrategy):
             'exit_reason': self._exit_reason(day_legs),
         })
         print(f"{tag} Done | PnL: ${day_pnl:+.2f} | Cumulative: ${self.cumulative_pnl:+.2f}")
+        self._persist_state()
 
     def _close_day_legs(self, day_legs):
         """Close all non-stopped legs."""
@@ -257,6 +258,44 @@ class DailyStrangle(BaseStrategy):
                 if data:
                     open_pnl += (leg['entry_price'] - data['mark_price']) * leg['size'] * cv
         return self.cumulative_pnl + open_pnl
+
+    def _persist_state(self):
+        """Save state to DB so it survives server restarts."""
+        try:
+            from models import update_strategy_db
+            import json
+            sid = getattr(self, '_sid', None)
+            if not sid:
+                try:
+                    from app import strangle_strategies
+                    for s_id, entry in strangle_strategies.items():
+                        if entry.get('strategy') is self:
+                            sid = s_id
+                            self._sid = sid
+                            break
+                except Exception:
+                    pass
+            if not sid:
+                return
+            details = {
+                'asset': self.asset, 'lot_size': self.lot_size,
+                'target_premium': self.target_premium,
+                'sl_pct': int(self.sl_pct * 100),
+                'entry_hour': self.entry_hour, 'entry_minute': self.entry_minute,
+                'exit_hour': self.exit_hour, 'exit_minute': self.exit_minute,
+                'monitoring_interval': self.monitor_interval,
+                'cumulative_pnl': self.cumulative_pnl,
+                'total_days_traded': self.total_days_traded,
+                'trade_log': self.trade_log[-50:],
+            }
+            legs_data = []
+            for leg in self.legs:
+                legs_data.append({k: v for k, v in leg.items() if k != '_lock'})
+            update_strategy_db(sid, details=json.dumps(details),
+                               legs=json.dumps(legs_data),
+                               pnl=round(self.cumulative_pnl, 2))
+        except Exception as e:
+            logger.warning(f"[Strangle] Persist state failed: {e}")
 
     def _wait_for_next_entry(self):
         now = datetime.now(IST)

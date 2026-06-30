@@ -508,6 +508,7 @@ def _resume_db_strategies():
                     entry['strategy'] = s
                     s._log_queue = entry['log_queue']
                     s._log_history = entry['log_history']
+                    s._sid = sid
                     import config as _cfg
                     s._api_key = _cfg.get_api_key()
                     s._api_secret = _cfg.get_api_secret()
@@ -518,6 +519,11 @@ def _resume_db_strategies():
                     s.trade_log = details.get('trade_log', [])
                     s.legs = legs or []
                     s.initialize()
+                    # Log restored trade history
+                    if s.trade_log:
+                        for t in s.trade_log:
+                            print(f"[EMA Day{t.get('day',0)}] {t.get('date','')} | {t.get('direction','')} | {t.get('exit_reason','')} | PnL: ${t.get('pnl',0):+.4f}")
+                        print(f"[EMA Spread] Restored {len(s.trade_log)} days | Cum PnL: ${s.cumulative_pnl:+.4f}")
                     # Resume monitoring for open legs
                     if legs:
                         import threading as _thr
@@ -581,7 +587,13 @@ def _resume_db_strategies():
                     s.total_days_traded = int(details.get('total_days_traded', 0))
                     s.trade_log = details.get('trade_log', [])
                     s.legs = legs or []
+                    s._sid = sid
                     s.initialize()
+                    # Log restored trade history
+                    if s.trade_log:
+                        for t in s.trade_log:
+                            print(f"[Strangle Day{t.get('day',0)}] {t.get('date','')} | {t.get('exit_reason','')} | PnL: ${t.get('pnl',0):+.2f}")
+                        print(f"[Strangle] Restored {len(s.trade_log)} days | Cum PnL: ${s.cumulative_pnl:+.2f}")
                     if legs:
                         import threading as _thr
                         day_num = s.total_days_traded or 1
@@ -639,7 +651,13 @@ def _resume_db_strategies():
                     s.cumulative_pnl = float(details.get('cumulative_pnl', 0))
                     s.total_days_traded = int(details.get('total_days_traded', 0))
                     s.trade_log = details.get('trade_log', [])
+                    s._sid = sid
                     s.initialize()
+                    # Log restored trade history
+                    if s.trade_log:
+                        for t in s.trade_log:
+                            print(f"[Hybrid Day{t.get('day',0)}] {t.get('date','')} | {t.get('direction','')} | {t.get('exit_reason','')} | PnL: ${t.get('pnl',0):+.2f}")
+                        print(f"[Hybrid] Restored {len(s.trade_log)} days | Cum PnL: ${s.cumulative_pnl:+.2f}")
                     s.monitor()
                 except Exception as e:
                     logger.error(f"[resume] Hybrid Switch {sid} error: {e}")
@@ -1699,6 +1717,9 @@ def api_strategy_detail(sid):
             entry['pnl'] = round(strat.pnl, 4)
             entry['running'] = ecs.get('running', False)
             logs = ecs.get('log_history', [])
+            entry['trade_log'] = strat.trade_log[-20:]
+            entry['days_traded'] = strat.total_days_traded
+            entry['cumulative_pnl'] = round(strat.cumulative_pnl, 4)
             for leg in strat.legs:
                 live_legs.append({'symbol': leg['symbol'], 'type': leg['type'], 'strike': leg['strike'],
                     'side': leg['side'], 'size': leg['size'], 'entry_price': round(leg['entry_price'], 4),
@@ -2993,6 +3014,7 @@ def run_ema_spread(sid, params):
         )
         s._log_queue = entry['log_queue']
         s._log_history = entry['log_history']
+        s._sid = sid
         import config as _cfg
         s._api_key = _cfg.get_api_key()
         s._api_secret = _cfg.get_api_secret()

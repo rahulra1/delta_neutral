@@ -63,6 +63,15 @@ class EMACreditSpread(BaseStrategy):
         self.total_days_traded = 0
         self.cumulative_pnl = 0.0
         self.trade_log = []
+        self._sid = None  # Set externally after creation for DB persistence
+        self._base_params = {
+            'asset': asset, 'lot_size': lot_size, 'sell_delta': sell_delta,
+            'buy_delta': buy_delta, 'ema_period': ema_period,
+            'tp_pct': int(tp_pct * 100), 'sl_pct': int(sl_pct * 100),
+            'monitoring_interval': monitor_interval,
+            'entry_hour': entry_hour, 'entry_minute': entry_minute,
+            'min_expiry_days': min_expiry_days,
+        }
 
     def initialize(self):
         self._running = True
@@ -180,6 +189,7 @@ class EMACreditSpread(BaseStrategy):
         print(f"{tag} Net premium: ${premium:.4f} | TP: ${premium*self.tp_pct:.4f} | SL: -${premium*self.sl_pct:.4f}")
 
         self.legs.extend(day_legs)
+        self._persist_state()
         return day_legs, premium, direction
 
     def _monitor_day_trade(self, day_legs, premium, day_num, direction):
@@ -246,6 +256,65 @@ class EMACreditSpread(BaseStrategy):
             'direction': direction,
         })
         print(f"[EMA D{day_num}] Closed | PnL: ${pnl:+.4f} | Cumulative: ${self.cumulative_pnl:+.4f}")
+        # Persist state to DB so it survives server restarts
+        self._persist_state()
+
+    # --- Persistence ---
+
+    def _persist_state(self):
+        """Save trade_log, cumulative_pnl, total_days_traded, and legs to DB.
+        This ensures data survives server restarts."""
+        try:
+            from models import update_strategy_db
+            import json
+            # Find sid if not set (for strategies started before this code change)
+            sid = getattr(self, '_sid', None)
+            if not sid:
+                try:
+                    from app import ema_spread_strategies
+                    for s_id, entry in ema_spread_strategies.items():
+                        if entry.get('strategy') is self:
+                            sid = s_id
+                            self._sid = sid
+                            break
+                except Exception:
+                    pass
+            if not sid:
+                return
+            # Build base params if not set
+            base_params = getattr(self, '_base_params', {
+                'asset': self.asset, 'lot_size': self.lot_size,
+                'sell_delta': self.sell_delta, 'buy_delta': self.buy_delta,
+                'ema_period': self.ema_period,
+                'tp_pct': int(self.tp_pct * 100), 'sl_pct': int(self.sl_pct * 100),
+                'monitoring_interval': self.monitor_interval,
+                'entry_hour': self.entry_hour, 'entry_minute': self.entry_minute,
+                'min_expiry_days': self.min_expiry_days,
+            })
+            details = {**base_params,
+                       'trade_log': self.trade_log,
+                       'cumulative_pnl': self.cumulative_pnl,
+                       'total_days_traded': self.total_days_traded}
+            # Serialize current legs
+            legs_data = []
+            for leg in self.legs:
+                legs_data.append({
+                    'symbol': leg.get('symbol', ''),
+                    'product_id': leg.get('product_id'),
+                    'side': leg.get('side', ''),
+                    'type': leg.get('type', ''),
+                    'delta': leg.get('delta', 0),
+                    'strike': leg.get('strike', 0),
+                    'entry_price': leg.get('entry_price', 0),
+                    'size': leg.get('size', 0),
+                })
+            update_strategy_db(sid,
+                               details=json.dumps(details),
+                               legs=json.dumps(legs_data),
+                               pnl=round(self.cumulative_pnl, 4))
+            logger.debug(f"[EMA Spread] State persisted: {self.total_days_traded} days, ${self.cumulative_pnl:.4f}")
+        except Exception as e:
+            logger.warning(f"[EMA Spread] Failed to persist state: {e}")
 
     # --- Timing ---
 
