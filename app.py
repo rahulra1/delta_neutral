@@ -1538,9 +1538,21 @@ def api_close_strategy(sid):
 
     update_tracked(sid, status='closed')
     # Clean up position tracker
-    for leg in all_tracked.get(sid, {}).get('details', {}).get('legs', []):
-        if leg.get('product_id'):
-            position_tracker.close(uid, leg['product_id'])
+    try:
+        tracked_details = all_tracked.get(sid, {}).get('details', {})
+        if isinstance(tracked_details, str):
+            import json as _j
+            tracked_details = _j.loads(tracked_details)
+        tracked_legs = tracked_details.get('legs', []) if isinstance(tracked_details, dict) else []
+        if isinstance(tracked_legs, str):
+            import json as _j
+            tracked_legs = _j.loads(tracked_legs)
+        if isinstance(tracked_legs, list):
+            for leg in tracked_legs:
+                if isinstance(leg, dict) and leg.get('product_id'):
+                    position_tracker.close(uid, leg['product_id'])
+    except Exception as e:
+        logger.warning(f"[close] position_tracker cleanup error for {sid}: {e}")
     return jsonify(success=True, status='closed')
 
 

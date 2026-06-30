@@ -173,6 +173,7 @@ class HybridSwitch(BaseStrategy):
                         buy_legs.append(buy_leg)
                         with self._legs_lock:
                             self.legs.append(buy_leg)
+                    self._persist_state()
 
             # Check buy legs for SL / trailing
             for leg in buy_legs:
@@ -196,6 +197,7 @@ class HybridSwitch(BaseStrategy):
                     place_order(leg['product_id'], leg['symbol'], leg['size'], 'sell')
                     leg['active'] = False
                     leg['exit_price'] = current
+                    self._persist_state()
 
             # All done early?
             all_sell_done = all(not l['active'] for l in sell_legs)

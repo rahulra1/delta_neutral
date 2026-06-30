@@ -151,7 +151,7 @@ class DailyStrangle(BaseStrategy):
 
             # Check each active leg for SL
             for leg in day_legs:
-                if leg['stopped']:
+                if leg.get('stopped', False):
                     continue
                 data = get_current_price(leg['product_id'], self.asset)
                 if not data:
@@ -163,9 +163,10 @@ class DailyStrangle(BaseStrategy):
                     place_order(leg['product_id'], leg['symbol'], leg['size'], 'buy')
                     leg['stopped'] = True
                     leg['exit_price'] = current
+                    self._persist_state()
 
             # All legs stopped — done early
-            if all(l['stopped'] for l in day_legs):
+            if all(l.get('stopped', False) for l in day_legs):
                 print(f"{tag} Both legs stopped")
                 break
 
@@ -203,7 +204,7 @@ class DailyStrangle(BaseStrategy):
     def _close_day_legs(self, day_legs):
         """Close all non-stopped legs."""
         for leg in day_legs:
-            if leg['stopped']:
+            if leg.get('stopped', False):
                 continue
             data = get_current_price(leg['product_id'], self.asset)
             leg['exit_price'] = data['mark_price'] if data else leg['entry_price']
@@ -231,10 +232,10 @@ class DailyStrangle(BaseStrategy):
         return best
 
     def _exit_reason(self, day_legs):
-        both_stopped = all(l['stopped'] and l.get('exit_price', 0) >= l['sl_price'] * 0.99 for l in day_legs)
+        both_stopped = all(l.get('stopped', False) and l.get('exit_price', 0) >= l.get('sl_price', 0) * 0.99 for l in day_legs)
         if both_stopped:
             return 'both_sl'
-        any_sl = any(l.get('exit_price', 0) >= l['sl_price'] * 0.99 for l in day_legs)
+        any_sl = any(l.get('exit_price', 0) >= l.get('sl_price', 0) * 0.99 for l in day_legs)
         if any_sl:
             return 'one_sl'
         return 'eod_exit'
