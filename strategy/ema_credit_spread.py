@@ -104,9 +104,16 @@ class EMACreditSpread(BaseStrategy):
     def close_all(self):
         self._running = False
         for leg in list(self.legs):
-            close_side = 'buy' if leg['side'] == 'sell' else 'sell'
-            place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
+            try:
+                close_side = 'buy' if leg['side'] == 'sell' else 'sell'
+                place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
+            except Exception as e:
+                logger.warning(f"[EMA Spread] Failed to close leg {leg.get('symbol')}: {e}")
         self.legs.clear()
+        try:
+            self._persist_state()
+        except Exception:
+            pass
 
     @property
     def pnl(self):

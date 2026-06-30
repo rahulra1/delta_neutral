@@ -284,12 +284,20 @@ class HybridSwitch(BaseStrategy):
         with self._legs_lock:
             for leg in list(self.legs):
                 if leg.get('active', True):
-                    close_side = 'buy' if leg['side'] == 'sell' else 'sell'
-                    place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
+                    try:
+                        close_side = 'buy' if leg['side'] == 'sell' else 'sell'
+                        place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
+                    except Exception as e:
+                        logger.warning(f"[Hybrid] Failed to close leg {leg.get('symbol')}: {e}")
             self.legs.clear()
+        # Don't block Flask thread — let session threads exit on their own
         for t in self._session_threads:
-            t.join(timeout=30)
+            t.join(timeout=2)
         self._session_threads.clear()
+        try:
+            self._persist_state()
+        except Exception:
+            pass
 
     @property
     def pnl(self):

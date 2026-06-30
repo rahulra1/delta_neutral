@@ -1463,19 +1463,28 @@ def api_close_strategy(sid):
     if not closed and sid in ema_spread_strategies:
         ecs = ema_spread_strategies[sid]
         if ecs.get('strategy'):
-            ecs['strategy'].close_all()
+            try:
+                ecs['strategy'].close_all()
+            except Exception as e:
+                logger.error(f"[close] EMA Spread {sid} close_all error: {e}")
         closed = True
     # Daily Strangle
     if not closed and sid in strangle_strategies:
         st = strangle_strategies[sid]
         if st.get('strategy'):
-            st['strategy'].close_all()
+            try:
+                st['strategy'].close_all()
+            except Exception as e:
+                logger.error(f"[close] Strangle {sid} close_all error: {e}")
         closed = True
     # Hybrid Switch
     if not closed and sid in hybrid_strategies:
         hs = hybrid_strategies[sid]
         if hs.get('strategy'):
-            hs['strategy'].close_all()
+            try:
+                hs['strategy'].close_all()
+            except Exception as e:
+                logger.error(f"[close] Hybrid {sid} close_all error: {e}")
         closed = True
     # Option Chain monitor
     if not closed and sid in active_monitors:
@@ -2648,8 +2657,17 @@ def strangle_stop():
     if not e or e.get('user_id') != current_user_id():
         return jsonify(error="Not found"), 404
     if e.get('strategy'):
-        e['strategy']._running = False
-        e['strategy'].close_all()
+        try:
+            from config import set_thread_credentials
+            profile_id = e.get('profile_id')
+            if profile_id:
+                api_key, api_secret, _, broker = get_profile_creds(profile_id)
+                if api_key:
+                    set_thread_credentials(api_key, api_secret, broker)
+            e['strategy']._running = False
+            e['strategy'].close_all()
+        except Exception as ex:
+            logger.error(f"[strangle_stop] {sid} error: {ex}")
     return jsonify(status="stopping")
 
 
@@ -2798,8 +2816,17 @@ def hybrid_stop():
     if not e or e.get('user_id') != current_user_id():
         return jsonify(error="Not found"), 404
     if e.get('strategy'):
-        e['strategy']._running = False
-        e['strategy'].close_all()
+        try:
+            from config import set_thread_credentials
+            profile_id = e.get('profile_id')
+            if profile_id:
+                api_key, api_secret, _, broker = get_profile_creds(profile_id)
+                if api_key:
+                    set_thread_credentials(api_key, api_secret, broker)
+            e['strategy']._running = False
+            e['strategy'].close_all()
+        except Exception as ex:
+            logger.error(f"[hybrid_stop] {sid} error: {ex}")
     return jsonify(status="stopping")
 
 
@@ -3086,7 +3113,16 @@ def ema_spread_stop():
     if not e or e.get('user_id') != current_user_id():
         return jsonify(error="Not found"), 404
     if e.get('strategy'):
-        e['strategy'].close_all()
+        try:
+            from config import set_thread_credentials
+            profile_id = e.get('profile_id')
+            if profile_id:
+                api_key, api_secret, _, broker = get_profile_creds(profile_id)
+                if api_key:
+                    set_thread_credentials(api_key, api_secret, broker)
+            e['strategy'].close_all()
+        except Exception as ex:
+            logger.error(f"[ema_spread_stop] {sid} error: {ex}")
     return jsonify(status="stopping")
 
 

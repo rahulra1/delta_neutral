@@ -243,8 +243,15 @@ class DailyStrangle(BaseStrategy):
         self._running = False
         with self._legs_lock:
             for leg in list(self.legs):
-                place_order(leg['product_id'], leg['symbol'], leg['size'], 'buy')
+                try:
+                    place_order(leg['product_id'], leg['symbol'], leg['size'], 'buy')
+                except Exception as e:
+                    logger.warning(f"[Strangle] Failed to close leg {leg.get('symbol')}: {e}")
             self.legs.clear()
+        try:
+            self._persist_state()
+        except Exception:
+            pass
 
     @property
     def pnl(self):
