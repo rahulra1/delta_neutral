@@ -316,8 +316,8 @@ class EMACreditSpread(BaseStrategy):
                     'size': leg.get('size', 0),
                 })
             update_strategy_db(sid,
-                               details=json.dumps(details),
-                               legs=json.dumps(legs_data),
+                               details=details,
+                               legs=legs_data,
                                pnl=round(self.cumulative_pnl, 4))
             logger.debug(f"[EMA Spread] State persisted: {self.total_days_traded} days, ${self.cumulative_pnl:.4f}")
         except Exception as e:

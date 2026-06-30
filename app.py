@@ -65,7 +65,20 @@ def _resume_db_strategies():
         d = dict(r)
         sid = d['sid']
         legs = _json.loads(d['legs']) if d['legs'] else []
+        # Handle double-encoded legs (string inside a string)
+        if isinstance(legs, str):
+            try:
+                legs = _json.loads(legs)
+            except (ValueError, TypeError):
+                legs = []
+        if not isinstance(legs, list):
+            legs = []
         details = _json.loads(d['details']) if d['details'] else {}
+        if isinstance(details, str):
+            try:
+                details = _json.loads(details)
+            except (ValueError, TypeError):
+                details = {}
         user_id = d['user_id']
         source = d['source']
         max_profit = d.get('max_profit', 0) or 0
@@ -84,6 +97,8 @@ def _resume_db_strategies():
 
         # 2. Restore position_tracker
         for leg in legs:
+            if not isinstance(leg, dict):
+                continue
             position_tracker.open(user_id, leg.get('product_id'), leg.get('symbol') or '',
                 type=leg.get('type') or '', strike=leg.get('strike') or '',
                 side=leg.get('side') or '', size=int(leg.get('size') or 0),

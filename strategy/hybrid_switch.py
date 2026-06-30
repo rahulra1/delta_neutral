@@ -351,8 +351,8 @@ class HybridSwitch(BaseStrategy):
             for leg in self.legs:
                 legs_data.append({k: v for k, v in leg.items()
                                   if not callable(v) and k != '_lock'})
-            update_strategy_db(sid, details=json.dumps(details),
-                               legs=json.dumps(legs_data),
+            update_strategy_db(sid, details=details,
+                               legs=legs_data,
                                pnl=round(self.cumulative_pnl, 2))
         except Exception as e:
             logger.warning(f"[Hybrid] Persist state failed: {e}")
