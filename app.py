@@ -1176,6 +1176,11 @@ def api_dashboard():
                     s = strangle_strategies[sid]['strategy']
                     t['pnl'] = round(s.pnl, 2)
                     t['cumulative_pnl'] = round(s.cumulative_pnl, 2)
+                # Check Portfolio Strangle
+                elif sid in portfolio_strangle_strategies and portfolio_strangle_strategies[sid].get('strategy'):
+                    s = portfolio_strangle_strategies[sid]['strategy']
+                    t['pnl'] = round(s.pnl, 4)
+                    t['cumulative_pnl'] = round(s.cumulative_pnl, 4)
                 # Check Hybrid Switch
                 elif sid in hybrid_strategies and hybrid_strategies[sid].get('strategy'):
                     s = hybrid_strategies[sid]['strategy']
@@ -1195,6 +1200,7 @@ def api_dashboard():
         running_count += sum(1 for sid, e in weekly_dn_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in ema_spread_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in strangle_strategies.items() if e.get('user_id') == uid and e.get('running'))
+        running_count += sum(1 for sid, e in portfolio_strangle_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in hybrid_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in _futures_traders.items() if e.get('user_id') == uid and e['trader'].running)
     running_count += len(registry.get_running(uid))
@@ -1322,6 +1328,13 @@ def api_all_strategies():
                         entry['status'] = 'completed'
                         update_tracked(sid, status='completed', pnl=round(s.pnl, 2))
                         continue
+                elif sid in portfolio_strangle_strategies and portfolio_strangle_strategies[sid].get('strategy'):
+                    s = portfolio_strangle_strategies[sid]['strategy']
+                    entry['pnl'] = round(s.pnl, 4)
+                    if not s._running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.pnl, 4))
+                        continue
                 elif sid in hybrid_strategies and hybrid_strategies[sid].get('strategy'):
                     s = hybrid_strategies[sid]['strategy']
                     entry['pnl'] = round(s.pnl, 2)
@@ -1427,6 +1440,8 @@ def api_close_strategy(sid):
             profile_id = ema_spread_strategies[sid].get('profile_id')
         elif sid in strangle_strategies:
             profile_id = strangle_strategies[sid].get('profile_id')
+        elif sid in portfolio_strangle_strategies:
+            profile_id = portfolio_strangle_strategies[sid].get('profile_id')
         elif sid in hybrid_strategies:
             profile_id = hybrid_strategies[sid].get('profile_id')
         if not profile_id:
@@ -1492,6 +1507,15 @@ def api_close_strategy(sid):
                 st['strategy'].close_all()
             except Exception as e:
                 logger.error(f"[close] Strangle {sid} close_all error: {e}")
+        closed = True
+    # Portfolio Strangle
+    if not closed and sid in portfolio_strangle_strategies:
+        ps = portfolio_strangle_strategies[sid]
+        if ps.get('strategy'):
+            try:
+                ps['strategy'].close_all()
+            except Exception as e:
+                logger.error(f"[close] Portfolio Strangle {sid} close_all error: {e}")
         closed = True
     # Hybrid Switch
     if not closed and sid in hybrid_strategies:
@@ -1592,6 +1616,8 @@ def api_close_all_strategies():
                 profile_id = ema_spread_strategies[sid].get('profile_id')
             elif sid in strangle_strategies:
                 profile_id = strangle_strategies[sid].get('profile_id')
+            elif sid in portfolio_strangle_strategies:
+                profile_id = portfolio_strangle_strategies[sid].get('profile_id')
             elif sid in hybrid_strategies:
                 profile_id = hybrid_strategies[sid].get('profile_id')
             if not profile_id:
@@ -1637,6 +1663,11 @@ def api_close_all_strategies():
             st = strangle_strategies[sid]
             if st.get('strategy'):
                 st['strategy'].close_all()
+            closed = True
+        if not closed and sid in portfolio_strangle_strategies:
+            ps = portfolio_strangle_strategies[sid]
+            if ps.get('strategy'):
+                ps['strategy'].close_all()
             closed = True
         if not closed and sid in hybrid_strategies:
             hs = hybrid_strategies[sid]
@@ -1773,6 +1804,19 @@ def api_strategy_detail(sid):
             for leg in strat.legs:
                 live_legs.append({'symbol': leg['symbol'], 'type': leg['type'], 'strike': leg['strike'],
                     'side': 'sell', 'size': leg['size'], 'entry_price': round(leg['entry_price'], 2),
+                    'current_mark': 0, 'current_pnl': 0, 'stopped': leg.get('stopped', False)})
+        elif sid in portfolio_strangle_strategies and portfolio_strangle_strategies[sid].get('strategy'):
+            ps = portfolio_strangle_strategies[sid]
+            strat = ps['strategy']
+            entry['pnl'] = round(strat.pnl, 4)
+            entry['cumulative_pnl'] = round(strat.cumulative_pnl, 4)
+            entry['running'] = ps.get('running', False)
+            logs = ps.get('log_history', [])
+            entry['trade_log'] = strat.trade_log[-20:]
+            entry['days_traded'] = strat.total_days_traded
+            for leg in strat.legs:
+                live_legs.append({'symbol': leg['symbol'], 'type': leg['type'], 'strike': leg['strike'],
+                    'side': leg['side'], 'size': leg['size'], 'entry_price': round(leg['entry_price'], 4),
                     'current_mark': 0, 'current_pnl': 0, 'stopped': leg.get('stopped', False)})
         elif sid in hybrid_strategies and hybrid_strategies[sid].get('strategy'):
             hs = hybrid_strategies[sid]
@@ -4049,7 +4093,7 @@ def api_tracker_logs(sid):
         pnl = round(strat.total_pnl, 2) if strat else 0
         return jsonify(sid=sid, logs=logs[-last:], running=e.get('running', False), pnl=pnl, status='running' if e.get('running') else 'completed')
     # Check new strategy dicts
-    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, strangle_strategies, hybrid_strategies):
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, strangle_strategies, portfolio_strangle_strategies, hybrid_strategies):
         e = dct.get(sid)
         if e and e.get('user_id') == current_user_id():
             logs = list(e.get('log_history', []))
@@ -4087,7 +4131,7 @@ def api_tracker_close(sid):
         e['strategy'].close_all_positions()
         return jsonify(status='closed')
     # New strategy dicts
-    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, strangle_strategies, hybrid_strategies):
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, strangle_strategies, portfolio_strangle_strategies, hybrid_strategies):
         e = dct.get(sid)
         if e and e.get('user_id') == current_user_id() and e.get('strategy'):
             e['strategy'].close_all()
