@@ -4,6 +4,7 @@ import api from '../api';
 const ALL_STRATEGIES = [
   { key: 'delta_neutral', label: 'Delta Neutral' },
   { key: 'daily_strangle', label: 'Daily Strangle (0DTE)' },
+  { key: 'portfolio_strangle', label: 'Portfolio Strangle (0DTE)' },
   { key: 'hybrid_switch', label: 'Hybrid Switch BTST' },
   { key: 'oi_strategy', label: 'OI Strategy' },
   { key: 'weekly_dn', label: 'Weekly Delta Neutral' },

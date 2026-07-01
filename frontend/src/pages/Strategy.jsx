@@ -77,6 +77,10 @@ const STRATEGIES = [
     desc: '0DTE short strangle: sell ~$100 call + put at 9 AM, 100% SL per leg (premium doubles), exit 5:15 PM. Daily recurring.',
     features: ['0DTE Expiry', '9AM Entry / 5PM Exit', '100% SL Per Leg', 'Daily Auto-Trade'],
     rec: '⏱ Daily 9:00 AM · BTC options · $200 margin for 0.1 BTC' },
+  { key: 'portfolio_strangle', label: 'Portfolio Strangle', icon: '📊', type: 'Options',
+    desc: '0DTE 3-entry strangle: sell OTM5 at 9:15, 10:20, 11:15 (30 lots each). 200% SL + recost re-entry. Skip Fri & Sun.',
+    features: ['3 Time Entries', 'OTM5 Strangle', '200% SL + Recost', 'Skip Fri/Sun'],
+    rec: '⏱ Daily 9:15/10:20/11:15 · BTC options · Drawdown optimized' },
   { key: 'hybrid_switch', label: 'Hybrid Switch BTST', icon: '⚡', type: 'Options',
     desc: 'Sell strangle at 7:15 PM, on SL hit switch to 10x buying with trailing SL. Holds across 2 sessions (BTST).',
     features: ['BTST (2 Sessions)', 'Non-Directional → Directional', '10x Buy on SL', 'Trailing SL'],
@@ -168,6 +172,18 @@ const STRANGLE_FIELDS = [
   { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 0 },
   { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 17 },
   { key: 'exit_minute', label: 'Exit Minute', type: 'number', default: 15 },
+  { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 10 },
+];
+
+const PORTFOLIO_STRANGLE_FIELDS = [
+  { key: 'lot_size', label: 'Lot Size (per entry)', type: 'number', default: 30, hint: '30 lots × 3 entries = 90 total/day' },
+  { key: 'otm_index', label: 'OTM Index', type: 'number', default: 5, hint: 'OTM5 = 5th strike from ATM' },
+  { key: 'sl_pct', label: 'Stop Loss (%)', type: 'number', default: 300, hint: '300 = premium triples (200% loss)' },
+  { key: 'recost_entries', label: 'Recost Re-entries', type: 'number', default: 1, hint: 'Re-enter if premium drops back to entry after SL' },
+  { key: 'entry_times', label: 'Entry Times (comma-sep)', type: 'text', default: '9:15,10:20,11:15', hint: '3 entries per day' },
+  { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 17 },
+  { key: 'exit_minute', label: 'Exit Minute', type: 'number', default: 29 },
+  { key: 'skip_weekdays', label: 'Skip Days (0=Mon..6=Sun)', type: 'text', default: '4,6', hint: '4=Fri, 6=Sun' },
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 10 },
 ];
 
@@ -452,6 +468,60 @@ export default function Strategy() {
                         <td style={{ padding: '4px 8px' }}>{t.date}</td>
                         <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${t.pnl}</td>
                         <td style={{ padding: '4px 8px' }}>{t.exit_reason === 'both_sl' ? '🛑 Both SL' : t.exit_reason === 'one_sl' ? '⚠️ One SL' : '⏰ EOD Exit'}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )} />
+      )}
+      {activeTab === 'portfolio_strangle' && (
+        <StrategyTemplate title="Portfolio Strangle (0DTE)" icon="📊" type="Options" description="3-entry OTM5 strangle with recost re-entry. Time-diversified, skip Fri & Sun." profiles={profiles}
+          configFields={PORTFOLIO_STRANGLE_FIELDS}
+          onStart={async (config) => {
+            const c = {...config};
+            c.entry_times = (c.entry_times || '9:15,10:20,11:15').split(',').map(t => t.trim());
+            c.skip_weekdays = (c.skip_weekdays || '4,6').split(',').map(d => parseInt(d.trim()));
+            const { data } = await api.post('/portfolio-strangle/start', c); return data;
+          }}
+          onStop={async (sid) => { await api.post('/portfolio-strangle/stop', { sid }); }}
+          statusEndpoint="/portfolio-strangle/status" streamEndpoint="/portfolio-strangle/stream"
+          renderStatus={(s) => (
+            <>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(3,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Total P&L</div><div className="value" style={{ color: (s.total_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.total_pnl||0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Cumulative</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Days Traded</div><div className="value">{s.days_traded || 0}</div></div>
+              </div>
+              {s.legs && s.legs.length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Active Legs ({s.legs.length})</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Type', 'Strike', 'Entry', 'SL', 'Status'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{s.legs.map((l, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}><span className={`badge ${l.type === 'call' ? 'badge-green' : 'badge-red'}`}>{l.type.toUpperCase()}</span></td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>{l.strike}</td>
+                        <td style={{ padding: '4px 8px' }}>${l.entry_price.toFixed(4)}</td>
+                        <td style={{ padding: '4px 8px', color: 'var(--red)' }}>${(l.entry_price * 3).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px' }}>{l.stopped ? <span className="badge badge-red">Stopped</span> : <span className="badge badge-green">Active</span>}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+              {(s.trade_log || []).length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Trade Log</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Date', 'Slots', 'SLs', 'Recost', 'P&L', 'Exit'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{(s.trade_log || []).slice(-10).reverse().map((t, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}>{t.date}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.slots || 3}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.sl_count || 0}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.recost_count || 0}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${t.pnl}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.exit_reason === 'eod' ? '⏰ EOD' : t.exit_reason}</td>
                       </tr>))}</tbody>
                   </table>
                 </div>
