@@ -48,6 +48,7 @@ iv_crush_strategies = {}
 call_ratio_strategies = {}
 oi_strategies = {}
 strangle_strategies = {}
+portfolio_strangle_strategies = {}
 hybrid_strategies = {}
 weekly_dn_strategies = {}
 ema_spread_strategies = {}
@@ -2742,6 +2743,171 @@ def strangle_status(sid):
         trade_log=s.trade_log[-10:],
         legs=[{'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
                'side': l['side'], 'size': l['size'], 'entry_price': round(l['entry_price'], 2),
+               'stopped': l.get('stopped', False)}
+              for l in s.legs],
+    )
+
+
+# ── Portfolio Strangle (0DTE 3-entry) Routes ──
+
+
+def run_portfolio_strangle(sid, params):
+    entry = portfolio_strangle_strategies[sid]
+    uid = entry['user_id']
+    if not _setup_strategy_thread(entry):
+        entry['log_queue'].put("__STOPPED__")
+        return
+
+    try:
+        from strategy.portfolio_strangle import PortfolioStrangle
+        # Parse entry_times from params
+        entry_times_raw = params.get('entry_times', ['9:15', '10:20', '11:15'])
+        entry_times = []
+        for t in entry_times_raw:
+            parts = t.split(':')
+            entry_times.append((int(parts[0]), int(parts[1])))
+
+        skip_days_raw = params.get('skip_weekdays', [4, 6])
+        skip_days = [int(d) for d in skip_days_raw]
+
+        s = PortfolioStrangle(
+            asset=params.get('asset', 'BTC'),
+            lot_size=int(params.get('lot_size', 30)),
+            sl_pct=float(params.get('sl_pct', 300)) / 100,
+            recost_entries=int(params.get('recost_entries', 1)),
+            otm_index=int(params.get('otm_index', 5)),
+            entry_times=entry_times,
+            exit_hour=int(params.get('exit_hour', 17)),
+            exit_minute=int(params.get('exit_minute', 29)),
+            monitor_interval=int(params.get('monitoring_interval', 10)),
+            skip_weekdays=skip_days,
+        )
+        s._log_queue = entry['log_queue']
+        s._log_history = entry['log_history']
+        s._sid = sid
+        import config as _cfg
+        s._api_key = _cfg.get_api_key()
+        s._api_secret = _cfg.get_api_secret()
+        s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
+        entry['strategy'] = s
+        entry['running'] = True
+        record_start(sid, params, user_id=uid)
+        if not s.initialize():
+            entry['log_queue'].put("✗ Init failed")
+            entry['running'] = False
+            entry['log_queue'].put("__STOPPED__")
+            return
+
+        import strategy.portfolio_strangle as _ps_mod
+        _orig_sleep = _ps_mod.time.sleep
+        _tick = [0]
+        def _snap_sleep(secs):
+            _orig_sleep(secs)
+            _tick[0] += 1
+            if _tick[0] % 6 == 0:
+                try:
+                    save_pnl_snapshot(uid, sid, round(s.pnl, 4))
+                except Exception:
+                    pass
+        _ps_mod.time.sleep = _snap_sleep
+        try:
+            s.monitor()
+        finally:
+            _ps_mod.time.sleep = _orig_sleep
+    except Exception as e:
+        entry['log_queue'].put(f"❌ Error: {e}")
+    finally:
+        st = entry.get('strategy')
+        pnl = round(st.cumulative_pnl, 4) if st else 0
+        record_end(sid, pnl, getattr(st, 'total_days_traded', 0))
+        update_tracked(sid, status='completed', pnl=round(pnl, 4))
+        _teardown_strategy_thread(entry)
+
+
+@app.route('/api/portfolio-strangle/start', methods=['POST'])
+@login_required
+def portfolio_strangle_start():
+    params = request.json
+    profile_id = params.pop('profile_id', None)
+    api_key, api_secret, _, broker = get_profile_creds(profile_id)
+    if not api_key:
+        return jsonify(error="No API profile selected"), 400
+    sid = str(uuid.uuid4())[:8]
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [],
+             'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    portfolio_strangle_strategies[sid] = entry
+    track_strategy(sid, 'Portfolio Strangle', f"{params.get('asset','BTC')} 0DTE Portfolio",
+                   current_user_id(), details={**params, 'profile_id': profile_id})
+    entry['thread'] = threading.Thread(target=run_portfolio_strangle, args=(sid, params), daemon=True)
+    entry['thread'].start()
+    return jsonify(status="started", sid=sid)
+
+
+@app.route('/api/portfolio-strangle/stop', methods=['POST'])
+@login_required
+def portfolio_strangle_stop():
+    sid = request.json.get('sid')
+    e = portfolio_strangle_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error="Not found"), 404
+    if e.get('strategy'):
+        try:
+            from config import set_thread_credentials
+            profile_id = e.get('profile_id')
+            if profile_id:
+                api_key, api_secret, _, broker = get_profile_creds(profile_id)
+                if api_key:
+                    set_thread_credentials(api_key, api_secret, broker)
+            e['strategy']._running = False
+            e['strategy'].close_all()
+        except Exception as ex:
+            logger.error(f"[portfolio_strangle_stop] {sid} error: {ex}")
+    return jsonify(status="stopping")
+
+
+@app.route('/api/portfolio-strangle/stream/<sid>')
+@login_required
+def portfolio_strangle_stream(sid):
+    e = portfolio_strangle_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
+    q = e['log_queue']
+    history = e.get('log_history', [])
+    def generate():
+        for msg in list(history):
+            yield f"data: {msg}\n\n"
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                if msg == "__STOPPED__":
+                    yield f"event: stopped\ndata: done\n\n"
+                    break
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield f": heartbeat\n\n"
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/portfolio-strangle/status/<sid>')
+@login_required
+def portfolio_strangle_status(sid):
+    e = portfolio_strangle_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(running=False)
+    if not e['running']:
+        return jsonify(running=False)
+    s = e.get('strategy')
+    if not s:
+        return jsonify(running=True, total_pnl=0, cumulative_pnl=0, days_traded=0, trade_log=[], legs=[])
+    return jsonify(
+        running=True,
+        total_pnl=round(s.pnl, 4),
+        cumulative_pnl=round(s.cumulative_pnl, 4),
+        days_traded=s.total_days_traded,
+        trade_log=s.trade_log[-20:],
+        legs=[{'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
+               'side': l['side'], 'size': l['size'], 'entry_price': round(l['entry_price'], 4),
                'stopped': l.get('stopped', False)}
               for l in s.legs],
     )
