@@ -2104,6 +2104,30 @@ def _leg_info(s, leg):
     )
 
 
+def _enrich_leg(leg, asset='BTC'):
+    """Add live mark_price and pnl to a strategy leg dict."""
+    from api.pricing import get_current_price
+    from config import get_contract_value
+    mark = None
+    try:
+        data = get_current_price(leg['product_id'], asset)
+        if data:
+            mark = data.get('mark_price')
+    except Exception:
+        pass
+    if not mark:
+        mark = leg.get('entry_price', 0)
+    cv = get_contract_value(asset)
+    size = leg.get('size', 0)
+    entry = leg.get('entry_price', 0)
+    side = leg.get('side', 'sell')
+    if side == 'sell':
+        pnl = (entry - mark) * size * cv
+    else:
+        pnl = (mark - entry) * size * cv
+    return round(mark, 4), round(pnl, 4)
+
+
 @app.route('/api/history')
 @login_required
 def api_history():
@@ -2779,16 +2803,24 @@ def strangle_status(sid):
     s = e.get('strategy')
     if not s:
         return jsonify(running=True, total_pnl=0, cumulative_pnl=0, days_traded=0, trade_log=[], legs=[])
+    enriched_legs = []
+    for l in s.legs:
+        mark, pnl = _enrich_leg(l, getattr(s, 'asset', 'BTC'))
+        enriched_legs.append({
+            'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
+            'side': l['side'], 'size': l['size'], 'entry_price': round(l['entry_price'], 2),
+            'mark_price': mark, 'pnl': pnl,
+            'stopped': l.get('stopped', False),
+            'product_id': l.get('product_id'),
+        })
     return jsonify(
         running=True,
         total_pnl=round(s.pnl, 2),
         cumulative_pnl=round(s.cumulative_pnl, 2),
+        session_pnl=round(s._pnl, 4),
         days_traded=s.total_days_traded,
         trade_log=s.trade_log[-10:],
-        legs=[{'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
-               'side': l['side'], 'size': l['size'], 'entry_price': round(l['entry_price'], 2),
-               'stopped': l.get('stopped', False)}
-              for l in s.legs],
+        legs=enriched_legs,
     )
 
 
@@ -2944,16 +2976,24 @@ def portfolio_strangle_status(sid):
     s = e.get('strategy')
     if not s:
         return jsonify(running=True, total_pnl=0, cumulative_pnl=0, days_traded=0, trade_log=[], legs=[])
+    enriched_legs = []
+    for l in s.legs:
+        mark, pnl = _enrich_leg(l, getattr(s, 'asset', 'BTC'))
+        enriched_legs.append({
+            'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
+            'side': l['side'], 'size': l['size'], 'entry_price': round(l['entry_price'], 4),
+            'mark_price': mark, 'pnl': pnl,
+            'stopped': l.get('stopped', False),
+            'product_id': l.get('product_id'),
+        })
     return jsonify(
         running=True,
         total_pnl=round(s.pnl, 4),
         cumulative_pnl=round(s.cumulative_pnl, 4),
+        session_pnl=round(s._pnl, 4),
         days_traded=s.total_days_traded,
         trade_log=s.trade_log[-20:],
-        legs=[{'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
-               'side': l['side'], 'size': l['size'], 'entry_price': round(l['entry_price'], 4),
-               'stopped': l.get('stopped', False)}
-              for l in s.legs],
+        legs=enriched_legs,
     )
 
 
@@ -3102,16 +3142,24 @@ def hybrid_status(sid):
     s = e.get('strategy')
     if not s:
         return jsonify(running=True, total_pnl=0, cumulative_pnl=0, days_traded=0, trade_log=[], legs=[])
+    enriched_legs = []
+    for l in s.legs:
+        mark, pnl = _enrich_leg(l, getattr(s, 'asset', 'BTC'))
+        enriched_legs.append({
+            'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
+            'side': l['side'], 'size': l['size'], 'entry_price': round(l['entry_price'], 2),
+            'mark_price': mark, 'pnl': pnl,
+            'role': l.get('role', ''), 'active': l.get('active', False),
+            'product_id': l.get('product_id'),
+        })
     return jsonify(
         running=True,
         total_pnl=round(s.pnl, 2),
         cumulative_pnl=round(s.cumulative_pnl, 2),
+        session_pnl=round(s._pnl, 4),
         days_traded=s.total_days_traded,
         trade_log=s.trade_log[-10:],
-        legs=[{'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
-               'side': l['side'], 'size': l['size'], 'entry_price': round(l['entry_price'], 2),
-               'role': l.get('role', ''), 'active': l.get('active', False)}
-              for l in s.legs],
+        legs=enriched_legs,
     )
 
 
@@ -3394,18 +3442,27 @@ def ema_spread_status(sid):
     if not e['running'] or not s:
         return jsonify(running=False)
     pnl_pct = (s._pnl / s.net_premium * 100) if s.net_premium > 0 else 0
+    enriched_legs = []
+    for l in s.legs:
+        mark, pnl = _enrich_leg(l, getattr(s, 'asset', 'BTC'))
+        enriched_legs.append({
+            'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
+            'side': l['side'], 'delta': l['delta'], 'size': l['size'],
+            'entry_price': round(l['entry_price'], 4),
+            'mark_price': mark, 'pnl': pnl,
+            'product_id': l.get('product_id'),
+        })
     return jsonify(
         running=True,
         cumulative_pnl=round(s.cumulative_pnl, 4),
         today_pnl=round(s._pnl, 4),
+        session_pnl=round(s._pnl, 4),
         net_premium=round(s.net_premium, 4),
         pnl_pct=round(pnl_pct, 1),
         days_traded=s.total_days_traded,
         entry_time=f"{s.entry_hour}:{s.entry_minute:02d}",
         trade_log=s.trade_log[-10:],
-        legs=[{'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
-               'side': l['side'], 'delta': l['delta'], 'size': l['size'],
-               'entry_price': round(l['entry_price'], 4)} for l in s.legs],
+        legs=enriched_legs,
     )
 
 

@@ -437,22 +437,25 @@ export default function Strategy() {
           statusEndpoint="/strangle/status" streamEndpoint="/strangle/stream"
           renderStatus={(s) => (
             <>
-              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(3,1fr)', marginBottom: 12 }}>
-                <div className="stat-card"><div className="label">Total P&L</div><div className="value" style={{ color: (s.total_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.total_pnl||0).toFixed(2)}</div></div>
-                <div className="stat-card"><div className="label">Cumulative</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(2)}</div></div>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Session P&L</div><div className="value" style={{ color: (s.session_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.session_pnl || 0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Cumulative P&L</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Total (incl. Open)</div><div className="value" style={{ color: (s.total_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.total_pnl||0).toFixed(2)}</div></div>
                 <div className="stat-card"><div className="label">Days Traded</div><div className="value">{s.days_traded || 0}</div></div>
               </div>
               {s.legs && s.legs.length > 0 && (
                 <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
                   <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Active Legs</div>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
-                    <thead><tr>{['Type', 'Strike', 'Entry', 'SL', 'Status'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <thead><tr>{['Type', 'Strike', 'Entry', 'Mark', 'SL', 'P&L', 'Status'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
                     <tbody>{s.legs.map((l, i) => (
                       <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
                         <td style={{ padding: '4px 8px' }}><span className={`badge ${l.type === 'call' ? 'badge-green' : 'badge-red'}`}>{l.type.toUpperCase()}</span></td>
                         <td style={{ padding: '4px 8px', fontWeight: 600 }}>{l.strike}</td>
                         <td style={{ padding: '4px 8px' }}>${l.entry_price.toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>${(l.mark_price || 0).toFixed(2)}</td>
                         <td style={{ padding: '4px 8px', color: 'var(--red)' }}>${(l.entry_price * 2).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: (l.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(l.pnl || 0).toFixed(4)}</td>
                         <td style={{ padding: '4px 8px' }}>{l.stopped ? <span className="badge badge-red">Stopped</span> : <span className="badge badge-green">Active</span>}</td>
                       </tr>))}</tbody>
                   </table>
@@ -488,22 +491,25 @@ export default function Strategy() {
           statusEndpoint="/portfolio-strangle/status" streamEndpoint="/portfolio-strangle/stream"
           renderStatus={(s) => (
             <>
-              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(3,1fr)', marginBottom: 12 }}>
-                <div className="stat-card"><div className="label">Total P&L</div><div className="value" style={{ color: (s.total_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.total_pnl||0).toFixed(4)}</div></div>
-                <div className="stat-card"><div className="label">Cumulative</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(4)}</div></div>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Session P&L</div><div className="value" style={{ color: (s.session_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.session_pnl || 0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Cumulative P&L</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Total (incl. Open)</div><div className="value" style={{ color: (s.total_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.total_pnl||0).toFixed(4)}</div></div>
                 <div className="stat-card"><div className="label">Days Traded</div><div className="value">{s.days_traded || 0}</div></div>
               </div>
               {s.legs && s.legs.length > 0 && (
                 <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
                   <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Active Legs ({s.legs.length})</div>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
-                    <thead><tr>{['Type', 'Strike', 'Entry', 'SL', 'Status'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <thead><tr>{['Type', 'Strike', 'Entry', 'Mark', 'SL', 'P&L', 'Status'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
                     <tbody>{s.legs.map((l, i) => (
                       <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
                         <td style={{ padding: '4px 8px' }}><span className={`badge ${l.type === 'call' ? 'badge-green' : 'badge-red'}`}>{l.type.toUpperCase()}</span></td>
                         <td style={{ padding: '4px 8px', fontWeight: 600 }}>{l.strike}</td>
                         <td style={{ padding: '4px 8px' }}>${l.entry_price.toFixed(4)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>${(l.mark_price || 0).toFixed(4)}</td>
                         <td style={{ padding: '4px 8px', color: 'var(--red)' }}>${(l.entry_price * 3).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: (l.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(l.pnl || 0).toFixed(4)}</td>
                         <td style={{ padding: '4px 8px' }}>{l.stopped ? <span className="badge badge-red">Stopped</span> : <span className="badge badge-green">Active</span>}</td>
                       </tr>))}</tbody>
                   </table>
@@ -537,16 +543,17 @@ export default function Strategy() {
           statusEndpoint="/hybrid/status" streamEndpoint="/hybrid/stream"
           renderStatus={(s) => (
             <>
-              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(3,1fr)', marginBottom: 12 }}>
-                <div className="stat-card"><div className="label">Total P&L</div><div className="value" style={{ color: (s.total_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.total_pnl||0).toFixed(2)}</div></div>
-                <div className="stat-card"><div className="label">Cumulative</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(2)}</div></div>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Session P&L</div><div className="value" style={{ color: (s.session_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.session_pnl || 0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Cumulative P&L</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Total (incl. Open)</div><div className="value" style={{ color: (s.total_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.total_pnl||0).toFixed(2)}</div></div>
                 <div className="stat-card"><div className="label">Days Traded</div><div className="value">{s.days_traded || 0}</div></div>
               </div>
               {s.legs && s.legs.length > 0 && (
                 <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
                   <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Active Legs</div>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
-                    <thead><tr>{['Role', 'Type', 'Strike', 'Size', 'Entry', 'Status'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <thead><tr>{['Role', 'Type', 'Strike', 'Size', 'Entry', 'Mark', 'P&L', 'Status'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
                     <tbody>{s.legs.map((l, i) => (
                       <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
                         <td style={{ padding: '4px 8px' }}><span className={`badge ${l.role === 'sell' ? 'badge-red' : 'badge-green'}`}>{l.role === 'sell' ? 'SELL' : '⚡ BUY'}</span></td>
@@ -554,6 +561,8 @@ export default function Strategy() {
                         <td style={{ padding: '4px 8px', fontWeight: 600 }}>{l.strike}</td>
                         <td style={{ padding: '4px 8px' }}>{l.size}</td>
                         <td style={{ padding: '4px 8px' }}>${l.entry_price.toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>${(l.mark_price || 0).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: (l.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(l.pnl || 0).toFixed(4)}</td>
                         <td style={{ padding: '4px 8px' }}>{l.active ? <span className="badge badge-green">Active</span> : <span className="badge badge-red">Closed</span>}</td>
                       </tr>))}</tbody>
                   </table>
@@ -654,8 +663,8 @@ export default function Strategy() {
           renderStatus={(s) => (
             <>
               <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
-                <div className="stat-card"><div className="label">Today P&L</div><div className="value" style={{ color: (s.today_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.today_pnl||0).toFixed(4)}</div></div>
-                <div className="stat-card"><div className="label">Cumulative</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Session P&L</div><div className="value" style={{ color: (s.session_pnl||s.today_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.session_pnl||s.today_pnl||0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Cumulative P&L</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(4)}</div></div>
                 <div className="stat-card"><div className="label">Net Premium</div><div className="value">${(s.net_premium||0).toFixed(4)}</div></div>
                 <div className="stat-card"><div className="label">Days Traded</div><div className="value">{s.days_traded || 0}</div></div>
               </div>
@@ -663,7 +672,7 @@ export default function Strategy() {
                 <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
                   <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Current Legs</div>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
-                    <thead><tr>{['Side', 'Type', 'Strike', 'Delta', 'Entry'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <thead><tr>{['Side', 'Type', 'Strike', 'Delta', 'Entry', 'Mark', 'P&L'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
                     <tbody>{s.legs.map((l, i) => (
                       <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
                         <td style={{ padding: '4px 8px' }}><span className={`badge ${l.side === 'buy' ? 'badge-green' : 'badge-red'}`}>{l.side.toUpperCase()}</span></td>
@@ -671,6 +680,8 @@ export default function Strategy() {
                         <td style={{ padding: '4px 8px', fontWeight: 600 }}>{l.strike}</td>
                         <td style={{ padding: '4px 8px' }}>{l.delta.toFixed(2)}</td>
                         <td style={{ padding: '4px 8px' }}>${l.entry_price.toFixed(4)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>${(l.mark_price || 0).toFixed(4)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: (l.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(l.pnl || 0).toFixed(4)}</td>
                       </tr>))}</tbody>
                   </table>
                 </div>
