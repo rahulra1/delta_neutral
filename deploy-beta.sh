@@ -67,7 +67,37 @@ WantedBy=multi-user.target
 EOF
 
   # Beta nginx (separate subdomain)
-  cat > "$BETA_NGINX" << EOF
+  if [ -f /etc/letsencrypt/live/beta.algox.co.in/fullchain.pem ]; then
+    cat > "$BETA_NGINX" << EOF
+server {
+    listen 80;
+    server_name beta.algox.co.in;
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name beta.algox.co.in;
+
+    ssl_certificate /etc/letsencrypt/live/beta.algox.co.in/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/beta.algox.co.in/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:${BETA_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 300s;
+    }
+}
+EOF
+  else
+    cat > "$BETA_NGINX" << EOF
 server {
     listen 80;
     server_name beta.algox.co.in;
@@ -84,6 +114,7 @@ server {
     }
 }
 EOF
+  fi
 
   ln -sf "$BETA_NGINX" /etc/nginx/sites-enabled/algox-beta 2>/dev/null || true
   systemctl daemon-reload
@@ -140,7 +171,38 @@ EOF
   sleep 3
 
   # Ensure nginx config is current and enabled
-  cat > "$BETA_NGINX" << EOF
+  # Check if SSL cert exists for beta
+  if [ -f /etc/letsencrypt/live/beta.algox.co.in/fullchain.pem ]; then
+    cat > "$BETA_NGINX" << EOF
+server {
+    listen 80;
+    server_name beta.algox.co.in;
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name beta.algox.co.in;
+
+    ssl_certificate /etc/letsencrypt/live/beta.algox.co.in/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/beta.algox.co.in/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:${BETA_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 300s;
+    }
+}
+EOF
+  else
+    cat > "$BETA_NGINX" << EOF
 server {
     listen 80;
     server_name beta.algox.co.in;
@@ -157,6 +219,7 @@ server {
     }
 }
 EOF
+  fi
   ln -sf "$BETA_NGINX" /etc/nginx/sites-enabled/algox-beta 2>/dev/null || true
   nginx -t && systemctl reload nginx
 
