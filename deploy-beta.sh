@@ -139,6 +139,27 @@ EOF
   systemctl restart algox-beta
   sleep 3
 
+  # Ensure nginx config is current and enabled
+  cat > "$BETA_NGINX" << EOF
+server {
+    listen 80;
+    server_name beta.algox.co.in;
+
+    location / {
+        proxy_pass http://127.0.0.1:${BETA_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 300s;
+    }
+}
+EOF
+  ln -sf "$BETA_NGINX" /etc/nginx/sites-enabled/algox-beta 2>/dev/null || true
+  nginx -t && systemctl reload nginx
+
   if health_check $BETA_PORT; then
     echo "✅ Beta deployed and healthy"
     echo ""
