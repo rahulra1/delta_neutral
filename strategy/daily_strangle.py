@@ -129,7 +129,9 @@ class DailyStrangle(BaseStrategy):
         return day_legs
 
     def _monitor_day(self, day_legs, day_num):
-        """Monitor legs until SL hit or exit time. Independent SL per leg."""
+        """Monitor legs until SL hit or exit time. Independent SL per leg.
+        Re-entry: if SL hits and premium drops back to ~target_premium, re-enter once per side.
+        """
         if hasattr(self, '_api_key') and self._api_key:
             from config import set_thread_credentials
             set_thread_credentials(self._api_key, self._api_secret, self._broker)
@@ -140,6 +142,11 @@ class DailyStrangle(BaseStrategy):
 
         cv = get_contract_value(self.asset)
         tag = f"[Strangle D{day_num}]"
+
+        # Track re-entry state per side: only 1 re-entry allowed per side
+        reentry_used = {'call': False, 'put': False}
+        # Track which legs were SL'd and eligible for re-entry monitoring
+        sl_legs = {}  # type -> leg dict (the stopped leg we watch for re-entry)
 
         while self._running:
             now = datetime.now(IST)
@@ -163,11 +170,54 @@ class DailyStrangle(BaseStrategy):
                     place_order(leg['product_id'], leg['symbol'], leg['size'], 'buy')
                     leg['stopped'] = True
                     leg['exit_price'] = current
+                    # Mark for re-entry monitoring if not already used
+                    if not reentry_used.get(leg['type'], False):
+                        sl_legs[leg['type']] = leg
                     self._persist_state()
 
-            # All legs stopped — done early
-            if all(l.get('stopped', False) for l in day_legs):
-                print(f"{tag} Both legs stopped")
+            # Check re-entry opportunities for SL'd legs
+            for opt_type, sl_leg in list(sl_legs.items()):
+                if reentry_used[opt_type]:
+                    continue
+                # Check if the same product's premium has dropped back to target
+                data = get_current_price(sl_leg['product_id'], self.asset)
+                if not data:
+                    continue
+                current = data['mark_price']
+                # Re-enter when premium drops back to around target premium (within 20% tolerance)
+                if current <= self.target_premium * 1.2:
+                    print(f"{tag} 🔄 {opt_type.upper()} RE-ENTRY: premium ${current:.2f} back near ${self.target_premium}")
+                    result = place_order(sl_leg['product_id'], sl_leg['symbol'], sl_leg['size'], 'sell')
+                    if result:
+                        new_leg = {
+                            'symbol': sl_leg['symbol'],
+                            'product_id': sl_leg['product_id'],
+                            'side': 'sell',
+                            'strike': sl_leg['strike'],
+                            'type': opt_type,
+                            'entry_price': current,
+                            'size': sl_leg['size'],
+                            'sl_price': current * self.sl_pct,
+                            'stopped': False,
+                            'is_reentry': True,
+                        }
+                        day_legs.append(new_leg)
+                        with self._legs_lock:
+                            self.legs.append(new_leg)
+                        reentry_used[opt_type] = True
+                        del sl_legs[opt_type]
+                        print(f"{tag} ✓ Re-entered {opt_type.upper()} @ ${current:.2f} | New SL: ${new_leg['sl_price']:.2f}")
+                        self._persist_state()
+                    else:
+                        print(f"{tag} ✗ Re-entry order failed for {opt_type.upper()}")
+                        reentry_used[opt_type] = True  # don't retry
+                        del sl_legs[opt_type]
+
+            # All legs stopped and no pending re-entries — done early
+            all_stopped = all(l.get('stopped', False) for l in day_legs)
+            no_pending_reentry = all(reentry_used.get(t, True) for t in sl_legs)
+            if all_stopped and not sl_legs:
+                print(f"{tag} All legs stopped, no re-entries pending")
                 break
 
             time.sleep(self.monitor_interval)
@@ -232,13 +282,14 @@ class DailyStrangle(BaseStrategy):
         return best
 
     def _exit_reason(self, day_legs):
-        both_stopped = all(l.get('stopped', False) and l.get('exit_price', 0) >= l.get('sl_price', 0) * 0.99 for l in day_legs)
-        if both_stopped:
-            return 'both_sl'
-        any_sl = any(l.get('exit_price', 0) >= l.get('sl_price', 0) * 0.99 for l in day_legs)
-        if any_sl:
-            return 'one_sl'
-        return 'eod_exit'
+        sl_count = sum(1 for l in day_legs if l.get('exit_price', 0) >= l.get('sl_price', 0) * 0.99)
+        reentry_count = sum(1 for l in day_legs if l.get('is_reentry', False))
+        if sl_count == 0:
+            return 'eod_exit'
+        reason = 'both_sl' if sl_count >= 2 and not reentry_count else f'{sl_count}sl'
+        if reentry_count:
+            reason += f'_{reentry_count}re'
+        return reason
 
     def close_all(self):
         self._running = False
