@@ -209,7 +209,9 @@ class PortfolioStrangle(BaseStrategy):
                     self._close_slot_legs(slot['legs'])
                 break
 
-            # Check each slot
+            # Check each slot — SL, recost, and enrich legs in one pass
+            tick_pnl = 0.0
+            all_legs_ok = True
             for slot in day_legs_all:
                 for leg in slot['legs']:
                     if leg.get('stopped', False):
@@ -221,17 +223,38 @@ class PortfolioStrangle(BaseStrategy):
 
                     data = get_current_price(leg['product_id'], self.asset)
                     if not data:
+                        all_legs_ok = False
                         continue
                     current = data['mark_price']
 
+                    # Enrich leg with live data for UI
+                    if leg['side'] == 'sell':
+                        leg_pnl = (leg['entry_price'] - current) * leg['size'] * cv
+                    else:
+                        leg_pnl = (current - leg['entry_price']) * leg['size'] * cv
+                    leg['current_mark'] = round(current, 4)
+                    leg['current_pnl'] = round(leg_pnl, 4)
+                    tick_pnl += leg_pnl
+
+                    # Check SL
                     if current >= leg['sl_price']:
-                        # SL hit
                         print(f"{tag} 🛑 Slot{slot['slot']} {leg['type'].upper()} SL: ${current:.2f} >= ${leg['sl_price']:.2f}")
                         place_order(leg['product_id'], leg['symbol'], leg['size'], 'buy')
                         leg['stopped'] = True
                         leg['exit_price'] = current
                         slot['sl_hit'][leg['type']] = True
                         self._persist_state()
+
+            # Handle consecutive failures
+            if not all_legs_ok:
+                self._consecutive_failures += 1
+                if self._consecutive_failures >= self._max_consecutive_failures:
+                    print(f"{tag} 🚨 EMERGENCY: {self._consecutive_failures} consecutive failures — closing all")
+                    for slot in day_legs_all:
+                        self._close_slot_legs(slot['legs'])
+                    break
+            else:
+                self._consecutive_failures = 0
 
             # Check if everything is stopped (no point monitoring)
             all_stopped = all(
@@ -247,36 +270,6 @@ class PortfolioStrangle(BaseStrategy):
             if all_stopped and all_recost_done:
                 print(f"{tag} All legs stopped, all recosts done/unavailable")
                 break
-
-            # --- SOP: Enrich legs with live data, track pnl_history, save snapshots ---
-            tick_pnl = 0.0
-            all_legs_ok = True
-            for slot in day_legs_all:
-                for leg in slot['legs']:
-                    if leg.get('stopped', False):
-                        continue
-                    data = get_current_price(leg['product_id'], self.asset)
-                    if not data:
-                        all_legs_ok = False
-                        continue
-                    mark = data['mark_price']
-                    if leg['side'] == 'sell':
-                        leg_pnl = (leg['entry_price'] - mark) * leg['size'] * cv
-                    else:
-                        leg_pnl = (mark - leg['entry_price']) * leg['size'] * cv
-                    leg['current_mark'] = round(mark, 4)
-                    leg['current_pnl'] = round(leg_pnl, 4)
-                    tick_pnl += leg_pnl
-
-            if not all_legs_ok:
-                self._consecutive_failures += 1
-                if self._consecutive_failures >= self._max_consecutive_failures:
-                    print(f"{tag} 🚨 EMERGENCY: {self._consecutive_failures} consecutive failures — closing all")
-                    for slot in day_legs_all:
-                        self._close_slot_legs(slot['legs'])
-                    break
-            else:
-                self._consecutive_failures = 0
 
             # PnL history for UI chart
             now_iso = datetime.now(IST).isoformat()

@@ -163,7 +163,7 @@ class DailyStrangle(BaseStrategy):
                 self._close_day_legs(day_legs)
                 break
 
-            # Check each active leg for SL
+            # Check each active leg for SL + enrich with live data
             for leg in day_legs:
                 if leg.get('stopped', False):
                     continue
@@ -171,6 +171,13 @@ class DailyStrangle(BaseStrategy):
                 if not data:
                     continue
                 current = data['mark_price']
+
+                # Enrich leg for UI
+                leg_pnl = (leg['entry_price'] - current) * leg['size'] * cv
+                leg['current_mark'] = round(current, 2)
+                leg['current_pnl'] = round(leg_pnl, 2)
+
+                # Check SL
                 if current >= leg['sl_price']:
                     # SL hit — close this leg
                     print(f"{tag} 🛑 {leg['type'].upper()} SL hit: ${current:.2f} >= ${leg['sl_price']:.2f}")
@@ -227,21 +234,16 @@ class DailyStrangle(BaseStrategy):
                 print(f"{tag} All legs stopped, no re-entries pending")
                 break
 
-            # --- SOP: Enrich legs with live data, track pnl_history, save snapshots ---
+            # --- SOP: Track pnl_history, save snapshots, handle failures ---
             tick_pnl = 0.0
             all_legs_ok = True
             for leg in day_legs:
                 if leg.get('stopped', False):
                     continue
-                data = get_current_price(leg['product_id'], self.asset)
-                if not data:
+                if leg.get('current_mark'):
+                    tick_pnl += leg.get('current_pnl', 0)
+                else:
                     all_legs_ok = False
-                    continue
-                mark = data['mark_price']
-                leg_pnl = (leg['entry_price'] - mark) * leg['size'] * cv
-                leg['current_mark'] = round(mark, 2)
-                leg['current_pnl'] = round(leg_pnl, 2)
-                tick_pnl += leg_pnl
 
             if not all_legs_ok:
                 self._consecutive_failures += 1

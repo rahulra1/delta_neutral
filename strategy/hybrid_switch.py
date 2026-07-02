@@ -161,7 +161,7 @@ class HybridSwitch(BaseStrategy):
                     print(f"{tag} ⏰ Exit time (expiry day) — closing all")
                     break
 
-            # Check sell legs for SL
+            # Check sell legs for SL + enrich
             for leg in sell_legs:
                 if not leg['active']:
                     continue
@@ -169,6 +169,11 @@ class HybridSwitch(BaseStrategy):
                 if not data:
                     continue
                 current = data['mark_price']
+                # Enrich for UI
+                leg_pnl = (leg['entry_price'] - current) * leg['size'] * cv
+                leg['current_mark'] = round(current, 2)
+                leg['current_pnl'] = round(leg_pnl, 2)
+                # Check SL
                 if current >= leg['sl_price']:
                     print(f"{tag} 🛑 SELL {leg['type'].upper()} SL hit: ${current:.2f} >= ${leg['sl_price']:.2f}")
                     place_order(leg['product_id'], leg['symbol'], leg['size'], 'buy')
@@ -182,7 +187,7 @@ class HybridSwitch(BaseStrategy):
                             self.legs.append(buy_leg)
                     self._persist_state()
 
-            # Check buy legs for SL / trailing
+            # Check buy legs for SL / trailing + enrich
             for leg in buy_legs:
                 if not leg['active']:
                     continue
@@ -190,6 +195,10 @@ class HybridSwitch(BaseStrategy):
                 if not data:
                     continue
                 current = data['mark_price']
+                # Enrich for UI
+                leg_pnl = (current - leg['entry_price']) * leg['size'] * cv
+                leg['current_mark'] = round(current, 2)
+                leg['current_pnl'] = round(leg_pnl, 2)
 
                 # Trail SL point-for-point: if price moves up by X, SL moves up by X
                 move = current - leg['entry_price']
@@ -213,24 +222,16 @@ class HybridSwitch(BaseStrategy):
                 print(f"{tag} All legs closed")
                 break
 
-            # --- SOP: Enrich legs with live data, track pnl_history, save snapshots ---
+            # --- SOP: Track pnl_history, save snapshots, handle failures ---
             tick_pnl = 0.0
             all_legs_ok = True
             for leg in sell_legs + buy_legs:
                 if not leg.get('active', False):
                     continue
-                data = get_current_price(leg['product_id'], self.asset)
-                if not data:
-                    all_legs_ok = False
-                    continue
-                mark = data['mark_price']
-                if leg['side'] == 'sell':
-                    leg_pnl = (leg['entry_price'] - mark) * leg['size'] * cv
+                if leg.get('current_mark'):
+                    tick_pnl += leg.get('current_pnl', 0)
                 else:
-                    leg_pnl = (mark - leg['entry_price']) * leg['size'] * cv
-                leg['current_mark'] = round(mark, 2)
-                leg['current_pnl'] = round(leg_pnl, 2)
-                tick_pnl += leg_pnl
+                    all_legs_ok = False
 
             if not all_legs_ok:
                 self._consecutive_failures += 1
