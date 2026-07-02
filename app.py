@@ -1713,6 +1713,7 @@ def api_strategy_detail(sid):
         asset = entry.get('details', {}).get('asset', 'BTC')
         live_legs = []
         logs = []
+        pnl_history = []
 
         if sid in strategies and strategies[sid].get('strategy'):
             strat = strategies[sid]['strategy']
@@ -1791,7 +1792,12 @@ def api_strategy_detail(sid):
             for leg in strat.legs:
                 live_legs.append({'symbol': leg['symbol'], 'type': leg['type'], 'strike': leg['strike'],
                     'side': leg['side'], 'size': leg['size'], 'entry_price': round(leg['entry_price'], 4),
-                    'current_mark': 0, 'current_pnl': 0, 'delta': leg.get('delta', 0)})
+                    'current_mark': round(leg.get('current_mark', 0), 4),
+                    'current_pnl': round(leg.get('current_pnl', 0), 4),
+                    'delta': leg.get('delta', 0)})
+            # Use in-memory pnl_history for the chart
+            if hasattr(strat, '_pnl_history') and strat._pnl_history:
+                pnl_history = list(strat._pnl_history[-500:])
         elif sid in strangle_strategies and strangle_strategies[sid].get('strategy'):
             st = strangle_strategies[sid]
             strat = st['strategy']
@@ -1804,7 +1810,11 @@ def api_strategy_detail(sid):
             for leg in strat.legs:
                 live_legs.append({'symbol': leg['symbol'], 'type': leg['type'], 'strike': leg['strike'],
                     'side': 'sell', 'size': leg['size'], 'entry_price': round(leg['entry_price'], 2),
-                    'current_mark': 0, 'current_pnl': 0, 'stopped': leg.get('stopped', False)})
+                    'current_mark': round(leg.get('current_mark', 0), 2),
+                    'current_pnl': round(leg.get('current_pnl', 0), 2),
+                    'stopped': leg.get('stopped', False)})
+            if hasattr(strat, '_pnl_history') and strat._pnl_history:
+                pnl_history = list(strat._pnl_history[-500:])
         elif sid in portfolio_strangle_strategies and portfolio_strangle_strategies[sid].get('strategy'):
             ps = portfolio_strangle_strategies[sid]
             strat = ps['strategy']
@@ -1817,7 +1827,11 @@ def api_strategy_detail(sid):
             for leg in strat.legs:
                 live_legs.append({'symbol': leg['symbol'], 'type': leg['type'], 'strike': leg['strike'],
                     'side': leg['side'], 'size': leg['size'], 'entry_price': round(leg['entry_price'], 4),
-                    'current_mark': 0, 'current_pnl': 0, 'stopped': leg.get('stopped', False)})
+                    'current_mark': round(leg.get('current_mark', 0), 4),
+                    'current_pnl': round(leg.get('current_pnl', 0), 4),
+                    'stopped': leg.get('stopped', False)})
+            if hasattr(strat, '_pnl_history') and strat._pnl_history:
+                pnl_history = list(strat._pnl_history[-500:])
         elif sid in hybrid_strategies and hybrid_strategies[sid].get('strategy'):
             hs = hybrid_strategies[sid]
             strat = hs['strategy']
@@ -1830,7 +1844,11 @@ def api_strategy_detail(sid):
             for leg in strat.legs:
                 live_legs.append({'symbol': leg['symbol'], 'type': leg['type'], 'strike': leg['strike'],
                     'side': leg['side'], 'size': leg['size'], 'entry_price': round(leg['entry_price'], 2),
-                    'current_mark': 0, 'current_pnl': 0, 'role': leg.get('role', ''), 'active': leg.get('active', False)})
+                    'current_mark': round(leg.get('current_mark', 0), 2),
+                    'current_pnl': round(leg.get('current_pnl', 0), 2),
+                    'role': leg.get('role', ''), 'active': leg.get('active', False)})
+            if hasattr(strat, '_pnl_history') and strat._pnl_history:
+                pnl_history = list(strat._pnl_history[-500:])
         elif sid in _futures_traders:
             trader = _futures_traders[sid]['trader']
             entry['running'] = trader.running
@@ -1889,12 +1907,12 @@ def api_strategy_detail(sid):
         entry['legs'] = live_legs
         entry['logs'] = logs
         # Include pnl_history from in-memory or DB snapshots
-        pnl_history = []
-        if sid in active_monitors:
-            pnl_history = active_monitors[sid]['monitor'].pnl_history[-500:]
-        rs = registry.get(sid)
-        if rs and rs._pnl_history:
-            pnl_history = rs._pnl_history[-500:]
+        if not pnl_history:
+            if sid in active_monitors:
+                pnl_history = active_monitors[sid]['monitor'].pnl_history[-500:]
+            rs = registry.get(sid)
+            if rs and rs._pnl_history:
+                pnl_history = rs._pnl_history[-500:]
         if not pnl_history:
             pnl_history = [(s['ts'], s['pnl']) for s in get_pnl_snapshots(uid, sid=sid)]
         entry['pnl_history'] = pnl_history

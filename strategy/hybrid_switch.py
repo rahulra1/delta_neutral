@@ -8,6 +8,7 @@ Expiry: D2 (next day's expiry).
 """
 
 import time
+import logging
 import threading
 from datetime import datetime, timedelta, timezone
 from api.chain import get_expiries, get_option_chain_full
@@ -15,6 +16,8 @@ from api.orders import place_order
 from api.pricing import get_current_price
 from config import get_contract_value
 from strategy.base import BaseStrategy
+
+logger = logging.getLogger(__name__)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -60,6 +63,10 @@ class HybridSwitch(BaseStrategy):
         self.total_days_traded = 0
         self.trade_log = []
         self._running = False
+        self._pnl_history = []            # [(iso_ts, pnl), ...] for UI chart
+        self._snap_counter = 0
+        self._consecutive_failures = 0
+        self._max_consecutive_failures = 10
 
     def initialize(self):
         self._running = True
@@ -205,6 +212,60 @@ class HybridSwitch(BaseStrategy):
             if all_sell_done and all_buy_done:
                 print(f"{tag} All legs closed")
                 break
+
+            # --- SOP: Enrich legs with live data, track pnl_history, save snapshots ---
+            tick_pnl = 0.0
+            all_legs_ok = True
+            for leg in sell_legs + buy_legs:
+                if not leg.get('active', False):
+                    continue
+                data = get_current_price(leg['product_id'], self.asset)
+                if not data:
+                    all_legs_ok = False
+                    continue
+                mark = data['mark_price']
+                if leg['side'] == 'sell':
+                    leg_pnl = (leg['entry_price'] - mark) * leg['size'] * cv
+                else:
+                    leg_pnl = (mark - leg['entry_price']) * leg['size'] * cv
+                leg['current_mark'] = round(mark, 2)
+                leg['current_pnl'] = round(leg_pnl, 2)
+                tick_pnl += leg_pnl
+
+            if not all_legs_ok:
+                self._consecutive_failures += 1
+                if self._consecutive_failures >= self._max_consecutive_failures:
+                    print(f"{tag} 🚨 EMERGENCY: {self._consecutive_failures} consecutive failures — closing all")
+                    break
+            else:
+                self._consecutive_failures = 0
+
+            # PnL history for UI chart
+            now_iso = now.isoformat()
+            self._pnl_history.append((now_iso, round(self.cumulative_pnl + tick_pnl, 2)))
+            if len(self._pnl_history) > 2000:
+                self._pnl_history = self._pnl_history[-2000:]
+
+            # Save snapshot every 6 ticks
+            self._snap_counter += 1
+            if self._snap_counter % 6 == 0 and getattr(self, '_sid', None):
+                try:
+                    from models import save_pnl_snapshot
+                    user_id = getattr(self, '_user_id', None)
+                    if not user_id:
+                        try:
+                            from app import hybrid_strategies
+                            for s_id, ent in hybrid_strategies.items():
+                                if ent.get('strategy') is self:
+                                    user_id = ent.get('user_id')
+                                    self._user_id = user_id
+                                    break
+                        except Exception:
+                            pass
+                    if user_id:
+                        save_pnl_snapshot(user_id, self._sid, round(self.cumulative_pnl + tick_pnl, 2))
+                except Exception:
+                    pass
 
             time.sleep(self.monitor_interval)
 

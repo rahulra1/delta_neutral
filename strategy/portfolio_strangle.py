@@ -63,6 +63,10 @@ class PortfolioStrangle(BaseStrategy):
         self._running = False
         self._session_threads = []
         self._sid = None
+        self._pnl_history = []            # [(iso_ts, pnl), ...] for UI chart
+        self._snap_counter = 0
+        self._consecutive_failures = 0
+        self._max_consecutive_failures = 10
         self._base_params = {
             'asset': asset, 'lot_size': lot_size,
             'sl_pct': int(sl_pct * 100), 'recost_entries': recost_entries,
@@ -243,6 +247,63 @@ class PortfolioStrangle(BaseStrategy):
             if all_stopped and all_recost_done:
                 print(f"{tag} All legs stopped, all recosts done/unavailable")
                 break
+
+            # --- SOP: Enrich legs with live data, track pnl_history, save snapshots ---
+            tick_pnl = 0.0
+            all_legs_ok = True
+            for slot in day_legs_all:
+                for leg in slot['legs']:
+                    if leg.get('stopped', False):
+                        continue
+                    data = get_current_price(leg['product_id'], self.asset)
+                    if not data:
+                        all_legs_ok = False
+                        continue
+                    mark = data['mark_price']
+                    if leg['side'] == 'sell':
+                        leg_pnl = (leg['entry_price'] - mark) * leg['size'] * cv
+                    else:
+                        leg_pnl = (mark - leg['entry_price']) * leg['size'] * cv
+                    leg['current_mark'] = round(mark, 4)
+                    leg['current_pnl'] = round(leg_pnl, 4)
+                    tick_pnl += leg_pnl
+
+            if not all_legs_ok:
+                self._consecutive_failures += 1
+                if self._consecutive_failures >= self._max_consecutive_failures:
+                    print(f"{tag} 🚨 EMERGENCY: {self._consecutive_failures} consecutive failures — closing all")
+                    for slot in day_legs_all:
+                        self._close_slot_legs(slot['legs'])
+                    break
+            else:
+                self._consecutive_failures = 0
+
+            # PnL history for UI chart
+            now_iso = datetime.now(IST).isoformat()
+            self._pnl_history.append((now_iso, round(self.cumulative_pnl + tick_pnl, 4)))
+            if len(self._pnl_history) > 2000:
+                self._pnl_history = self._pnl_history[-2000:]
+
+            # Save snapshot every 6 ticks
+            self._snap_counter += 1
+            if self._snap_counter % 6 == 0 and self._sid:
+                try:
+                    from models import save_pnl_snapshot
+                    user_id = getattr(self, '_user_id', None)
+                    if not user_id:
+                        try:
+                            from app import portfolio_strangle_strategies
+                            for s_id, ent in portfolio_strangle_strategies.items():
+                                if ent.get('strategy') is self:
+                                    user_id = ent.get('user_id')
+                                    self._user_id = user_id
+                                    break
+                        except Exception:
+                            pass
+                    if user_id:
+                        save_pnl_snapshot(user_id, self._sid, round(self.cumulative_pnl + tick_pnl, 4))
+                except Exception:
+                    pass
 
             time.sleep(self.monitor_interval)
 

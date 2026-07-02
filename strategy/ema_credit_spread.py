@@ -11,6 +11,7 @@ Every day at 6:30 PM IST:
 
 import time
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 from api.chart import get_candles, calc_ema
 from api.chain import get_expiries
@@ -64,6 +65,11 @@ class EMACreditSpread(BaseStrategy):
         self.cumulative_pnl = 0.0
         self.trade_log = []
         self._sid = None  # Set externally after creation for DB persistence
+        self._pnl_history = []            # [(iso_ts, pnl), ...] for UI chart
+        self._legs_lock = threading.Lock()  # protects self.legs mutations
+        self._snap_counter = 0
+        self._consecutive_failures = 0
+        self._max_consecutive_failures = 10
         self._base_params = {
             'asset': asset, 'lot_size': lot_size, 'sell_delta': sell_delta,
             'buy_delta': buy_delta, 'ema_period': ema_period,
@@ -103,13 +109,16 @@ class EMACreditSpread(BaseStrategy):
 
     def close_all(self):
         self._running = False
-        for leg in list(self.legs):
+        with self._legs_lock:
+            legs_copy = list(self.legs)
+        for leg in legs_copy:
             try:
                 close_side = 'buy' if leg['side'] == 'sell' else 'sell'
                 place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
             except Exception as e:
                 logger.warning(f"[EMA Spread] Failed to close leg {leg.get('symbol')}: {e}")
-        self.legs.clear()
+        with self._legs_lock:
+            self.legs.clear()
         try:
             self._persist_state()
         except Exception:
@@ -195,7 +204,8 @@ class EMACreditSpread(BaseStrategy):
         print(f"{tag} ✓ BUY  {opt_type.upper()} {buy_leg['strike_price']} (Δ{buy_leg['delta']:.2f}) @ {buy_leg['mark_price']}")
         print(f"{tag} Net premium: ${premium:.4f} | TP: ${premium*self.tp_pct:.4f} | SL: -${premium*self.sl_pct:.4f}")
 
-        self.legs.extend(day_legs)
+        with self._legs_lock:
+            self.legs.extend(day_legs)
         self._persist_state()
         return day_legs, premium, direction
 
@@ -221,15 +231,63 @@ class EMACreditSpread(BaseStrategy):
 
             pnl = 0.0
             leg_details = []
+            all_legs_ok = True
             for leg in day_legs:
                 data = get_current_price(leg['product_id'], self.asset)
-                if data:
-                    if leg['side'] == 'sell':
-                        leg_pnl = (leg['entry_price'] - data['mark_price']) * leg['size'] * cv
-                    else:
-                        leg_pnl = (data['mark_price'] - leg['entry_price']) * leg['size'] * cv
-                    pnl += leg_pnl
-                    leg_details.append(f"{leg['side'].upper()} {leg['strike']}: ${leg_pnl:+.4f}")
+                if not data:
+                    all_legs_ok = False
+                    leg_details.append(f"{leg.get('symbol', '?')}: no data")
+                    continue
+                mark = data['mark_price']
+                if leg['side'] == 'sell':
+                    leg_pnl = (leg['entry_price'] - mark) * leg['size'] * cv
+                else:
+                    leg_pnl = (mark - leg['entry_price']) * leg['size'] * cv
+                pnl += leg_pnl
+                # Enrich leg dict with live data for UI
+                leg['current_mark'] = round(mark, 4)
+                leg['current_pnl'] = round(leg_pnl, 4)
+                leg_details.append(f"{leg['side'].upper()} {leg['strike']}: ${leg_pnl:+.4f}")
+
+            # Handle consecutive failures
+            if not all_legs_ok:
+                self._consecutive_failures += 1
+                print(f"[EMA Day{day_num}] ⚠ Price fetch failed ({self._consecutive_failures}/{self._max_consecutive_failures})")
+                if self._consecutive_failures >= self._max_consecutive_failures:
+                    print(f"[EMA Day{day_num}] 🚨 EMERGENCY: {self._consecutive_failures} consecutive failures — closing legs")
+                    self._close_day_legs(day_legs)
+                    self._record_day(day_num, pnl, premium, 'api_failure', direction)
+                    return
+                continue
+            self._consecutive_failures = 0
+
+            # Track PnL history for UI chart
+            now_iso = datetime.now(IST).isoformat()
+            self._pnl_history.append((now_iso, round(self.cumulative_pnl + pnl, 4)))
+            if len(self._pnl_history) > 2000:
+                self._pnl_history = self._pnl_history[-2000:]
+
+            # Save PnL snapshot to DB every 6 ticks
+            self._snap_counter += 1
+            if self._snap_counter % 6 == 0 and self._sid:
+                try:
+                    from models import save_pnl_snapshot
+                    # Find user_id from the app-level entry
+                    user_id = getattr(self, '_user_id', None)
+                    if not user_id:
+                        try:
+                            from app import ema_spread_strategies
+                            for s_id, entry in ema_spread_strategies.items():
+                                if entry.get('strategy') is self:
+                                    user_id = entry.get('user_id')
+                                    self._user_id = user_id
+                                    break
+                        except Exception:
+                            pass
+                    if user_id:
+                        save_pnl_snapshot(user_id, self._sid, round(self.cumulative_pnl + pnl, 4))
+                except Exception:
+                    pass
 
             legs_str = ' | '.join(leg_details) if leg_details else ''
             print(f"[EMA Day{day_num}] PnL: ${pnl:+.4f} ({pnl/premium*100:+.1f}%) | Cum: ${self.cumulative_pnl:+.4f} | {legs_str}")
@@ -249,8 +307,9 @@ class EMACreditSpread(BaseStrategy):
         for leg in day_legs:
             close_side = 'buy' if leg['side'] == 'sell' else 'sell'
             place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
-            if leg in self.legs:
-                self.legs.remove(leg)
+            with self._legs_lock:
+                if leg in self.legs:
+                    self.legs.remove(leg)
 
     def _record_day(self, day_num, pnl, premium, exit_reason, direction):
         self.cumulative_pnl += pnl
