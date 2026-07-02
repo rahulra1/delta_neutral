@@ -688,6 +688,73 @@ def _resume_db_strategies():
             t.start()
             logger.info(f"[resume] Resumed Hybrid Switch {sid}")
 
+        # 11b. Resume Portfolio Strangle
+        elif source == 'Portfolio Strangle':
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+                     'log_history': [], 'running': False, 'params': details,
+                     'user_id': user_id, 'profile_id': profile_id}
+            portfolio_strangle_strategies[sid] = entry
+
+            def _resume_portfolio(sid=sid, entry=entry, details=details, user_id=user_id, legs=legs):
+                if not _setup_strategy_thread(entry):
+                    entry['running'] = False
+                    return
+                try:
+                    from strategy.portfolio_strangle import PortfolioStrangle
+                    # Parse entry_times
+                    entry_times_raw = details.get('entry_times', ['9:15', '10:20', '11:15'])
+                    entry_times = []
+                    for t in entry_times_raw:
+                        parts = t.split(':')
+                        entry_times.append((int(parts[0]), int(parts[1])))
+                    skip_days_raw = details.get('skip_weekdays', [4, 6])
+                    skip_days = [int(d) for d in skip_days_raw]
+
+                    s = PortfolioStrangle(
+                        asset=details.get('asset', 'BTC'),
+                        lot_size=int(details.get('lot_size', 30)),
+                        sl_pct=float(details.get('sl_pct', 300)) / 100,
+                        recost_entries=int(details.get('recost_entries', 1)),
+                        otm_index=int(details.get('otm_index', 5)),
+                        entry_times=entry_times,
+                        exit_hour=int(details.get('exit_hour', 17)),
+                        exit_minute=int(details.get('exit_minute', 29)),
+                        monitor_interval=int(details.get('monitoring_interval', 10)),
+                        skip_weekdays=skip_days,
+                    )
+                    entry['strategy'] = s
+                    s._log_queue = entry['log_queue']
+                    s._log_history = entry['log_history']
+                    s._sid = sid
+                    import config as _cfg
+                    s._api_key = _cfg.get_api_key()
+                    s._api_secret = _cfg.get_api_secret()
+                    s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
+                    entry['running'] = True
+                    s.cumulative_pnl = float(details.get('cumulative_pnl', 0))
+                    s.total_days_traded = int(details.get('total_days_traded', 0))
+                    s.trade_log = details.get('trade_log', [])
+                    s.legs = legs or []
+                    s.initialize()
+                    # Log restored trade history
+                    if s.trade_log:
+                        for t in s.trade_log:
+                            print(f"[Portfolio D{t.get('day',0)}] {t.get('date','')} | {t.get('exit_reason','')} | PnL: ${t.get('pnl',0):+.4f}")
+                        print(f"[Portfolio] Restored {len(s.trade_log)} days | Cum PnL: ${s.cumulative_pnl:+.4f}")
+                    s.monitor()
+                except Exception as e:
+                    logger.error(f"[resume] Portfolio Strangle {sid} error: {e}")
+                finally:
+                    pnl = round(getattr(entry.get('strategy'), 'cumulative_pnl', 0), 4)
+                    record_end(sid, pnl, 0)
+                    update_tracked(sid, status='completed', pnl=round(pnl, 4))
+                    _teardown_strategy_thread(entry)
+
+            t = threading.Thread(target=_resume_portfolio, daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed Portfolio Strangle {sid}")
+
         # 12. Everything else — use TrackedStrategy
         else:
             strat = TrackedStrategy(
