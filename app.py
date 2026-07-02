@@ -741,6 +741,23 @@ def _resume_db_strategies():
                         for t in s.trade_log:
                             print(f"[Portfolio D{t.get('day',0)}] {t.get('date','')} | {t.get('exit_reason','')} | PnL: ${t.get('pnl',0):+.4f}")
                         print(f"[Portfolio] Restored {len(s.trade_log)} days | Cum PnL: ${s.cumulative_pnl:+.4f}")
+                    # If there are active (non-stopped) legs from before restart,
+                    # monitor them in a background thread while main loop waits for next entry
+                    active_legs = [l for l in s.legs if not l.get('stopped', False)]
+                    if active_legs:
+                        import threading as _thr
+                        day_num = s.total_days_traded or 1
+                        day_legs_all = [{
+                            'legs': active_legs,
+                            'slot': 1,
+                            'entry_time': 'restored',
+                            'recost_used': {l['type']: True for l in active_legs},  # no recost on restored legs
+                            'sl_hit': {l['type']: False for l in active_legs},
+                        }]
+                        _thr.Thread(target=s._monitor_all_slots,
+                                    args=(f"[Portfolio D{day_num}]", day_legs_all, day_num),
+                                    daemon=True).start()
+                        print(f"[Portfolio] Resumed monitoring {len(active_legs)} active legs")
                     s.monitor()
                 except Exception as e:
                     logger.error(f"[resume] Portfolio Strangle {sid} error: {e}")
@@ -2189,11 +2206,25 @@ def _leg_info(s, leg):
     )
 
 
-def _enrich_leg(leg, asset='BTC'):
-    """Add live mark_price and pnl to a strategy leg dict."""
+def _enrich_leg(leg, asset='BTC', profile_id=None, user_id=None):
+    """Add live mark_price and pnl to a strategy leg dict.
+    
+    If profile_id/user_id are provided, temporarily sets thread-local credentials
+    so the API call uses the correct broker keys.
+    """
     from api.pricing import get_current_price
-    from config import get_contract_value
+    from config import get_contract_value, set_thread_credentials, get_api_key, get_api_secret
     mark = None
+    # Set credentials for this API call if a profile is specified
+    _creds_set = False
+    if profile_id and user_id:
+        try:
+            p = get_profile(int(profile_id), int(user_id))
+            if p:
+                set_thread_credentials(p['api_key'], p['api_secret'], p.get('broker'))
+                _creds_set = True
+        except Exception:
+            pass
     try:
         data = get_current_price(leg['product_id'], asset)
         if data:
@@ -2888,9 +2919,11 @@ def strangle_status(sid):
     s = e.get('strategy')
     if not s:
         return jsonify(running=True, total_pnl=0, cumulative_pnl=0, days_traded=0, trade_log=[], legs=[])
+    profile_id = e.get('profile_id')
+    uid = e.get('user_id')
     enriched_legs = []
     for l in s.legs:
-        mark, pnl = _enrich_leg(l, getattr(s, 'asset', 'BTC'))
+        mark, pnl = _enrich_leg(l, getattr(s, 'asset', 'BTC'), profile_id=profile_id, user_id=uid)
         enriched_legs.append({
             'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
             'side': l['side'], 'size': l['size'], 'entry_price': round(l['entry_price'], 2),
@@ -3061,9 +3094,11 @@ def portfolio_strangle_status(sid):
     s = e.get('strategy')
     if not s:
         return jsonify(running=True, total_pnl=0, cumulative_pnl=0, days_traded=0, trade_log=[], legs=[])
+    profile_id = e.get('profile_id')
+    uid = e.get('user_id')
     enriched_legs = []
     for l in s.legs:
-        mark, pnl = _enrich_leg(l, getattr(s, 'asset', 'BTC'))
+        mark, pnl = _enrich_leg(l, getattr(s, 'asset', 'BTC'), profile_id=profile_id, user_id=uid)
         enriched_legs.append({
             'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
             'side': l['side'], 'size': l['size'], 'entry_price': round(l['entry_price'], 4),
@@ -3227,9 +3262,11 @@ def hybrid_status(sid):
     s = e.get('strategy')
     if not s:
         return jsonify(running=True, total_pnl=0, cumulative_pnl=0, days_traded=0, trade_log=[], legs=[])
+    profile_id = e.get('profile_id')
+    uid = e.get('user_id')
     enriched_legs = []
     for l in s.legs:
-        mark, pnl = _enrich_leg(l, getattr(s, 'asset', 'BTC'))
+        mark, pnl = _enrich_leg(l, getattr(s, 'asset', 'BTC'), profile_id=profile_id, user_id=uid)
         enriched_legs.append({
             'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
             'side': l['side'], 'size': l['size'], 'entry_price': round(l['entry_price'], 2),
@@ -3527,9 +3564,11 @@ def ema_spread_status(sid):
     if not e['running'] or not s:
         return jsonify(running=False)
     pnl_pct = (s._pnl / s.net_premium * 100) if s.net_premium > 0 else 0
+    profile_id = e.get('profile_id')
+    uid = e.get('user_id')
     enriched_legs = []
     for l in s.legs:
-        mark, pnl = _enrich_leg(l, getattr(s, 'asset', 'BTC'))
+        mark, pnl = _enrich_leg(l, getattr(s, 'asset', 'BTC'), profile_id=profile_id, user_id=uid)
         enriched_legs.append({
             'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
             'side': l['side'], 'delta': l['delta'], 'size': l['size'],
