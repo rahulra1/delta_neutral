@@ -195,8 +195,14 @@ def _resume_db_strategies():
             def _resume_dn(sid=sid, entry=entry, details=details, call_leg=call_leg,
                            put_leg=put_leg, asset=asset, lot_size=lot_size,
                            profile_id=profile_id, user_id=user_id, d=d):
-                if not _setup_strategy_thread(entry):
+                for attempt in range(5):
+                    if _setup_strategy_thread(entry):
+                        break
+                    logger.warning(f"[resume] DN {sid} — setup failed (attempt {attempt+1}/5), retrying in 30s")
                     entry['running'] = False
+                    time.sleep(30)
+                else:
+                    logger.error(f"[resume] DN {sid} — setup failed after 5 attempts")
                     return
                 try:
                     s = DeltaNeutralStrategy(
@@ -294,8 +300,14 @@ def _resume_db_strategies():
 
             def _resume_iv(sid=sid, entry=entry, details=details, call_leg=call_leg,
                            put_leg=put_leg, asset=asset, user_id=user_id, d=d):
-                if not _setup_strategy_thread(entry):
+                for attempt in range(5):
+                    if _setup_strategy_thread(entry):
+                        break
+                    logger.warning(f"[resume] IV Crush {sid} — setup failed (attempt {attempt+1}/5), retrying in 30s")
                     entry['running'] = False
+                    time.sleep(30)
+                else:
+                    logger.error(f"[resume] IV Crush {sid} — setup failed after 5 attempts")
                     return
                 try:
                     from strategy.iv_crush import IVCrushStrategy
@@ -368,8 +380,14 @@ def _resume_db_strategies():
 
             def _resume_cr(sid=sid, entry=entry, details=details, legs=legs,
                            asset=asset, user_id=user_id, d=d):
-                if not _setup_strategy_thread(entry):
+                for attempt in range(5):
+                    if _setup_strategy_thread(entry):
+                        break
+                    logger.warning(f"[resume] Call Ratio {sid} — setup failed (attempt {attempt+1}/5), retrying in 30s")
                     entry['running'] = False
+                    time.sleep(30)
+                else:
+                    logger.error(f"[resume] Call Ratio {sid} — setup failed after 5 attempts")
                     return
                 try:
                     from strategy.call_ratio import CallRatioStrategy
@@ -426,8 +444,14 @@ def _resume_db_strategies():
 
             def _resume_oi(sid=sid, entry=entry, details=details, legs=legs,
                            asset=asset, user_id=user_id, d=d):
-                if not _setup_strategy_thread(entry):
+                for attempt in range(5):
+                    if _setup_strategy_thread(entry):
+                        break
+                    logger.warning(f"[resume] OI Strategy {sid} — setup failed (attempt {attempt+1}/5), retrying in 30s")
                     entry['running'] = False
+                    time.sleep(30)
+                else:
+                    logger.error(f"[resume] OI Strategy {sid} — setup failed after 5 attempts")
                     return
                 try:
                     from strategy.oi_strategy import OIStrategy
@@ -492,8 +516,14 @@ def _resume_db_strategies():
             weekly_dn_strategies[sid] = entry
 
             def _resume_wdn(sid=sid, entry=entry, details=details, user_id=user_id):
-                if not _setup_strategy_thread(entry):
+                for attempt in range(5):
+                    if _setup_strategy_thread(entry):
+                        break
+                    logger.warning(f"[resume] Weekly DN {sid} — setup failed (attempt {attempt+1}/5), retrying in 30s")
                     entry['running'] = False
+                    time.sleep(30)
+                else:
+                    logger.error(f"[resume] Weekly DN {sid} — setup failed after 5 attempts")
                     return
                 try:
                     from strategy.weekly_delta_neutral import WeeklyDeltaNeutral
@@ -544,8 +574,15 @@ def _resume_db_strategies():
             ema_spread_strategies[sid] = entry
 
             def _resume_ecs(sid=sid, entry=entry, details=details, user_id=user_id, legs=legs):
-                if not _setup_strategy_thread(entry):
+                # Retry setup up to 5 times with backoff — handles transient API failures on restart
+                for attempt in range(5):
+                    if _setup_strategy_thread(entry):
+                        break
+                    logger.warning(f"[resume] EMA Spread {sid} — setup failed (attempt {attempt+1}/5), retrying in 30s")
                     entry['running'] = False
+                    time.sleep(30)
+                else:
+                    logger.error(f"[resume] EMA Spread {sid} — setup failed after 5 attempts, will retry on next restart")
                     return
                 try:
                     from strategy.ema_credit_spread import EMACreditSpread
@@ -629,8 +666,14 @@ def _resume_db_strategies():
             strangle_strategies[sid] = entry
 
             def _resume_strangle(sid=sid, entry=entry, details=details, user_id=user_id, legs=legs):
-                if not _setup_strategy_thread(entry):
+                for attempt in range(5):
+                    if _setup_strategy_thread(entry):
+                        break
+                    logger.warning(f"[resume] Daily Strangle {sid} — setup failed (attempt {attempt+1}/5), retrying in 30s")
                     entry['running'] = False
+                    time.sleep(30)
+                else:
+                    logger.error(f"[resume] Daily Strangle {sid} — setup failed after 5 attempts")
                     return
                 try:
                     from strategy.daily_strangle import DailyStrangle
@@ -698,8 +741,14 @@ def _resume_db_strategies():
             hybrid_strategies[sid] = entry
 
             def _resume_hybrid(sid=sid, entry=entry, details=details, user_id=user_id):
-                if not _setup_strategy_thread(entry):
+                for attempt in range(5):
+                    if _setup_strategy_thread(entry):
+                        break
+                    logger.warning(f"[resume] Hybrid Switch {sid} — setup failed (attempt {attempt+1}/5), retrying in 30s")
                     entry['running'] = False
+                    time.sleep(30)
+                else:
+                    logger.error(f"[resume] Hybrid Switch {sid} — setup failed after 5 attempts")
                     return
                 try:
                     from strategy.hybrid_switch import HybridSwitch
@@ -764,8 +813,14 @@ def _resume_db_strategies():
             portfolio_strangle_strategies[sid] = entry
 
             def _resume_portfolio(sid=sid, entry=entry, details=details, user_id=user_id, legs=legs):
-                if not _setup_strategy_thread(entry):
+                for attempt in range(5):
+                    if _setup_strategy_thread(entry):
+                        break
+                    logger.warning(f"[resume] Portfolio Strangle {sid} — setup failed (attempt {attempt+1}/5), retrying in 30s")
                     entry['running'] = False
+                    time.sleep(30)
+                else:
+                    logger.error(f"[resume] Portfolio Strangle {sid} — setup failed after 5 attempts")
                     return
                 try:
                     from strategy.portfolio_strangle import PortfolioStrangle
