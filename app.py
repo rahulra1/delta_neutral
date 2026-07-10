@@ -139,11 +139,15 @@ def _resume_db_strategies():
             continue
 
         if not legs:
-            continue
+            # Daily-recurring strategies don't need legs to resume — they open trades on schedule
+            if source not in ('EMA Spread', 'OI Strategy', 'Daily Strangle', 'Weekly DN',
+                              'Portfolio Strangle', 'Hybrid Switch'):
+                continue
 
         # Skip strategies where all legs have no product_id (invalid/empty data)
         valid_legs = [l for l in legs if l.get('product_id')]
-        if not valid_legs:
+        if not valid_legs and source not in ('EMA Spread', 'OI Strategy', 'Daily Strangle',
+                                              'Weekly DN', 'Portfolio Strangle', 'Hybrid Switch'):
             logger.warning(f"[resume] Skipping {sid} — no valid legs (missing product_id)")
             all_tracked[sid]['status'] = 'closed'
             try:
