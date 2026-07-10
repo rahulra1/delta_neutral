@@ -274,8 +274,8 @@ class PortfolioStrangle(BaseStrategy):
             # PnL history for UI chart
             now_iso = datetime.now(IST).isoformat()
             self._pnl_history.append((now_iso, round(self.cumulative_pnl + tick_pnl, 4)))
-            if len(self._pnl_history) > 2000:
-                self._pnl_history = self._pnl_history[-2000:]
+            if len(self._pnl_history) > 500:
+                self._pnl_history = self._pnl_history[-500:]
 
             # Save snapshot every 6 ticks
             self._snap_counter += 1

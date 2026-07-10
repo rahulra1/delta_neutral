@@ -91,8 +91,8 @@ class StrategyMonitor:
                 now_iso = datetime.now().isoformat()
                 with self._lock:
                     self.pnl_history.append((now_iso, round(pnl, 2)))
-                    if len(self.pnl_history) > 2000:
-                        self.pnl_history = self.pnl_history[-2000:]
+                    if len(self.pnl_history) > 500:
+                        self.pnl_history = self.pnl_history[-500:]
                 self._log(f"📊 PnL: ${pnl:.2f} | " + " | ".join(details))
                 # Persist snapshot every 6 ticks
                 self._snap_counter += 1

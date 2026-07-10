@@ -187,7 +187,7 @@ def _resume_db_strategies():
                 continue
 
             # Launch full DN strategy in a background thread (same as /start)
-            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
                      'log_history': [], 'running': False,
                      'params': details, 'user_id': user_id, 'profile_id': profile_id}
             strategies[sid] = entry
@@ -248,14 +248,23 @@ def _resume_db_strategies():
                     if entry.get('strategy'):
                         entry['strategy'].close_all_positions()
                 finally:
-                    pnl = entry['strategy'].cumulative_realized_pnl if entry.get('strategy') else 0
-                    adj = entry['strategy'].adjustment_count if entry.get('strategy') else 0
-                    if entry.get('strategy'):
-                        _save_dn_legs(sid, entry['strategy'])
-                    record_end(sid, pnl, adj)
-                    update_tracked(sid, status='completed', pnl=round(pnl, 2))
-                    if entry.get('strategy'):
-                        entry['strategy'].ws_manager.stop()
+                    strategy = entry.get('strategy')
+                    if strategy and not strategy._running:
+                        pnl = strategy.cumulative_realized_pnl if strategy else 0
+                        adj = strategy.adjustment_count if strategy else 0
+                        _save_dn_legs(sid, strategy)
+                        record_end(sid, pnl, adj)
+                        update_tracked(sid, status='completed', pnl=round(pnl, 2),
+                                       exit_reason='intentional_close')
+                        if strategy:
+                            strategy.ws_manager.stop()
+                    elif not strategy:
+                        logger.warning(f"[resume] DN {sid} — thread exited without strategy object, keeping status 'running'")
+                    else:
+                        logger.warning(f"[resume] DN {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
+                        if strategy:
+                            _save_dn_legs(sid, strategy)
+                            strategy.ws_manager.stop()
                     _teardown_strategy_thread(entry)
 
             t = threading.Thread(target=_resume_dn, daemon=True)
@@ -278,7 +287,7 @@ def _resume_db_strategies():
                 strat.start_monitoring()
                 continue
 
-            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
                      'log_history': [], 'running': False, 'params': details,
                      'user_id': user_id, 'profile_id': profile_id}
             iv_crush_strategies[sid] = entry
@@ -318,11 +327,20 @@ def _resume_db_strategies():
                 except Exception as e:
                     logger.error(f"[resume] IV Crush {sid} error: {e}")
                 finally:
-                    pnl = round(getattr(entry.get('strategy'), 'total_pnl', 0), 2)
-                    record_end(sid, pnl, 0)
-                    update_tracked(sid, status='completed', pnl=pnl)
-                    if entry.get('strategy'):
-                        entry['strategy'].ws_manager.stop()
+                    strategy = entry.get('strategy')
+                    if strategy and not strategy._running:
+                        pnl = round(getattr(strategy, 'total_pnl', 0), 2)
+                        record_end(sid, pnl, 0)
+                        update_tracked(sid, status='completed', pnl=pnl,
+                                       exit_reason='intentional_close')
+                        if strategy:
+                            strategy.ws_manager.stop()
+                    elif not strategy:
+                        logger.warning(f"[resume] IV Crush {sid} — thread exited without strategy object, keeping status 'running'")
+                    else:
+                        logger.warning(f"[resume] IV Crush {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
+                        if strategy:
+                            strategy.ws_manager.stop()
                     _teardown_strategy_thread(entry)
 
             t = threading.Thread(target=_resume_iv, daemon=True)
@@ -343,7 +361,7 @@ def _resume_db_strategies():
                 strat.start_monitoring()
                 continue
 
-            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
                      'log_history': [], 'running': False, 'params': details,
                      'user_id': user_id, 'profile_id': profile_id}
             call_ratio_strategies[sid] = entry
@@ -376,11 +394,20 @@ def _resume_db_strategies():
                 except Exception as e:
                     logger.error(f"[resume] Call Ratio {sid} error: {e}")
                 finally:
-                    pnl = round(getattr(entry.get('strategy'), 'total_pnl', 0), 2)
-                    record_end(sid, pnl, 0)
-                    update_tracked(sid, status='completed', pnl=pnl)
-                    if entry.get('strategy'):
-                        entry['strategy'].ws_manager.stop()
+                    strategy = entry.get('strategy')
+                    if strategy and not strategy._running:
+                        pnl = round(getattr(strategy, 'total_pnl', 0), 2)
+                        record_end(sid, pnl, 0)
+                        update_tracked(sid, status='completed', pnl=pnl,
+                                       exit_reason='intentional_close')
+                        if strategy:
+                            strategy.ws_manager.stop()
+                    elif not strategy:
+                        logger.warning(f"[resume] Call Ratio {sid} — thread exited without strategy object, keeping status 'running'")
+                    else:
+                        logger.warning(f"[resume] Call Ratio {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
+                        if strategy:
+                            strategy.ws_manager.stop()
                     _teardown_strategy_thread(entry)
 
             t = threading.Thread(target=_resume_cr, daemon=True)
@@ -392,7 +419,7 @@ def _resume_db_strategies():
         elif source == 'OI Strategy':
             if not legs:
                 continue
-            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
                      'log_history': [], 'running': False, 'params': details,
                      'user_id': user_id, 'profile_id': profile_id}
             oi_strategies[sid] = entry
@@ -440,9 +467,16 @@ def _resume_db_strategies():
                 except Exception as e:
                     logger.error(f"[resume] OI Strategy {sid} error: {e}")
                 finally:
-                    pnl = round(getattr(entry.get('strategy'), '_pnl', 0), 2)
-                    record_end(sid, pnl, 0)
-                    update_tracked(sid, status='completed', pnl=pnl)
+                    strategy = entry.get('strategy')
+                    if strategy and not strategy._running:
+                        pnl = round(getattr(strategy, '_pnl', 0), 2)
+                        record_end(sid, pnl, 0)
+                        update_tracked(sid, status='completed', pnl=pnl,
+                                       exit_reason='intentional_close')
+                    elif not strategy:
+                        logger.warning(f"[resume] OI Strategy {sid} — thread exited without strategy object, keeping status 'running'")
+                    else:
+                        logger.warning(f"[resume] OI Strategy {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
                     _teardown_strategy_thread(entry)
 
             t = threading.Thread(target=_resume_oi, daemon=True)
@@ -452,7 +486,7 @@ def _resume_db_strategies():
 
         # 8. Restore Weekly Delta Neutral
         elif source == 'Weekly DN':
-            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
                      'log_history': [], 'running': False, 'params': details,
                      'user_id': user_id, 'profile_id': profile_id}
             weekly_dn_strategies[sid] = entry
@@ -485,9 +519,16 @@ def _resume_db_strategies():
                 except Exception as e:
                     logger.error(f"[resume] Weekly DN {sid} error: {e}")
                 finally:
-                    pnl = round(getattr(entry.get('strategy'), 'cumulative_pnl', 0), 2)
-                    record_end(sid, pnl, 0)
-                    update_tracked(sid, status='completed', pnl=pnl)
+                    strategy = entry.get('strategy')
+                    if strategy and not strategy._running:
+                        pnl = round(getattr(strategy, 'cumulative_pnl', 0), 2)
+                        record_end(sid, pnl, 0)
+                        update_tracked(sid, status='completed', pnl=pnl,
+                                       exit_reason='intentional_close')
+                    elif not strategy:
+                        logger.warning(f"[resume] Weekly DN {sid} — thread exited without strategy object, keeping status 'running'")
+                    else:
+                        logger.warning(f"[resume] Weekly DN {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
                     _teardown_strategy_thread(entry)
 
             t = threading.Thread(target=_resume_wdn, daemon=True)
@@ -497,7 +538,7 @@ def _resume_db_strategies():
 
         # 9. Restore EMA Credit Spread
         elif source == 'EMA Spread':
-            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
                      'log_history': [], 'running': False, 'params': details,
                      'user_id': user_id, 'profile_id': profile_id}
             ema_spread_strategies[sid] = entry
@@ -557,9 +598,22 @@ def _resume_db_strategies():
                 except Exception as e:
                     logger.error(f"[resume] EMA Spread {sid} error: {e}")
                 finally:
-                    pnl = round(getattr(entry.get('strategy'), 'cumulative_pnl', 0), 4)
-                    record_end(sid, pnl, 0)
-                    update_tracked(sid, status='completed', pnl=round(pnl, 2))
+                    strategy = entry.get('strategy')
+                    # Only mark as completed if the strategy intentionally stopped
+                    # (i.e., _running was set to False by close_all or user action).
+                    # If it crashed or never ran, leave status as 'running' so it
+                    # gets resumed on next restart.
+                    if strategy and not strategy._running:
+                        pnl = round(getattr(strategy, 'cumulative_pnl', 0), 4)
+                        record_end(sid, pnl, 0)
+                        update_tracked(sid, status='completed', pnl=round(pnl, 2),
+                                       exit_reason='intentional_close')
+                    elif not strategy:
+                        # Strategy object never created — setup failed, don't close
+                        logger.warning(f"[resume] EMA Spread {sid} — thread exited without strategy object, keeping status 'running'")
+                    else:
+                        # Strategy crashed — log but keep status as running for next restart
+                        logger.warning(f"[resume] EMA Spread {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
                     _teardown_strategy_thread(entry)
 
             t = threading.Thread(target=_resume_ecs, daemon=True)
@@ -569,7 +623,7 @@ def _resume_db_strategies():
 
         # 10. Resume Daily Strangle
         elif source == 'Daily Strangle':
-            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
                      'log_history': [], 'running': False, 'params': details,
                      'user_id': user_id, 'profile_id': profile_id}
             strangle_strategies[sid] = entry
@@ -619,9 +673,16 @@ def _resume_db_strategies():
                 except Exception as e:
                     logger.error(f"[resume] Daily Strangle {sid} error: {e}")
                 finally:
-                    pnl = round(getattr(entry.get('strategy'), 'cumulative_pnl', 0), 2)
-                    record_end(sid, pnl, 0)
-                    update_tracked(sid, status='completed', pnl=pnl)
+                    strategy = entry.get('strategy')
+                    if strategy and not strategy._running:
+                        pnl = round(getattr(strategy, 'cumulative_pnl', 0), 2)
+                        record_end(sid, pnl, 0)
+                        update_tracked(sid, status='completed', pnl=pnl,
+                                       exit_reason='intentional_close')
+                    elif not strategy:
+                        logger.warning(f"[resume] Daily Strangle {sid} — thread exited without strategy object, keeping status 'running'")
+                    else:
+                        logger.warning(f"[resume] Daily Strangle {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
                     _teardown_strategy_thread(entry)
 
             t = threading.Thread(target=_resume_strangle, daemon=True)
@@ -631,7 +692,7 @@ def _resume_db_strategies():
 
         # 11. Resume Hybrid Switch
         elif source == 'Hybrid Switch':
-            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
                      'log_history': [], 'running': False, 'params': details,
                      'user_id': user_id, 'profile_id': profile_id}
             hybrid_strategies[sid] = entry
@@ -678,9 +739,16 @@ def _resume_db_strategies():
                 except Exception as e:
                     logger.error(f"[resume] Hybrid Switch {sid} error: {e}")
                 finally:
-                    pnl = round(getattr(entry.get('strategy'), 'cumulative_pnl', 0), 2)
-                    record_end(sid, pnl, 0)
-                    update_tracked(sid, status='completed', pnl=pnl)
+                    strategy = entry.get('strategy')
+                    if strategy and not strategy._running:
+                        pnl = round(getattr(strategy, 'cumulative_pnl', 0), 2)
+                        record_end(sid, pnl, 0)
+                        update_tracked(sid, status='completed', pnl=pnl,
+                                       exit_reason='intentional_close')
+                    elif not strategy:
+                        logger.warning(f"[resume] Hybrid Switch {sid} — thread exited without strategy object, keeping status 'running'")
+                    else:
+                        logger.warning(f"[resume] Hybrid Switch {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
                     _teardown_strategy_thread(entry)
 
             t = threading.Thread(target=_resume_hybrid, daemon=True)
@@ -690,7 +758,7 @@ def _resume_db_strategies():
 
         # 11b. Resume Portfolio Strangle
         elif source == 'Portfolio Strangle':
-            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(),
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
                      'log_history': [], 'running': False, 'params': details,
                      'user_id': user_id, 'profile_id': profile_id}
             portfolio_strangle_strategies[sid] = entry
@@ -762,9 +830,16 @@ def _resume_db_strategies():
                 except Exception as e:
                     logger.error(f"[resume] Portfolio Strangle {sid} error: {e}")
                 finally:
-                    pnl = round(getattr(entry.get('strategy'), 'cumulative_pnl', 0), 4)
-                    record_end(sid, pnl, 0)
-                    update_tracked(sid, status='completed', pnl=round(pnl, 4))
+                    strategy = entry.get('strategy')
+                    if strategy and not strategy._running:
+                        pnl = round(getattr(strategy, 'cumulative_pnl', 0), 4)
+                        record_end(sid, pnl, 0)
+                        update_tracked(sid, status='completed', pnl=round(pnl, 4),
+                                       exit_reason='intentional_close')
+                    elif not strategy:
+                        logger.warning(f"[resume] Portfolio Strangle {sid} — thread exited without strategy object, keeping status 'running'")
+                    else:
+                        logger.warning(f"[resume] Portfolio Strangle {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
                     _teardown_strategy_thread(entry)
 
             t = threading.Thread(target=_resume_portfolio, daemon=True)
@@ -939,12 +1014,20 @@ class LogCapture:
         self.original.write(text)
         q = getattr(LogCapture._local, 'log_queue', None)
         if q and text.strip():
-            q.put(text.strip())
+            try:
+                q.put_nowait(text.strip())
+            except queue.Full:
+                # Discard oldest message to make room
+                try:
+                    q.get_nowait()
+                    q.put_nowait(text.strip())
+                except (queue.Empty, queue.Full):
+                    pass
         h = getattr(LogCapture._local, 'log_history', None)
         if h is not None and text.strip():
             h.append(text.strip())
-            if len(h) > 500:
-                del h[:len(h)-500]
+            if len(h) > 200:
+                del h[:len(h)-200]
 
     def flush(self):
         self.original.flush()
@@ -956,12 +1039,19 @@ class _StrategyQueueHandler(logging.Handler):
         msg = self.format(record)
         q = getattr(LogCapture._local, 'log_queue', None)
         if q and msg.strip():
-            q.put(msg.strip())
+            try:
+                q.put_nowait(msg.strip())
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                    q.put_nowait(msg.strip())
+                except (queue.Empty, queue.Full):
+                    pass
         h = getattr(LogCapture._local, 'log_history', None)
         if h is not None and msg.strip():
             h.append(msg.strip())
-            if len(h) > 500:
-                del h[:len(h)-500]
+            if len(h) > 200:
+                del h[:len(h)-200]
 
 
 def _setup_logging():
@@ -1083,14 +1173,21 @@ def run_strategy(sid, params):
         if entry.get('strategy'):
             entry['strategy'].close_all_positions()
     finally:
-        pnl = entry['strategy'].cumulative_realized_pnl if entry.get('strategy') else 0
-        adj = entry['strategy'].adjustment_count if entry.get('strategy') else 0
-        if entry.get('strategy'):
-            _save_dn_legs(sid, entry['strategy'])
-        record_end(sid, pnl, adj)
-        update_tracked(sid, status='completed', pnl=round(pnl, 2))
-        if entry.get('strategy'):
-            entry['strategy'].ws_manager.stop()
+        strategy = entry.get('strategy')
+        if strategy and not strategy._running:
+            pnl = strategy.cumulative_realized_pnl
+            adj = strategy.adjustment_count
+            _save_dn_legs(sid, strategy)
+            record_end(sid, pnl, adj)
+            update_tracked(sid, status='completed', pnl=round(pnl, 2),
+                           exit_reason='intentional_close')
+            strategy.ws_manager.stop()
+        elif not strategy:
+            logger.warning(f"[deploy] DN {sid} — thread exited without strategy object, keeping status 'running'")
+        else:
+            logger.warning(f"[deploy] DN {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
+            _save_dn_legs(sid, strategy)
+            strategy.ws_manager.stop()
         _teardown_strategy_thread(entry)
 
 
@@ -1645,7 +1742,7 @@ def api_close_strategy(sid):
     if not closed:
         return jsonify(success=False, error="Failed to close strategy"), 500
 
-    update_tracked(sid, status='closed')
+    update_tracked(sid, status='closed', exit_reason='user_closed')
     # Clean up position tracker
     try:
         tracked_details = all_tracked.get(sid, {}).get('details', {})
@@ -1775,7 +1872,7 @@ def api_close_all_strategies():
                     close_side = 'buy' if leg['side'] == 'sell' else 'sell'
                     place_order(leg['product_id'], leg['symbol'], int(leg['size']), close_side)
 
-        update_tracked(sid, status='closed')
+        update_tracked(sid, status='closed', exit_reason='user_closed')
         closed_count += 1
 
     return jsonify(closed=closed_count)
@@ -2085,7 +2182,7 @@ def start():
         if sid in strategies and strategies[sid]['running']:
             return jsonify(error="Strategy already running"), 400
 
-    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [], 'running': False, 'params': clean_params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [], 'running': False, 'params': clean_params, 'user_id': current_user_id(), 'profile_id': profile_id}
     with _state_lock:
         strategies[sid] = entry
     record_start(sid, clean_params, user_id=current_user_id())
@@ -2397,9 +2494,16 @@ def run_iv_crush(sid, params):
     except Exception as e:
         entry['log_queue'].put(f"❌ Error: {e}")
     finally:
-        pnl = round(getattr(entry.get('strategy'), 'total_pnl', 0), 2)
-        record_end(sid, pnl, 0)
-        update_tracked(sid, status='completed', pnl=pnl)
+        strategy = entry.get('strategy')
+        if strategy and not strategy._running:
+            pnl = round(getattr(strategy, 'total_pnl', 0), 2)
+            record_end(sid, pnl, 0)
+            update_tracked(sid, status='completed', pnl=pnl,
+                           exit_reason='intentional_close')
+        elif not strategy:
+            logger.warning(f"[deploy] IV Crush {sid} — thread exited without strategy object, keeping status 'running'")
+        else:
+            logger.warning(f"[deploy] IV Crush {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
         _teardown_strategy_thread(entry)
 
 
@@ -2412,7 +2516,7 @@ def iv_crush_start():
     if not api_key:
         return jsonify(error="No API profile selected"), 400
     sid = str(uuid.uuid4())[:8]
-    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [],
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
              'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     iv_crush_strategies[sid] = entry
     track_strategy(sid, 'IV Crush', f"{params.get('asset','BTC')} IV Crush {params.get('expiry_date','')}", current_user_id(), details={**params, 'profile_id': profile_id})
@@ -2553,9 +2657,16 @@ def run_call_ratio(sid, params):
     except Exception as e:
         entry['log_queue'].put(f"❌ Error: {e}")
     finally:
-        pnl = round(getattr(entry.get('strategy'), 'total_pnl', 0), 2)
-        record_end(sid, pnl, 0)
-        update_tracked(sid, status='completed', pnl=pnl)
+        strategy = entry.get('strategy')
+        if strategy and not strategy._running:
+            pnl = round(getattr(strategy, 'total_pnl', 0), 2)
+            record_end(sid, pnl, 0)
+            update_tracked(sid, status='completed', pnl=pnl,
+                           exit_reason='intentional_close')
+        elif not strategy:
+            logger.warning(f"[deploy] Call Ratio {sid} — thread exited without strategy object, keeping status 'running'")
+        else:
+            logger.warning(f"[deploy] Call Ratio {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
         _teardown_strategy_thread(entry)
 
 
@@ -2566,7 +2677,7 @@ def call_ratio_start():
     api_key, api_secret, _, broker = get_profile_creds(profile_id)
     if not api_key: return jsonify(error="No API profile selected"), 400
     sid = str(uuid.uuid4())[:8]
-    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [], 'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [], 'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     call_ratio_strategies[sid] = entry
     track_strategy(sid, 'Call Ratio', f"{params.get('asset','BTC')} Call Ratio", current_user_id(), details={**params, 'profile_id': profile_id})
     entry['thread'] = threading.Thread(target=run_call_ratio, args=(sid, params), daemon=True); entry['thread'].start()
@@ -2684,10 +2795,16 @@ def run_oi_strategy(sid, params):
     except Exception as e:
         entry['log_queue'].put(f"❌ Error: {e}")
     finally:
-        s = entry.get('strategy')
-        pnl = round(s.cumulative_pnl + s._pnl, 2) if s else 0
-        record_end(sid, pnl, getattr(s, 'total_days_traded', 0))
-        update_tracked(sid, status='completed', pnl=pnl)
+        strategy = entry.get('strategy')
+        if strategy and not strategy._running:
+            pnl = round(strategy.cumulative_pnl + strategy._pnl, 2)
+            record_end(sid, pnl, getattr(strategy, 'total_days_traded', 0))
+            update_tracked(sid, status='completed', pnl=pnl,
+                           exit_reason='intentional_close')
+        elif not strategy:
+            logger.warning(f"[deploy] OI Strategy {sid} — thread exited without strategy object, keeping status 'running'")
+        else:
+            logger.warning(f"[deploy] OI Strategy {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
         _teardown_strategy_thread(entry)
 
 
@@ -2700,7 +2817,7 @@ def oi_strategy_start():
     if not api_key:
         return jsonify(error="No API profile selected"), 400
     sid = str(uuid.uuid4())[:8]
-    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [],
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
              'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     oi_strategies[sid] = entry
     track_strategy(sid, 'OI Strategy', f"{params.get('asset','BTC')} OI Strategy", current_user_id(), details={**params, 'profile_id': profile_id})
@@ -2836,10 +2953,16 @@ def run_strangle_strategy(sid, params):
     except Exception as e:
         entry['log_queue'].put(f"❌ Error: {e}")
     finally:
-        s = entry.get('strategy')
-        pnl = round(s.cumulative_pnl, 2) if s else 0
-        record_end(sid, pnl, getattr(s, 'total_days_traded', 0))
-        update_tracked(sid, status='completed', pnl=pnl)
+        strategy = entry.get('strategy')
+        if strategy and not strategy._running:
+            pnl = round(strategy.cumulative_pnl, 2)
+            record_end(sid, pnl, getattr(strategy, 'total_days_traded', 0))
+            update_tracked(sid, status='completed', pnl=pnl,
+                           exit_reason='intentional_close')
+        elif not strategy:
+            logger.warning(f"[deploy] Daily Strangle {sid} — thread exited without strategy object, keeping status 'running'")
+        else:
+            logger.warning(f"[deploy] Daily Strangle {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
         _teardown_strategy_thread(entry)
 
 
@@ -2852,7 +2975,7 @@ def strangle_start():
     if not api_key:
         return jsonify(error="No API profile selected"), 400
     sid = str(uuid.uuid4())[:8]
-    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [],
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
              'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     strangle_strategies[sid] = entry
     track_strategy(sid, 'Daily Strangle', f"{params.get('asset','BTC')} 0DTE Strangle", current_user_id(), details={**params, 'profile_id': profile_id})
@@ -3011,10 +3134,16 @@ def run_portfolio_strangle(sid, params):
     except Exception as e:
         entry['log_queue'].put(f"❌ Error: {e}")
     finally:
-        st = entry.get('strategy')
-        pnl = round(st.cumulative_pnl, 4) if st else 0
-        record_end(sid, pnl, getattr(st, 'total_days_traded', 0))
-        update_tracked(sid, status='completed', pnl=round(pnl, 4))
+        strategy = entry.get('strategy')
+        if strategy and not strategy._running:
+            pnl = round(strategy.cumulative_pnl, 4)
+            record_end(sid, pnl, getattr(strategy, 'total_days_traded', 0))
+            update_tracked(sid, status='completed', pnl=round(pnl, 4),
+                           exit_reason='intentional_close')
+        elif not strategy:
+            logger.warning(f"[deploy] Portfolio Strangle {sid} — thread exited without strategy object, keeping status 'running'")
+        else:
+            logger.warning(f"[deploy] Portfolio Strangle {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
         _teardown_strategy_thread(entry)
 
 
@@ -3027,7 +3156,7 @@ def portfolio_strangle_start():
     if not api_key:
         return jsonify(error="No API profile selected"), 400
     sid = str(uuid.uuid4())[:8]
-    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [],
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
              'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     portfolio_strangle_strategies[sid] = entry
     track_strategy(sid, 'Portfolio Strangle', f"{params.get('asset','BTC')} 0DTE Portfolio",
@@ -3180,10 +3309,16 @@ def run_hybrid_strategy(sid, params):
     except Exception as e:
         entry['log_queue'].put(f"❌ Error: {e}")
     finally:
-        s = entry.get('strategy')
-        pnl = round(s.cumulative_pnl, 2) if s else 0
-        record_end(sid, pnl, getattr(s, 'total_days_traded', 0))
-        update_tracked(sid, status='completed', pnl=pnl)
+        strategy = entry.get('strategy')
+        if strategy and not strategy._running:
+            pnl = round(strategy.cumulative_pnl, 2)
+            record_end(sid, pnl, getattr(strategy, 'total_days_traded', 0))
+            update_tracked(sid, status='completed', pnl=pnl,
+                           exit_reason='intentional_close')
+        elif not strategy:
+            logger.warning(f"[deploy] Hybrid Switch {sid} — thread exited without strategy object, keeping status 'running'")
+        else:
+            logger.warning(f"[deploy] Hybrid Switch {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
         _teardown_strategy_thread(entry)
 
 
@@ -3196,7 +3331,7 @@ def hybrid_start():
     if not api_key:
         return jsonify(error="No API profile selected"), 400
     sid = str(uuid.uuid4())[:8]
-    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [],
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
              'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     hybrid_strategies[sid] = entry
     track_strategy(sid, 'Hybrid Switch', f"{params.get('asset','BTC')} Hybrid BTST", current_user_id(), details={**params, 'profile_id': profile_id})
@@ -3341,11 +3476,17 @@ def run_weekly_dn(sid, params):
     except Exception as e:
         entry['log_queue'].put(f"❌ Error: {e}")
     finally:
-        s = entry.get('strategy')
-        pnl = round(s.cumulative_pnl, 2) if s else 0
-        weeks = s.weeks_traded if s else 0
-        record_end(sid, pnl, weeks)
-        update_tracked(sid, status='completed', pnl=pnl)
+        strategy = entry.get('strategy')
+        if strategy and not strategy._running:
+            pnl = round(strategy.cumulative_pnl, 2)
+            weeks = strategy.weeks_traded if strategy else 0
+            record_end(sid, pnl, weeks)
+            update_tracked(sid, status='completed', pnl=pnl,
+                           exit_reason='intentional_close')
+        elif not strategy:
+            logger.warning(f"[deploy] Weekly DN {sid} — thread exited without strategy object, keeping status 'running'")
+        else:
+            logger.warning(f"[deploy] Weekly DN {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
         _teardown_strategy_thread(entry)
 
 
@@ -3358,7 +3499,7 @@ def weekly_dn_start():
     if not api_key:
         return jsonify(error="No API profile selected"), 400
     sid = str(uuid.uuid4())[:8]
-    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [],
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
              'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     weekly_dn_strategies[sid] = entry
     track_strategy(sid, 'Weekly DN', f"{params.get('asset','BTC')} Weekly Delta Neutral", current_user_id(), details={**params, 'profile_id': profile_id})
@@ -3487,10 +3628,16 @@ def run_ema_spread(sid, params):
     except Exception as e:
         entry['log_queue'].put(f"❌ Error: {e}")
     finally:
-        st = entry.get('strategy')
-        pnl = round(st.cumulative_pnl, 4) if st else 0
-        record_end(sid, pnl, getattr(st, 'total_days_traded', 0))
-        update_tracked(sid, status='completed', pnl=round(pnl, 2))
+        strategy = entry.get('strategy')
+        if strategy and not strategy._running:
+            pnl = round(strategy.cumulative_pnl, 4)
+            record_end(sid, pnl, getattr(strategy, 'total_days_traded', 0))
+            update_tracked(sid, status='completed', pnl=round(pnl, 2),
+                           exit_reason='intentional_close')
+        elif not strategy:
+            logger.warning(f"[deploy] EMA Spread {sid} — thread exited without strategy object, keeping status 'running'")
+        else:
+            logger.warning(f"[deploy] EMA Spread {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
         _teardown_strategy_thread(entry)
 
 
@@ -3503,7 +3650,7 @@ def ema_spread_start():
     if not api_key:
         return jsonify(error="No API profile selected"), 400
     sid = str(uuid.uuid4())[:8]
-    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(), 'log_history': [],
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
              'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     ema_spread_strategies[sid] = entry
     track_strategy(sid, 'EMA Spread', f"{params.get('asset','BTC')} EMA Credit Spread", current_user_id(), details={**params, 'profile_id': profile_id})

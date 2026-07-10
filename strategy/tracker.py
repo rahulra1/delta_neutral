@@ -137,8 +137,8 @@ class TrackedStrategy:
                 now_iso = datetime.now().isoformat()
                 with self._lock:
                     self._pnl_history.append((now_iso, self.current_pnl))
-                    if len(self._pnl_history) > 2000:
-                        self._pnl_history = self._pnl_history[-2000:]
+                    if len(self._pnl_history) > 500:
+                        self._pnl_history = self._pnl_history[-500:]
                 self.log(f"📊 PnL: ${pnl:.2f} | " + " | ".join(leg_details))
                 self._save_to_db()
                 # Persist snapshot every 6 ticks (~1 min at 10s interval)

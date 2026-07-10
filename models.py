@@ -375,6 +375,11 @@ def save_pnl_snapshot(user_id, sid, pnl):
     try:
         conn.execute('INSERT INTO pnl_snapshots (user_id, sid, pnl, ts) VALUES (?,?,?,?)',
                      (user_id, sid, round(pnl, 2), datetime.now().isoformat()))
+        # Prune old snapshots: keep max 1000 per strategy to bound DB growth
+        conn.execute('''DELETE FROM pnl_snapshots WHERE id IN (
+            SELECT id FROM pnl_snapshots WHERE user_id=? AND sid=?
+            ORDER BY ts DESC LIMIT -1 OFFSET 1000
+        )''', (user_id, sid))
         conn.commit()
     finally:
         conn.close()
