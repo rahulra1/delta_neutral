@@ -782,6 +782,8 @@ def _resume_db_strategies():
                     s.total_days_traded = int(details.get('total_days_traded', 0))
                     s.trade_log = details.get('trade_log', [])
                     s._sid = sid
+                    # Restore open legs from DB
+                    s.legs = legs or []
                     s.initialize()
                     # Log restored trade history
                     if s.trade_log:
@@ -1568,6 +1570,18 @@ def api_all_strategies():
                         entry['status'] = 'completed'
                         update_tracked(sid, status='completed', pnl=round(s.pnl, 2))
                         continue
+                    # Include live legs for dashboard display
+                    with s._legs_lock:
+                        entry['legs'] = [
+                            {'symbol': l.get('symbol', ''), 'strike': l.get('strike', ''),
+                             'type': l.get('type', ''), 'side': l.get('side', ''),
+                             'size': l.get('size', 0), 'entry_price': round(l.get('entry_price', 0), 4),
+                             'current_mark': round(l.get('current_mark', l.get('entry_price', 0)), 4),
+                             'current_pnl': round(l.get('current_pnl', 0), 4),
+                             'stopped': l.get('stopped', False),
+                             'product_id': l.get('product_id')}
+                            for l in s.legs
+                        ]
                 elif sid in portfolio_strangle_strategies and portfolio_strangle_strategies[sid].get('strategy'):
                     s = portfolio_strangle_strategies[sid]['strategy']
                     entry['pnl'] = round(s.pnl, 4)
@@ -1575,6 +1589,18 @@ def api_all_strategies():
                         entry['status'] = 'completed'
                         update_tracked(sid, status='completed', pnl=round(s.pnl, 4))
                         continue
+                    # Include live legs for dashboard display
+                    with s._legs_lock:
+                        entry['legs'] = [
+                            {'symbol': l.get('symbol', ''), 'strike': l.get('strike', ''),
+                             'type': l.get('type', ''), 'side': l.get('side', ''),
+                             'size': l.get('size', 0), 'entry_price': round(l.get('entry_price', 0), 4),
+                             'current_mark': round(l.get('current_mark', l.get('entry_price', 0)), 4),
+                             'current_pnl': round(l.get('current_pnl', 0), 4),
+                             'stopped': l.get('stopped', False),
+                             'product_id': l.get('product_id')}
+                            for l in s.legs
+                        ]
                 elif sid in hybrid_strategies and hybrid_strategies[sid].get('strategy'):
                     s = hybrid_strategies[sid]['strategy']
                     entry['pnl'] = round(s.pnl, 2)
