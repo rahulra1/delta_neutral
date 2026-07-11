@@ -133,6 +133,7 @@ class DailyStrangle(BaseStrategy):
 
         with self._legs_lock:
             self.legs.extend(day_legs)
+        self._persist_state()
         return day_legs
 
     def _monitor_day(self, day_legs, day_num):

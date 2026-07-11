@@ -193,6 +193,7 @@ class PortfolioStrangle(BaseStrategy):
         if slot_legs:
             with self._legs_lock:
                 self.legs.extend(slot_legs)
+            self._persist_state()
         return slot_legs
 
     def _monitor_all_slots(self, tag, day_legs_all, day_num):

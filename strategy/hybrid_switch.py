@@ -138,6 +138,7 @@ class HybridSwitch(BaseStrategy):
 
         with self._legs_lock:
             self.legs.extend(sell_legs)
+        self._persist_state()
 
         # Monitor session
         buy_legs = []  # activated lazy legs
