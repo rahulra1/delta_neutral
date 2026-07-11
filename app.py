@@ -1582,6 +1582,18 @@ def api_all_strategies():
                         entry['status'] = 'completed'
                         update_tracked(sid, status='completed', pnl=round(s.pnl, 2))
                         continue
+                    # Include live legs for dashboard display
+                    with s._legs_lock:
+                        entry['legs'] = [
+                            {'symbol': l.get('symbol', ''), 'strike': l.get('strike', ''),
+                             'type': l.get('type', ''), 'side': l.get('side', ''),
+                             'size': l.get('size', 0), 'entry_price': round(l.get('entry_price', 0), 4),
+                             'current_mark': round(l.get('current_mark', l.get('entry_price', 0)), 4),
+                             'current_pnl': round(l.get('current_pnl', 0), 4),
+                             'active': l.get('active', True),
+                             'product_id': l.get('product_id')}
+                            for l in s.legs
+                        ]
                 elif sid in _futures_traders:
                     trader = _futures_traders[sid]['trader']
                     if not trader.running:
