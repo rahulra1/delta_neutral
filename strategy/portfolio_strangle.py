@@ -215,6 +215,13 @@ class PortfolioStrangle(BaseStrategy):
             for slot in day_legs_all:
                 for leg in slot['legs']:
                     if leg.get('stopped', False):
+                        # Include realized loss from stopped legs in tick_pnl
+                        exit_p = leg.get('exit_price', leg['entry_price'])
+                        if leg['side'] == 'sell':
+                            leg_pnl = (leg['entry_price'] - exit_p) * leg['size'] * cv
+                        else:
+                            leg_pnl = (exit_p - leg['entry_price']) * leg['size'] * cv
+                        tick_pnl += leg_pnl
                         # Check recost opportunity
                         if (slot['sl_hit'].get(leg['type'], False) and
                                 not slot['recost_used'].get(leg['type'], True)):
@@ -429,10 +436,19 @@ class PortfolioStrangle(BaseStrategy):
         with self._legs_lock:
             for leg in list(self.legs):
                 if leg.get('stopped'):
+                    # Include realized loss from stopped legs
+                    exit_p = leg.get('exit_price', leg['entry_price'])
+                    if leg['side'] == 'sell':
+                        open_pnl += (leg['entry_price'] - exit_p) * leg['size'] * cv
+                    else:
+                        open_pnl += (exit_p - leg['entry_price']) * leg['size'] * cv
                     continue
                 data = get_current_price(leg['product_id'], self.asset)
                 if data:
-                    open_pnl += (leg['entry_price'] - data['mark_price']) * leg['size'] * cv
+                    if leg['side'] == 'sell':
+                        open_pnl += (leg['entry_price'] - data['mark_price']) * leg['size'] * cv
+                    else:
+                        open_pnl += (data['mark_price'] - leg['entry_price']) * leg['size'] * cv
         return self.cumulative_pnl + open_pnl
 
     def _persist_state(self):
