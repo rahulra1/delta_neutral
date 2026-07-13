@@ -77,6 +77,10 @@ const STRATEGIES = [
     desc: '0DTE short strangle: sell ~$100 call + put at 9 AM, 100% SL per leg (premium doubles), exit 5:15 PM. Daily recurring.',
     features: ['0DTE Expiry', '9AM Entry / 5PM Exit', '100% SL Per Leg', 'Daily Auto-Trade'],
     rec: '⏱ Daily 9:00 AM · BTC options · $200 margin for 0.1 BTC' },
+  { key: 'pivot_supertrend', label: 'Pivot + SuperTrend', icon: '📡', type: 'Options',
+    desc: '0DTE directional option selling: SuperTrend(7,3) + Daily Pivot R1/S1. Sell ATM put on breakout above R1, sell ATM call below S1. Exit on ST flip.',
+    features: ['0DTE ATM Selling', 'SuperTrend Exit', 'Pivot Filter', 'Max 3 Trades/Day'],
+    rec: '⏱ Daily 9:20 AM · BTC options · Directional + Theta' },
   { key: 'portfolio_strangle', label: 'Portfolio Strangle', icon: '📊', type: 'Options',
     desc: '0DTE 3-entry strangle: sell OTM5 at 9:15, 10:20, 11:15 (30 lots each). 200% SL + recost re-entry. Skip Fri & Sun.',
     features: ['3 Time Entries', 'OTM5 Strangle', '200% SL + Recost', 'Skip Fri/Sun'],
@@ -172,6 +176,20 @@ const STRANGLE_FIELDS = [
   { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 0 },
   { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 17 },
   { key: 'exit_minute', label: 'Exit Minute', type: 'number', default: 15 },
+  { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 10 },
+];
+
+const PIVOT_ST_FIELDS = [
+  { key: 'lot_size', label: 'Lot Size', type: 'number', default: 100 },
+  { key: 'st_period', label: 'SuperTrend Period', type: 'number', default: 7 },
+  { key: 'st_multiplier', label: 'SuperTrend Multiplier', type: 'number', default: 3 },
+  { key: 'max_trades', label: 'Max Trades / Day', type: 'number', default: 3 },
+  { key: 'target_delta', label: 'Target Delta (ATM)', type: 'number', step: '0.01', default: 0.50, hint: '0.50 = ATM' },
+  { key: 'delta_tolerance', label: 'Delta Tolerance', type: 'number', step: '0.01', default: 0.15 },
+  { key: 'entry_hour', label: 'Entry Hour (24h IST)', type: 'number', default: 9 },
+  { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 20 },
+  { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 17 },
+  { key: 'exit_minute', label: 'Exit Minute', type: 'number', default: 0 },
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 10 },
 ];
 
@@ -471,6 +489,62 @@ export default function Strategy() {
                         <td style={{ padding: '4px 8px' }}>{t.date}</td>
                         <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${t.pnl}</td>
                         <td style={{ padding: '4px 8px' }}>{t.exit_reason === 'both_sl' ? '🛑 Both SL' : t.exit_reason === 'one_sl' ? '⚠️ One SL' : '⏰ EOD Exit'}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )} />
+      )}
+      {activeTab === 'pivot_supertrend' && (
+        <StrategyTemplate title="Pivot + SuperTrend (0DTE)" icon="📡" type="Options" description="Directional ATM option selling: SuperTrend(7,3) + Pivot R1/S1. Exit on ST flip or 5 PM." profiles={profiles}
+          configFields={PIVOT_ST_FIELDS}
+          onStart={async (config) => { const { data } = await api.post('/pivot-st/start', config); return data; }}
+          onStop={async (sid) => { await api.post('/pivot-st/stop', { sid }); }}
+          statusEndpoint="/pivot-st/status" streamEndpoint="/pivot-st/stream"
+          renderStatus={(s) => (
+            <>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Cumulative P&L</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Total (incl. Open)</div><div className="value" style={{ color: (s.total_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.total_pnl||0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Days Traded</div><div className="value">{s.days_traded || 0}</div></div>
+                <div className="stat-card"><div className="label">Today's Trades</div><div className="value">{s.today_trades || 0} / {s.max_trades || 3}</div></div>
+              </div>
+              {(s.pivot || s.r1 || s.s1) && (
+                <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                  <div className="stat-card"><div className="label">Pivot</div><div className="value">${s.pivot || '-'}</div></div>
+                  <div className="stat-card"><div className="label">R1</div><div className="value" style={{ color: 'var(--green)' }}>${s.r1 || '-'}</div></div>
+                  <div className="stat-card"><div className="label">S1</div><div className="value" style={{ color: 'var(--red)' }}>${s.s1 || '-'}</div></div>
+                  <div className="stat-card"><div className="label">SuperTrend</div><div className="value" style={{ color: s.st_direction === 'bullish' ? 'var(--green)' : 'var(--red)' }}>{s.st_direction === 'bullish' ? '↑ Bullish' : s.st_direction === 'bearish' ? '↓ Bearish' : '—'}</div></div>
+                </div>
+              )}
+              {s.legs && s.legs.length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Active Position</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Signal', 'Type', 'Strike', 'Entry', 'Mark', 'P&L'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{s.legs.map((l, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}><span className={`badge ${l.signal === 'sell_put' ? 'badge-green' : 'badge-red'}`}>{l.signal === 'sell_put' ? '🐂 SELL PUT' : '🐻 SELL CALL'}</span></td>
+                        <td style={{ padding: '4px 8px' }}>{(l.type || '').toUpperCase()}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>{l.strike}</td>
+                        <td style={{ padding: '4px 8px' }}>${l.entry_price.toFixed(4)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>${(l.mark_price || 0).toFixed(4)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: (l.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(l.pnl || 0).toFixed(4)}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+              {(s.trade_log || []).length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Trade Log</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Date', 'Trades', 'P&L'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{(s.trade_log || []).slice(-10).reverse().map((t, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}>{t.date}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.trades || 0}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${t.pnl}</td>
                       </tr>))}</tbody>
                   </table>
                 </div>

@@ -52,6 +52,7 @@ portfolio_strangle_strategies = {}
 hybrid_strategies = {}
 weekly_dn_strategies = {}
 ema_spread_strategies = {}
+pivot_st_strategies = {}
 _futures_traders = {}
 
 # Resume strategies from DB on startup
@@ -737,6 +738,76 @@ def _resume_db_strategies():
             t.start()
             logger.info(f"[resume] Resumed Daily Strangle {sid}")
 
+        # 10b. Resume Pivot SuperTrend
+        elif source == 'Pivot SuperTrend':
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
+                     'log_history': [], 'running': False, 'params': details,
+                     'user_id': user_id, 'profile_id': profile_id}
+            pivot_st_strategies[sid] = entry
+
+            def _resume_pivot_st(sid=sid, entry=entry, details=details, user_id=user_id, legs=legs):
+                for attempt in range(5):
+                    if _setup_strategy_thread(entry):
+                        break
+                    logger.warning(f"[resume] PivotST {sid} — setup failed (attempt {attempt+1}/5), retrying in 30s")
+                    entry['running'] = False
+                    time.sleep(30)
+                else:
+                    logger.error(f"[resume] PivotST {sid} — setup failed after 5 attempts")
+                    return
+                try:
+                    from strategy.pivot_supertrend import PivotSuperTrend
+                    s = PivotSuperTrend(
+                        asset=details.get('asset', 'BTC'),
+                        lot_size=int(details.get('lot_size', 100)),
+                        target_delta=float(details.get('target_delta', 0.50)),
+                        delta_tolerance=float(details.get('delta_tolerance', 0.15)),
+                        st_period=int(details.get('st_period', 7)),
+                        st_multiplier=int(details.get('st_multiplier', 3)),
+                        max_trades=int(details.get('max_trades', 3)),
+                        monitor_interval=int(details.get('monitoring_interval', 10)),
+                        entry_hour=int(details.get('entry_hour', 9)),
+                        entry_minute=int(details.get('entry_minute', 20)),
+                        exit_hour=int(details.get('exit_hour', 17)),
+                        exit_minute=int(details.get('exit_minute', 0)),
+                    )
+                    entry['strategy'] = s
+                    s._log_queue = entry['log_queue']
+                    s._log_history = entry['log_history']
+                    import config as _cfg
+                    s._api_key = _cfg.get_api_key()
+                    s._api_secret = _cfg.get_api_secret()
+                    s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
+                    entry['running'] = True
+                    s.cumulative_pnl = float(details.get('cumulative_pnl', 0))
+                    s.total_days_traded = int(details.get('total_days_traded', 0))
+                    s.trade_log = details.get('trade_log', [])
+                    s.legs = legs or []
+                    s._sid = sid
+                    s.initialize()
+                    if s.trade_log:
+                        print(f"[PivotST] Restored {len(s.trade_log)} days | Cum PnL: ${s.cumulative_pnl:+.4f}")
+                    s.monitor()
+                except Exception as e:
+                    logger.error(f"[resume] PivotST {sid} error: {e}")
+                finally:
+                    strategy = entry.get('strategy')
+                    if strategy and not strategy._running:
+                        pnl = round(getattr(strategy, 'cumulative_pnl', 0), 4)
+                        record_end(sid, pnl, 0)
+                        update_tracked(sid, status='completed', pnl=pnl,
+                                       exit_reason='intentional_close')
+                    elif not strategy:
+                        logger.warning(f"[resume] PivotST {sid} — thread exited without strategy object")
+                    else:
+                        logger.warning(f"[resume] PivotST {sid} — thread exited unexpectedly, keeping status 'running'")
+                    _teardown_strategy_thread(entry)
+
+            t = threading.Thread(target=_resume_pivot_st, daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed Pivot SuperTrend {sid}")
+
         # 11. Resume Hybrid Switch
         elif source == 'Hybrid Switch':
             entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
@@ -1418,6 +1489,11 @@ def api_dashboard():
                     s = strangle_strategies[sid]['strategy']
                     t['pnl'] = round(s.pnl, 2)
                     t['cumulative_pnl'] = round(s.cumulative_pnl, 2)
+                # Check Pivot SuperTrend
+                elif sid in pivot_st_strategies and pivot_st_strategies[sid].get('strategy'):
+                    s = pivot_st_strategies[sid]['strategy']
+                    t['pnl'] = round(s.pnl, 4)
+                    t['cumulative_pnl'] = round(s.cumulative_pnl, 4)
                 # Check Portfolio Strangle
                 elif sid in portfolio_strangle_strategies and portfolio_strangle_strategies[sid].get('strategy'):
                     s = portfolio_strangle_strategies[sid]['strategy']
@@ -1442,6 +1518,7 @@ def api_dashboard():
         running_count += sum(1 for sid, e in weekly_dn_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in ema_spread_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in strangle_strategies.items() if e.get('user_id') == uid and e.get('running'))
+        running_count += sum(1 for sid, e in pivot_st_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in portfolio_strangle_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in hybrid_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in _futures_traders.items() if e.get('user_id') == uid and e['trader'].running)
@@ -1582,6 +1659,22 @@ def api_all_strategies():
                              'product_id': l.get('product_id')}
                             for l in s.legs
                         ]
+                elif sid in pivot_st_strategies and pivot_st_strategies[sid].get('strategy'):
+                    s = pivot_st_strategies[sid]['strategy']
+                    entry['pnl'] = round(s.pnl, 4)
+                    if not s._running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.pnl, 4))
+                        continue
+                    with s._legs_lock:
+                        entry['legs'] = [
+                            {'symbol': l.get('symbol', ''), 'strike': l.get('strike', ''),
+                             'type': l.get('type', ''), 'side': l.get('side', ''),
+                             'size': l.get('size', 0), 'entry_price': round(l.get('entry_price', 0), 4),
+                             'signal': l.get('signal', ''),
+                             'product_id': l.get('product_id')}
+                            for l in s.legs
+                        ]
                 elif sid in portfolio_strangle_strategies and portfolio_strangle_strategies[sid].get('strategy'):
                     s = portfolio_strangle_strategies[sid]['strategy']
                     entry['pnl'] = round(s.pnl, 4)
@@ -1718,6 +1811,8 @@ def api_close_strategy(sid):
             profile_id = ema_spread_strategies[sid].get('profile_id')
         elif sid in strangle_strategies:
             profile_id = strangle_strategies[sid].get('profile_id')
+        elif sid in pivot_st_strategies:
+            profile_id = pivot_st_strategies[sid].get('profile_id')
         elif sid in portfolio_strangle_strategies:
             profile_id = portfolio_strangle_strategies[sid].get('profile_id')
         elif sid in hybrid_strategies:
@@ -1785,6 +1880,15 @@ def api_close_strategy(sid):
                 st['strategy'].close_all()
             except Exception as e:
                 logger.error(f"[close] Strangle {sid} close_all error: {e}")
+        closed = True
+    # Pivot SuperTrend
+    if not closed and sid in pivot_st_strategies:
+        pst = pivot_st_strategies[sid]
+        if pst.get('strategy'):
+            try:
+                pst['strategy'].close_all()
+            except Exception as e:
+                logger.error(f"[close] PivotST {sid} close_all error: {e}")
         closed = True
     # Portfolio Strangle
     if not closed and sid in portfolio_strangle_strategies:
@@ -1894,6 +1998,8 @@ def api_close_all_strategies():
                 profile_id = ema_spread_strategies[sid].get('profile_id')
             elif sid in strangle_strategies:
                 profile_id = strangle_strategies[sid].get('profile_id')
+            elif sid in pivot_st_strategies:
+                profile_id = pivot_st_strategies[sid].get('profile_id')
             elif sid in portfolio_strangle_strategies:
                 profile_id = portfolio_strangle_strategies[sid].get('profile_id')
             elif sid in hybrid_strategies:
@@ -1941,6 +2047,11 @@ def api_close_all_strategies():
             st = strangle_strategies[sid]
             if st.get('strategy'):
                 st['strategy'].close_all()
+            closed = True
+        if not closed and sid in pivot_st_strategies:
+            pst = pivot_st_strategies[sid]
+            if pst.get('strategy'):
+                pst['strategy'].close_all()
             closed = True
         if not closed and sid in portfolio_strangle_strategies:
             ps = portfolio_strangle_strategies[sid]
@@ -2091,6 +2202,27 @@ def api_strategy_detail(sid):
                     'current_mark': round(leg.get('current_mark', 0), 2),
                     'current_pnl': round(leg.get('current_pnl', 0), 2),
                     'stopped': leg.get('stopped', False)})
+            if hasattr(strat, '_pnl_history') and strat._pnl_history:
+                pnl_history = list(strat._pnl_history[-500:])
+        elif sid in pivot_st_strategies and pivot_st_strategies[sid].get('strategy'):
+            pst = pivot_st_strategies[sid]
+            strat = pst['strategy']
+            entry['pnl'] = round(strat.pnl, 4)
+            entry['cumulative_pnl'] = round(strat.cumulative_pnl, 4)
+            entry['running'] = pst.get('running', False)
+            logs = pst.get('log_history', [])
+            entry['trade_log'] = strat.trade_log[-20:]
+            entry['days_traded'] = strat.total_days_traded
+            entry['today_trades'] = strat.today_trade_count
+            entry['pivot'] = round(strat._pivot, 0) if strat._pivot else None
+            entry['r1'] = round(strat._r1, 0) if strat._r1 else None
+            entry['s1'] = round(strat._s1, 0) if strat._s1 else None
+            entry['st_direction'] = 'bullish' if strat._st_direction == 1 else 'bearish' if strat._st_direction == -1 else None
+            for leg in strat.legs:
+                live_legs.append({'symbol': leg.get('symbol', ''), 'type': leg.get('type', ''),
+                    'strike': leg.get('strike', ''), 'side': 'sell', 'size': leg.get('size', 0),
+                    'entry_price': round(leg.get('entry_price', 0), 4),
+                    'signal': leg.get('signal', '')})
             if hasattr(strat, '_pnl_history') and strat._pnl_history:
                 pnl_history = list(strat._pnl_history[-500:])
         elif sid in portfolio_strangle_strategies and portfolio_strangle_strategies[sid].get('strategy'):
@@ -3159,6 +3291,167 @@ def strangle_status(sid):
         days_traded=s.total_days_traded,
         trade_log=s.trade_log[-10:],
         legs=enriched_legs,
+    )
+
+
+# ── Pivot + SuperTrend (0DTE) Routes ──
+
+
+def run_pivot_st_strategy(sid, params):
+    entry = pivot_st_strategies[sid]
+    uid = entry['user_id']
+    if not _setup_strategy_thread(entry):
+        entry['log_queue'].put("__STOPPED__")
+        return
+
+    try:
+        from strategy.pivot_supertrend import PivotSuperTrend
+        s = PivotSuperTrend(
+            asset=params.get('asset', 'BTC'),
+            lot_size=int(params.get('lot_size', 100)),
+            target_delta=float(params.get('target_delta', 0.50)),
+            delta_tolerance=float(params.get('delta_tolerance', 0.15)),
+            st_period=int(params.get('st_period', 7)),
+            st_multiplier=int(params.get('st_multiplier', 3)),
+            max_trades=int(params.get('max_trades', 3)),
+            monitor_interval=int(params.get('monitoring_interval', 10)),
+            entry_hour=int(params.get('entry_hour', 9)),
+            entry_minute=int(params.get('entry_minute', 20)),
+            exit_hour=int(params.get('exit_hour', 17)),
+            exit_minute=int(params.get('exit_minute', 0)),
+        )
+        s._log_queue = entry['log_queue']
+        s._log_history = entry['log_history']
+        import config as _cfg
+        s._api_key = _cfg.get_api_key()
+        s._api_secret = _cfg.get_api_secret()
+        s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
+        entry['strategy'] = s
+        entry['running'] = True
+        s._sid = sid
+        record_start(sid, params, user_id=uid)
+        if not s.initialize():
+            entry['log_queue'].put("✗ Init failed")
+            entry['running'] = False
+            entry['log_queue'].put("__STOPPED__")
+            return
+        s.monitor()
+    except Exception as e:
+        entry['log_queue'].put(f"❌ Error: {e}")
+    finally:
+        strategy = entry.get('strategy')
+        if strategy and not strategy._running:
+            pnl = round(strategy.cumulative_pnl, 4)
+            record_end(sid, pnl, strategy.total_days_traded)
+            update_tracked(sid, status='completed', pnl=pnl,
+                           exit_reason='intentional_close')
+        elif not strategy:
+            logger.warning(f"[deploy] PivotST {sid} — thread exited without strategy object")
+        else:
+            logger.warning(f"[deploy] PivotST {sid} — thread exited unexpectedly, keeping status 'running'")
+        _teardown_strategy_thread(entry)
+
+
+@app.route('/api/pivot-st/start', methods=['POST'])
+@login_required
+def pivot_st_start():
+    params = request.json
+    profile_id = params.pop('profile_id', None)
+    api_key, api_secret, _, broker = get_profile_creds(profile_id)
+    if not api_key:
+        return jsonify(error="No API profile selected"), 400
+    sid = str(uuid.uuid4())[:8]
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
+             'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    pivot_st_strategies[sid] = entry
+    track_strategy(sid, 'Pivot SuperTrend', f"{params.get('asset','BTC')} Pivot+ST 0DTE", current_user_id(), details={**params, 'profile_id': profile_id})
+    entry['thread'] = threading.Thread(target=run_pivot_st_strategy, args=(sid, params), daemon=True)
+    entry['thread'].start()
+    return jsonify(status="started", sid=sid)
+
+
+@app.route('/api/pivot-st/stop', methods=['POST'])
+@login_required
+def pivot_st_stop():
+    sid = request.json.get('sid')
+    e = pivot_st_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error="Not found"), 404
+    if e.get('strategy'):
+        try:
+            from config import set_thread_credentials
+            profile_id = e.get('profile_id')
+            if profile_id:
+                api_key, api_secret, _, broker = get_profile_creds(profile_id)
+                if api_key:
+                    set_thread_credentials(api_key, api_secret, broker)
+            e['strategy']._running = False
+            e['strategy'].close_all()
+        except Exception as ex:
+            logger.error(f"[pivot_st_stop] {sid} error: {ex}")
+    return jsonify(status="stopping")
+
+
+@app.route('/api/pivot-st/stream/<sid>')
+@login_required
+def pivot_st_stream(sid):
+    e = pivot_st_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
+    q = e['log_queue']
+    history = e.get('log_history', [])
+    def generate():
+        for msg in list(history):
+            yield f"data: {msg}\n\n"
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                if msg == "__STOPPED__":
+                    yield f"event: stopped\ndata: done\n\n"
+                    break
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield f": heartbeat\n\n"
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/pivot-st/status/<sid>')
+@login_required
+def pivot_st_status(sid):
+    e = pivot_st_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(running=False)
+    if not e['running']:
+        return jsonify(running=False)
+    s = e.get('strategy')
+    if not s:
+        return jsonify(running=True, total_pnl=0, cumulative_pnl=0, days_traded=0, trade_log=[], legs=[])
+    profile_id = e.get('profile_id')
+    uid = e.get('user_id')
+    enriched_legs = []
+    for l in s.legs:
+        mark, pnl = _enrich_leg(l, getattr(s, 'asset', 'BTC'), profile_id=profile_id, user_id=uid)
+        enriched_legs.append({
+            'symbol': l.get('symbol', ''), 'strike': l.get('strike', ''), 'type': l.get('type', ''),
+            'side': l.get('side', ''), 'size': l.get('size', 0), 'entry_price': round(l.get('entry_price', 0), 4),
+            'mark_price': mark, 'pnl': pnl,
+            'signal': l.get('signal', ''),
+            'product_id': l.get('product_id'),
+        })
+    return jsonify(
+        running=True,
+        total_pnl=round(s.pnl, 4),
+        cumulative_pnl=round(s.cumulative_pnl, 4),
+        days_traded=s.total_days_traded,
+        today_trades=s.today_trade_count,
+        max_trades=s.max_trades,
+        trade_log=s.trade_log[-10:],
+        legs=enriched_legs,
+        pivot=round(s._pivot, 0) if s._pivot else None,
+        r1=round(s._r1, 0) if s._r1 else None,
+        s1=round(s._s1, 0) if s._s1 else None,
+        st_direction='bullish' if s._st_direction == 1 else 'bearish' if s._st_direction == -1 else None,
     )
 
 
