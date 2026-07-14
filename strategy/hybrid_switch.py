@@ -123,6 +123,23 @@ class HybridSwitch(BaseStrategy):
 
         session_pnl = 0.0
 
+        # Determine exit time: if we're past entry time (19:15+), exit is TOMORROW at 17:15
+        # If we're before exit time on the exit day, exit is TODAY at 17:15
+        now = datetime.now(IST)
+        entry_time_today = now.replace(hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
+        if now.hour >= self.entry_hour:
+            # We're in the evening after entry — exit is tomorrow
+            exit_dt = (now + timedelta(days=1)).replace(hour=self.exit_hour, minute=self.exit_minute, second=0, microsecond=0)
+        else:
+            # We're on the exit day (morning/afternoon) — exit is today
+            exit_dt = now.replace(hour=self.exit_hour, minute=self.exit_minute, second=0, microsecond=0)
+            # But if we're already past exit time today, close immediately
+            if now >= exit_dt:
+                print(f"{tag} ⏰ Already past exit time — closing all resumed legs immediately")
+                exit_dt = now  # will trigger exit on first loop iteration
+
+        print(f"{tag} Exit target: {exit_dt.strftime('%Y-%m-%d %H:%M')} IST")
+
         while self._running:
             now = datetime.now(IST)
 
@@ -134,9 +151,8 @@ class HybridSwitch(BaseStrategy):
                 time.sleep(self.monitor_interval)
                 continue
 
-            # Exit time check (exit at EXIT_HOUR:EXIT_MINUTE if past entry day)
-            if now.hour > self.exit_hour or (now.hour == self.exit_hour and now.minute >= self.exit_minute):
-                # Only exit if we're past the entry time from yesterday (BTST)
+            # Exit time check
+            if now >= exit_dt:
                 print(f"{tag} ⏰ Exit time — closing all resumed legs")
                 break
 
@@ -311,7 +327,7 @@ class HybridSwitch(BaseStrategy):
                 continue
 
             # Exit on expiry day (D-0) at 5:15 PM
-            if now.date() == expiry_date_obj:
+            if now.date() >= expiry_date_obj:
                 if now.hour > self.exit_hour or (now.hour == self.exit_hour and now.minute >= self.exit_minute):
                     print(f"{tag} ⏰ Exit time (expiry day) — closing all")
                     break
