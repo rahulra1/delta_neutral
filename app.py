@@ -860,7 +860,17 @@ def _resume_db_strategies():
                     # Log restored trade history
                     if s.trade_log:
                         for t in s.trade_log:
-                            print(f"[Hybrid Day{t.get('day',0)}] {t.get('date','')} | {t.get('direction','')} | {t.get('exit_reason','')} | PnL: ${t.get('pnl',0):+.2f}")
+                            # Prefer enriched direction (e.g. "C105000/P95000") over generic count
+                            if t.get('direction'):
+                                legs_str = t['direction']
+                            elif 'sell_legs' in t:
+                                sell_info = f"S:{t['sell_legs']}"
+                                buy_info = f" B:{t['buy_legs_activated']}" if t.get('buy_legs_activated') else ""
+                                legs_str = sell_info + buy_info
+                            else:
+                                legs_str = ""
+                            exit_info = t.get('exit_reason', '')
+                            print(f"[Hybrid Day{t.get('day',0)}] {t.get('date','')} | {legs_str} | {exit_info} | PnL: ${t.get('pnl',0):+.2f}")
                         print(f"[Hybrid] Restored {len(s.trade_log)} days | Cum PnL: ${s.cumulative_pnl:+.2f}")
                     s.monitor()
                 except Exception as e:

@@ -75,6 +75,20 @@ class HybridSwitch(BaseStrategy):
         return True
 
     def monitor(self):
+        # On restore: if there are active legs from a previous session, resume monitoring them
+        if self.legs:
+            active_legs = [l for l in self.legs if l.get('active', True)]
+            if active_legs:
+                print(f"[Hybrid] Resuming {len(active_legs)} active legs from interrupted session")
+                day_num = self.total_days_traded or 1
+                tag = f"[Hybrid D{day_num}]"
+                t = threading.Thread(target=self._resume_session, args=(tag, day_num, active_legs))
+                t.start()
+                self._session_threads.append(t)
+                t.join()  # wait for resumed session to finish before starting new cycle
+                if not self._running:
+                    return
+
         while self._running:
             self._wait_for_next_entry()
             if not self._running:
@@ -87,6 +101,146 @@ class HybridSwitch(BaseStrategy):
             t.start()
             self._session_threads = [th for th in self._session_threads if th.is_alive()]
             self._session_threads.append(t)
+
+    def _resume_session(self, tag, day_num, active_legs):
+        """Resume monitoring active legs from a previous session that was interrupted."""
+        from config import set_thread_credentials
+        if hasattr(self, '_api_key') and self._api_key:
+            set_thread_credentials(self._api_key, self._api_secret, self._broker)
+        if hasattr(self, '_log_queue') and self._log_queue:
+            from app import LogCapture
+            LogCapture._local.log_queue = self._log_queue
+            LogCapture._local.log_history = self._log_history
+
+        cv = get_contract_value(self.asset)
+
+        # Separate sell and buy legs
+        sell_legs = [l for l in active_legs if l.get('role') == 'sell' or l.get('side') == 'sell']
+        buy_legs = [l for l in active_legs if l.get('role') == 'buy_switch' or (l.get('side') == 'buy' and l.get('role') != 'sell')]
+
+        for leg in active_legs:
+            print(f"{tag} ↻ Resumed {leg['side'].upper()} {leg.get('type','').upper()} {leg.get('strike','')} | Entry: ${leg.get('entry_price',0):.2f} | SL: ${leg.get('sl_price',0):.2f}")
+
+        session_pnl = 0.0
+
+        while self._running:
+            now = datetime.now(IST)
+
+            # Gap period — no decisions
+            if now.hour == 17 and now.minute >= 30:
+                time.sleep(self.monitor_interval)
+                continue
+            if now.hour == 18 and now.minute < 30:
+                time.sleep(self.monitor_interval)
+                continue
+
+            # Exit time check (exit at EXIT_HOUR:EXIT_MINUTE if past entry day)
+            if now.hour > self.exit_hour or (now.hour == self.exit_hour and now.minute >= self.exit_minute):
+                # Only exit if we're past the entry time from yesterday (BTST)
+                print(f"{tag} ⏰ Exit time — closing all resumed legs")
+                break
+
+            # Check sell legs for SL
+            for leg in sell_legs:
+                if not leg.get('active', True):
+                    continue
+                data = get_current_price(leg['product_id'], self.asset)
+                if not data:
+                    continue
+                current = data['mark_price']
+                leg_pnl = (leg['entry_price'] - current) * leg['size'] * cv
+                leg['current_mark'] = round(current, 2)
+                leg['current_pnl'] = round(leg_pnl, 2)
+                if current >= leg.get('sl_price', float('inf')):
+                    print(f"{tag} 🛑 SELL {leg.get('type','').upper()} SL hit: ${current:.2f} >= ${leg['sl_price']:.2f}")
+                    place_order(leg['product_id'], leg['symbol'], leg['size'], 'buy')
+                    leg['active'] = False
+                    leg['exit_price'] = current
+                    # Activate buy leg
+                    expiries = get_expiries(self.asset, min_days=0)
+                    if expiries:
+                        buy_leg = self._activate_buy_leg(tag, expiries[0], leg.get('type', 'call'), current)
+                        if buy_leg:
+                            buy_legs.append(buy_leg)
+                            with self._legs_lock:
+                                self.legs.append(buy_leg)
+                    self._persist_state()
+
+            # Check buy legs for SL / trailing
+            for leg in buy_legs:
+                if not leg.get('active', True):
+                    continue
+                data = get_current_price(leg['product_id'], self.asset)
+                if not data:
+                    continue
+                current = data['mark_price']
+                leg_pnl = (current - leg['entry_price']) * leg['size'] * cv
+                leg['current_mark'] = round(current, 2)
+                leg['current_pnl'] = round(leg_pnl, 2)
+                move = current - leg['entry_price']
+                if move > 0 and 'base_sl' in leg:
+                    new_sl = leg['base_sl'] + move
+                    if new_sl > leg.get('sl_price', 0):
+                        leg['sl_price'] = new_sl
+                if current <= leg.get('sl_price', 0):
+                    print(f"{tag} 🛑 BUY {leg.get('type','').upper()} SL/Trail hit: ${current:.2f} <= ${leg['sl_price']:.2f}")
+                    place_order(leg['product_id'], leg['symbol'], leg['size'], 'sell')
+                    leg['active'] = False
+                    leg['exit_price'] = current
+                    self._persist_state()
+
+            # All done?
+            all_sell_done = all(not l.get('active', True) for l in sell_legs) if sell_legs else True
+            all_buy_done = (all(not l.get('active', True) for l in buy_legs)) if buy_legs else not sell_legs
+            if all_sell_done and all_buy_done:
+                print(f"{tag} All resumed legs closed")
+                break
+
+            time.sleep(self.monitor_interval)
+
+        # Close remaining active legs
+        for leg in sell_legs + buy_legs:
+            if leg.get('active', True):
+                data = get_current_price(leg['product_id'], self.asset)
+                leg['exit_price'] = data['mark_price'] if data else leg.get('entry_price', 0)
+                close_side = 'buy' if leg['side'] == 'sell' else 'sell'
+                place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
+                leg['active'] = False
+
+        # Calculate PnL for this resumed session
+        for leg in sell_legs:
+            exit_p = leg.get('exit_price', leg.get('entry_price', 0))
+            session_pnl += (leg.get('entry_price', 0) - exit_p) * leg['size'] * cv
+        for leg in buy_legs:
+            exit_p = leg.get('exit_price', leg.get('entry_price', 0))
+            session_pnl += (exit_p - leg.get('entry_price', 0)) * leg['size'] * cv
+
+        self.cumulative_pnl += session_pnl
+        self._pnl = session_pnl
+
+        # Clean shared legs
+        with self._legs_lock:
+            for leg in sell_legs + buy_legs:
+                if leg in self.legs:
+                    self.legs.remove(leg)
+
+        # Update existing trade_log entry if it exists for today, else add new
+        today_str = datetime.now(IST).strftime('%Y-%m-%d')
+        existing = next((t for t in self.trade_log if t.get('date') == today_str), None)
+        if existing:
+            existing['pnl'] = round(existing.get('pnl', 0) + session_pnl, 2)
+        else:
+            self.trade_log.append({
+                'date': today_str,
+                'day': day_num,
+                'pnl': round(session_pnl, 2),
+                'sell_legs': len(sell_legs),
+                'buy_legs_activated': len(buy_legs),
+                'resumed': True,
+            })
+
+        print(f"{tag} Resumed session done | PnL: ${session_pnl:+.2f} | Cumulative: ${self.cumulative_pnl:+.2f}")
+        self._persist_state()
 
     def _run_session(self, tag, day_num):
         """Run one full BTST session in its own thread."""
@@ -297,12 +451,20 @@ class HybridSwitch(BaseStrategy):
                 if leg in self.legs:
                     self.legs.remove(leg)
 
+        # Build description of strikes traded
+        sell_strikes = [f"{l.get('type','')[0].upper()}{l.get('strike','')}" for l in sell_legs]
+        buy_strikes = [f"{l.get('type','')[0].upper()}{l.get('strike','')}" for l in buy_legs]
+        direction = "/".join(sell_strikes) if sell_strikes else ""
+        exit_reason = "SL→Buy " + "/".join(buy_strikes) if buy_legs else "held"
+
         self.trade_log.append({
             'date': datetime.now(IST).strftime('%Y-%m-%d'),
             'day': day_num,
             'pnl': round(session_pnl, 2),
             'sell_legs': len(sell_legs),
             'buy_legs_activated': len(buy_legs),
+            'direction': direction,
+            'exit_reason': exit_reason,
         })
         print(f"{tag} Done | PnL: ${session_pnl:+.2f} | Cumulative: ${self.cumulative_pnl:+.2f}")
         self._persist_state()
