@@ -38,6 +38,8 @@ class DeltaNeutralStrategy(BaseStrategy):
         self.unrealized_pnl = 0
         self.cumulative_realized_pnl = 0
         self.realized_pnl_snapshot = 0
+        self.total_premium_collected = 0
+        self.stop_loss = target_pnl  # default; overridden in initialize() to 50% of premium
         self.adjustment_count = 0
         self.adjustment_history = []  # [{leg, symbol, entry, exit, pnl, timestamp}]
         self.call_actual_entry_price = 0
@@ -144,7 +146,11 @@ class DeltaNeutralStrategy(BaseStrategy):
 
         call_prem = call_option['mark_price'] * self.lot_size * self.call_contract_value
         put_prem = put_option['mark_price'] * self.lot_size * self.put_contract_value
-        logger.info(f"Expected Premium: Call=${call_prem:.2f} + Put=${put_prem:.2f} = ${call_prem+put_prem:.2f}")
+        self.total_premium_collected = call_prem + put_prem
+        self.target_pnl = self.total_premium_collected * 0.5  # TP = 50% of premium
+        self.stop_loss = self.total_premium_collected * 0.5   # SL = 50% of premium (same)
+        logger.info(f"Expected Premium: Call=${call_prem:.2f} + Put=${put_prem:.2f} = ${self.total_premium_collected:.2f}")
+        logger.info(f"TP: ${self.target_pnl:.2f} (50%) | SL: -${self.stop_loss:.2f} (50%)")
 
         logger.info("[4/4] Placing initial orders...")
         call_order = place_order(call_option['product_id'], call_option['symbol'], self.lot_size, 'sell')
@@ -254,9 +260,13 @@ class DeltaNeutralStrategy(BaseStrategy):
                     self.running = False
                     break
 
-                if abs(self.total_pnl) >= self.target_pnl:
+                if self.total_pnl >= self.target_pnl or self.total_pnl <= -self.stop_loss:
                     logger.info("=" * 70)
-                    logger.info(f"✓ TARGET P&L REACHED! Total: ${self.total_pnl:.2f} | Adjustments: {self.adjustment_count}")
+                    if self.total_pnl >= self.target_pnl:
+                        logger.info(f"🎯 TARGET PROFIT REACHED! Total: ${self.total_pnl:.2f} | Target: ${self.target_pnl:.2f} (50% of ${self.total_premium_collected:.2f})")
+                    else:
+                        logger.info(f"🛑 STOP LOSS HIT! Total: ${self.total_pnl:.2f} | SL: -${self.stop_loss:.2f} (50% of ${self.total_premium_collected:.2f})")
+                    logger.info(f"  Adjustments: {self.adjustment_count}")
                     logger.info("=" * 70)
                     self.close_all_positions()
                     self.running = False

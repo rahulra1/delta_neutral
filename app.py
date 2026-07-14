@@ -260,7 +260,7 @@ def _resume_db_strategies():
                         entry['strategy'].close_all_positions()
                 finally:
                     strategy = entry.get('strategy')
-                    if strategy and not strategy._running:
+                    if strategy and not strategy.running:
                         pnl = strategy.cumulative_realized_pnl if strategy else 0
                         adj = strategy.adjustment_count if strategy else 0
                         _save_dn_legs(sid, strategy)
@@ -1306,7 +1306,7 @@ def run_strategy(sid, params):
             entry['strategy'].close_all_positions()
     finally:
         strategy = entry.get('strategy')
-        if strategy and not strategy._running:
+        if strategy and not strategy.running:
             pnl = strategy.cumulative_realized_pnl
             adj = strategy.adjustment_count
             _save_dn_legs(sid, strategy)
@@ -1598,6 +1598,10 @@ def api_all_strategies():
                 if sid in strategies and strategies[sid].get('strategy'):
                     s = strategies[sid]['strategy']
                     entry['pnl'] = round(getattr(s, 'total_pnl', 0), 2)
+                    if not s.running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.cumulative_realized_pnl, 2))
+                        continue
                 elif sid in active_monitors:
                     mon = active_monitors[sid]['monitor']
                     entry['pnl'] = round(mon.current_pnl, 2)
