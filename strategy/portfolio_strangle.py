@@ -223,10 +223,6 @@ class PortfolioStrangle(BaseStrategy):
                         else:
                             leg_pnl = (exit_p - leg['entry_price']) * leg['size'] * cv
                         tick_pnl += leg_pnl
-                        # Check recost opportunity
-                        if (slot['sl_hit'].get(leg['type'], False) and
-                                not slot['recost_used'].get(leg['type'], True)):
-                            self._check_recost(tag, slot, leg)
                         continue
 
                     data = get_current_price(leg['product_id'], self.asset)
@@ -252,6 +248,10 @@ class PortfolioStrangle(BaseStrategy):
                         leg['exit_price'] = current
                         slot['sl_hit'][leg['type']] = True
                         self._persist_state()
+
+                        # Immediate re-entry: scan chain for OTM5 on same side
+                        if not slot['recost_used'].get(leg['type'], True):
+                            self._immediate_reentry(tag, slot, leg)
 
             # Handle consecutive failures
             if not all_legs_ok:
@@ -347,34 +347,54 @@ class PortfolioStrangle(BaseStrategy):
         print(f"{tag} Done | PnL: ${day_pnl:+.4f} | SLs: {sl_count} | Recost: {recost_count} | Cum: ${self.cumulative_pnl:+.4f}")
         self._persist_state()
 
-    def _check_recost(self, tag, slot, leg):
-        """Check if a stopped leg's premium has dropped back to entry level (recost)."""
-        if slot['recost_used'].get(leg['type'], True):
-            return
-        data = get_current_price(leg['product_id'], self.asset)
-        if not data:
-            return
-        current = data['mark_price']
+    def _immediate_reentry(self, tag, slot, leg):
+        """After SL, immediately scan option chain and re-enter OTM5 on the same side."""
+        opt_type = leg['type']
+        slot_tag = f"{tag} Slot{slot['slot']}"
+        print(f"{slot_tag} 🔄 {opt_type.upper()} RE-ENTRY: scanning chain for OTM{self.otm_index} {opt_type}...")
 
-        # Recost: premium dropped back to original entry level
-        if current <= leg['recost_entry_price']:
-            print(f"{tag} 🔄 Slot{slot['slot']} {leg['type'].upper()} RECOST: ${current:.2f} <= ${leg['recost_entry_price']:.2f}")
-            result = place_order(leg['product_id'], leg['symbol'], leg['size'], 'sell')
-            if result:
-                # Re-enter: update leg to active with new entry price
-                leg['stopped'] = False
-                leg['entry_price'] = current
-                leg['sl_price'] = current * self.sl_pct
-                leg['exit_price'] = None
-                slot['recost_used'][leg['type']] = True
-                with self._legs_lock:
-                    if leg not in self.legs:
-                        self.legs.append(leg)
-                print(f"{tag} ✓ Re-entered {leg['type'].upper()} @ ${current:.2f} | New SL: ${leg['sl_price']:.2f}")
-                self._persist_state()
-            else:
-                print(f"{tag} ✗ Recost order failed")
-                slot['recost_used'][leg['type']] = True  # don't retry
+        expiries = get_expiries(self.asset, min_days=0)
+        if not expiries:
+            print(f"{slot_tag} ✗ Re-entry failed: no expiries available")
+            slot['recost_used'][opt_type] = True
+            return
+        expiry = expiries[0]
+
+        chain, spot, _ = get_option_chain_full(expiry, self.asset)
+        if not chain or not spot:
+            print(f"{slot_tag} ✗ Re-entry failed: chain fetch failed")
+            slot['recost_used'][opt_type] = True
+            return
+
+        new_opt = self._find_otm_option(chain, opt_type, spot)
+        if not new_opt:
+            print(f"{slot_tag} ✗ Re-entry failed: no OTM{self.otm_index} {opt_type.upper()} found")
+            slot['recost_used'][opt_type] = True
+            return
+
+        result = place_order(new_opt['product_id'], new_opt['symbol'], self.lot_size, 'sell')
+        if result:
+            new_leg = {
+                'symbol': new_opt['symbol'],
+                'product_id': new_opt['product_id'],
+                'side': 'sell',
+                'strike': new_opt['strike'],
+                'type': opt_type,
+                'entry_price': new_opt['mark_price'],
+                'size': self.lot_size,
+                'sl_price': new_opt['mark_price'] * self.sl_pct,
+                'stopped': False,
+                'is_reentry': True,
+            }
+            slot['legs'].append(new_leg)
+            with self._legs_lock:
+                self.legs.append(new_leg)
+            slot['recost_used'][opt_type] = True
+            print(f"{slot_tag} ✓ Re-entered {opt_type.upper()} {new_opt['strike']} @ ${new_opt['mark_price']:.2f} | SL: ${new_leg['sl_price']:.2f}")
+            self._persist_state()
+        else:
+            print(f"{slot_tag} ✗ Re-entry order failed for {opt_type.upper()}")
+            slot['recost_used'][opt_type] = True
 
     def _close_slot_legs(self, slot_legs):
         """Close all non-stopped legs in a slot."""

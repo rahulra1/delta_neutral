@@ -153,8 +153,6 @@ class DailyStrangle(BaseStrategy):
 
         # Track re-entry state per side: only 1 re-entry allowed per side
         reentry_used = {'call': False, 'put': False}
-        # Track which legs were SL'd and eligible for re-entry monitoring
-        sl_legs = {}  # type -> leg dict (the stopped leg we watch for re-entry)
 
         while self._running:
             now = datetime.now(IST)
@@ -185,53 +183,17 @@ class DailyStrangle(BaseStrategy):
                     place_order(leg['product_id'], leg['symbol'], leg['size'], 'buy')
                     leg['stopped'] = True
                     leg['exit_price'] = current
-                    # Mark for re-entry monitoring if not already used
-                    if not reentry_used.get(leg['type'], False):
-                        sl_legs[leg['type']] = leg
                     self._persist_state()
 
-            # Check re-entry opportunities for SL'd legs
-            for opt_type, sl_leg in list(sl_legs.items()):
-                if reentry_used[opt_type]:
-                    continue
-                # Check if the same product's premium has dropped back to target
-                data = get_current_price(sl_leg['product_id'], self.asset)
-                if not data:
-                    continue
-                current = data['mark_price']
-                # Re-enter when premium drops back to around target premium (within 20% tolerance)
-                if current <= self.target_premium * 1.2:
-                    print(f"{tag} 🔄 {opt_type.upper()} RE-ENTRY: premium ${current:.2f} back near ${self.target_premium}")
-                    result = place_order(sl_leg['product_id'], sl_leg['symbol'], sl_leg['size'], 'sell')
-                    if result:
-                        new_leg = {
-                            'symbol': sl_leg['symbol'],
-                            'product_id': sl_leg['product_id'],
-                            'side': 'sell',
-                            'strike': sl_leg['strike'],
-                            'type': opt_type,
-                            'entry_price': current,
-                            'size': sl_leg['size'],
-                            'sl_price': current * self.sl_pct,
-                            'stopped': False,
-                            'is_reentry': True,
-                        }
-                        day_legs.append(new_leg)
-                        with self._legs_lock:
-                            self.legs.append(new_leg)
-                        reentry_used[opt_type] = True
-                        del sl_legs[opt_type]
-                        print(f"{tag} ✓ Re-entered {opt_type.upper()} @ ${current:.2f} | New SL: ${new_leg['sl_price']:.2f}")
-                        self._persist_state()
-                    else:
-                        print(f"{tag} ✗ Re-entry order failed for {opt_type.upper()}")
-                        reentry_used[opt_type] = True  # don't retry
-                        del sl_legs[opt_type]
+                    # Immediate re-entry: scan chain for nearest $100 premium on the same side
+                    if not reentry_used.get(leg['type'], False):
+                        self._immediate_reentry(
+                            leg['type'], day_legs, reentry_used, tag
+                        )
 
-            # All legs stopped and no pending re-entries — done early
+            # All legs stopped — done early
             all_stopped = all(l.get('stopped', False) for l in day_legs)
-            no_pending_reentry = all(reentry_used.get(t, True) for t in sl_legs)
-            if all_stopped and not sl_legs:
+            if all_stopped:
                 print(f"{tag} All legs stopped, no re-entries pending")
                 break
 
@@ -312,6 +274,53 @@ class DailyStrangle(BaseStrategy):
         })
         print(f"{tag} Done | PnL: ${day_pnl:+.2f} | Cumulative: ${self.cumulative_pnl:+.2f}")
         self._persist_state()
+
+    def _immediate_reentry(self, opt_type, day_legs, reentry_used, tag):
+        """After SL, immediately scan the option chain and re-enter the same side
+        with the nearest $100 premium option."""
+        print(f"{tag} 🔄 {opt_type.upper()} RE-ENTRY: scanning chain for ~${self.target_premium} {opt_type}...")
+        expiries = get_expiries(self.asset, min_days=0)
+        if not expiries:
+            print(f"{tag} ✗ Re-entry failed: no expiries available")
+            reentry_used[opt_type] = True
+            return
+        expiry = expiries[0]
+
+        chain, spot, _ = get_option_chain_full(expiry, self.asset)
+        if not chain or not spot:
+            print(f"{tag} ✗ Re-entry failed: chain fetch failed")
+            reentry_used[opt_type] = True
+            return
+
+        new_opt = self._find_nearest_premium(chain, opt_type, spot)
+        if not new_opt:
+            print(f"{tag} ✗ Re-entry failed: no suitable {opt_type.upper()} found")
+            reentry_used[opt_type] = True
+            return
+
+        result = place_order(new_opt['product_id'], new_opt['symbol'], self.lot_size, 'sell')
+        if result:
+            new_leg = {
+                'symbol': new_opt['symbol'],
+                'product_id': new_opt['product_id'],
+                'side': 'sell',
+                'strike': new_opt['strike'],
+                'type': opt_type,
+                'entry_price': new_opt['mark_price'],
+                'size': self.lot_size,
+                'sl_price': new_opt['mark_price'] * self.sl_pct,
+                'stopped': False,
+                'is_reentry': True,
+            }
+            day_legs.append(new_leg)
+            with self._legs_lock:
+                self.legs.append(new_leg)
+            reentry_used[opt_type] = True
+            print(f"{tag} ✓ Re-entered {opt_type.upper()} {new_opt['strike']} @ ${new_opt['mark_price']:.2f} | SL: ${new_leg['sl_price']:.2f}")
+            self._persist_state()
+        else:
+            print(f"{tag} ✗ Re-entry order failed for {opt_type.upper()}")
+            reentry_used[opt_type] = True
 
     def _close_day_legs(self, day_legs):
         """Close all non-stopped legs."""
