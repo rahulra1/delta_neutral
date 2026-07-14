@@ -2489,6 +2489,10 @@ def status(sid):
         total_pnl=round(s.total_pnl, 2),
         realized_pnl=round(s.realized_pnl, 2),
         unrealized_pnl=round(s.unrealized_pnl, 2),
+        total_premium=round(getattr(s, 'total_premium_collected', 0), 2),
+        target_pnl=round(getattr(s, 'target_pnl', 0), 2),
+        stop_loss=round(getattr(s, 'stop_loss', 0), 2),
+        pnl_pct=round(s.total_pnl / s.total_premium_collected * 100, 1) if getattr(s, 'total_premium_collected', 0) > 0 else 0,
         call=_leg_info(s, 'call'),
         put=_leg_info(s, 'put'),
     )

@@ -237,10 +237,15 @@ export default function Strategy() {
     return (
       <>
         <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
-          <div className="stat-card"><div className="label">Total P&L</div><div className="value" style={{ color: (s.total_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.total_pnl || 0).toFixed(2)}</div></div>
+          <div className="stat-card"><div className="label">Total P&L</div><div className="value" style={{ color: (s.total_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.total_pnl || 0).toFixed(2)} <span style={{ fontSize: '.7rem' }}>({(s.pnl_pct || 0) >= 0 ? '+' : ''}{(s.pnl_pct || 0).toFixed(1)}%)</span></div></div>
+          <div className="stat-card"><div className="label">Premium Collected</div><div className="value">${(s.total_premium || 0).toFixed(2)}</div></div>
+          <div className="stat-card"><div className="label">TP / SL</div><div className="value" style={{ fontSize: '.85rem' }}><span style={{ color: 'var(--green)' }}>+${(s.target_pnl || 0).toFixed(2)}</span> / <span style={{ color: 'var(--red)' }}>-${(s.stop_loss || 0).toFixed(2)}</span></div></div>
+          <div className="stat-card"><div className="label">Adjustments</div><div className="value">{s.adjustment_count || 0}</div></div>
+        </div>
+        <div className="top-stats" style={{ gridTemplateColumns: 'repeat(3,1fr)', marginBottom: 12 }}>
           <div className="stat-card"><div className="label">Realized</div><div className="value" style={{ color: (s.realized_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.realized_pnl || 0).toFixed(2)}</div></div>
           <div className="stat-card"><div className="label">Unrealized</div><div className="value" style={{ color: (s.unrealized_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.unrealized_pnl || 0).toFixed(2)}</div></div>
-          <div className="stat-card"><div className="label">Adjustments</div><div className="value">{s.adjustment_count || 0}</div></div>
+          <div className="stat-card"><div className="label">P&L Progress</div><div className="value">{s.total_premium > 0 ? <div style={{ background: 'var(--border)', borderRadius: 4, height: 8, width: '100%', marginTop: 4 }}><div style={{ background: (s.total_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)', borderRadius: 4, height: 8, width: `${Math.min(100, Math.abs(s.pnl_pct || 0))}%` }}></div></div> : '—'}</div></div>
         </div>
         <div className="grid-2" style={{ marginBottom: 12 }}>
           {[['📈 Short Call', call], ['📉 Short Put', put]].map(([label, leg]) => {
