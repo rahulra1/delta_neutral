@@ -6,6 +6,7 @@ const ALL_STRATEGIES = [
   { key: 'daily_strangle', label: 'Daily Strangle (0DTE)' },
   { key: 'portfolio_strangle', label: 'Portfolio Strangle (0DTE)' },
   { key: 'hybrid_switch', label: 'Hybrid Switch BTST' },
+  { key: 'pivot_supertrend', label: 'Pivot + SuperTrend' },
   { key: 'oi_strategy', label: 'OI Strategy' },
   { key: 'weekly_dn', label: 'Weekly Delta Neutral' },
   { key: 'ema_spread', label: 'EMA Credit Spread' },

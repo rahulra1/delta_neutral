@@ -223,8 +223,14 @@ export default function Strategy() {
   const [sp] = useSearchParams();
   const [activeTab, setActiveTab] = useState(sp.get('strategy') || 'delta_neutral');
   const [profiles, setProfiles] = useState([]);
+  const [enabledKeys, setEnabledKeys] = useState(null);
 
-  useEffect(() => { api.get('/profiles').then(r => setProfiles(r.data.profiles || [])); }, []);
+  useEffect(() => {
+    api.get('/profiles').then(r => setProfiles(r.data.profiles || []));
+    api.get('/enabled-strategies').then(r => setEnabledKeys(r.data.enabled)).catch(() => setEnabledKeys(null));
+  }, []);
+
+  const visibleStrategies = enabledKeys === null ? STRATEGIES : STRATEGIES.filter(s => enabledKeys.includes(s.key));
 
   const dnStart = async (config) => {
     const { data } = await api.post('/start', config);
@@ -285,7 +291,7 @@ export default function Strategy() {
   return (
     <div className="container">
       <div className="page-title">Strategies</div>
-      <StrategySelector strategies={STRATEGIES} activeKey={activeTab} onSelect={setActiveTab} />
+      <StrategySelector strategies={visibleStrategies} activeKey={activeTab} onSelect={setActiveTab} />
 
       {activeTab === 'delta_neutral' && (
         <StrategyTemplate title="Delta Neutral" icon="⚡" type="Options" description="Short strangle with auto-rebalancing" profiles={profiles}
