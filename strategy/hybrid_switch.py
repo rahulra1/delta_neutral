@@ -172,10 +172,20 @@ class HybridSwitch(BaseStrategy):
                     place_order(leg['product_id'], leg['symbol'], leg['size'], 'buy')
                     leg['active'] = False
                     leg['exit_price'] = current
-                    # Activate buy leg
-                    expiries = get_expiries(self.asset, min_days=0)
-                    if expiries:
-                        buy_leg = self._activate_buy_leg(tag, expiries[0], leg.get('type', 'call'), current)
+                    # Activate buy leg — use same expiry as the sell leg
+                    import re
+                    sell_expiry = None
+                    m = re.search(r'-(\d{6})$', leg.get('symbol', ''))
+                    if m:
+                        try:
+                            sell_expiry = datetime.strptime(m.group(1), '%d%m%y').strftime('%d-%m-%Y')
+                        except ValueError:
+                            pass
+                    if not sell_expiry:
+                        expiries = get_expiries(self.asset, min_days=1)
+                        sell_expiry = expiries[0] if expiries else None
+                    if sell_expiry:
+                        buy_leg = self._activate_buy_leg(tag, sell_expiry, leg.get('type', 'call'), current)
                         if buy_leg:
                             buy_legs.append(buy_leg)
                             with self._legs_lock:
