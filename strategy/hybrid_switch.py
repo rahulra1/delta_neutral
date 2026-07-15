@@ -7,6 +7,7 @@ Gap: 5:30-6:30 PM — no decisions made.
 Expiry: D2 (next day's expiry).
 """
 
+import re
 import time
 import logging
 import threading
@@ -135,7 +136,7 @@ class HybridSwitch(BaseStrategy):
             exit_dt = now.replace(hour=self.exit_hour, minute=self.exit_minute, second=0, microsecond=0)
             # But if we're already past exit time today, close immediately
             if now >= exit_dt:
-                print(f"{tag} ⏰ Already past exit time — closing all resumed legs immediately")
+                print(f"{tag} ⏰ Already past exit time — will close today's expiry legs")
                 exit_dt = now  # will trigger exit on first loop iteration
 
         print(f"{tag} Exit target: {exit_dt.strftime('%Y-%m-%d %H:%M')} IST")
@@ -153,7 +154,7 @@ class HybridSwitch(BaseStrategy):
 
             # Exit time check
             if now >= exit_dt:
-                print(f"{tag} ⏰ Exit time — closing all resumed legs")
+                print(f"{tag} ⏰ Exit time — closing today's expiry legs, keeping tomorrow's")
                 break
 
             # Check sell legs for SL
@@ -173,7 +174,6 @@ class HybridSwitch(BaseStrategy):
                     leg['active'] = False
                     leg['exit_price'] = current
                     # Activate buy leg — use same expiry as the sell leg
-                    import re
                     sell_expiry = None
                     m = re.search(r'-(\d{6})$', leg.get('symbol', ''))
                     if m:
@@ -224,29 +224,52 @@ class HybridSwitch(BaseStrategy):
 
             time.sleep(self.monitor_interval)
 
-        # Close remaining active legs
+        # Close only legs expiring TODAY; keep tomorrow's legs active (BTST carry-forward)
+        today_date = datetime.now(IST).date()
+        closed_legs = []
+        kept_legs = []
+
         for leg in sell_legs + buy_legs:
-            if leg.get('active', True):
+            if not leg.get('active', True):
+                closed_legs.append(leg)
+                continue
+            # Parse expiry from symbol (e.g., P-BTC-62800-160726 -> 16/07/26 -> 2026-07-16)
+            leg_expiry_date = None
+            m = re.search(r'-(\d{6})$', leg.get('symbol', ''))
+            if m:
+                try:
+                    leg_expiry_date = datetime.strptime(m.group(1), '%d%m%y').date()
+                except ValueError:
+                    pass
+
+            if leg_expiry_date and leg_expiry_date > today_date:
+                # This leg expires TOMORROW or later — keep it active for BTST
+                print(f"{tag} ↪ Keeping {leg['side'].upper()} {leg.get('type','').upper()} {leg.get('strike','')} (expires {leg_expiry_date.strftime('%d-%m-%Y')}) — BTST carry")
+                kept_legs.append(leg)
+            else:
+                # This leg expires TODAY or expiry unknown — close it
                 data = get_current_price(leg['product_id'], self.asset)
                 leg['exit_price'] = data['mark_price'] if data else leg.get('entry_price', 0)
                 close_side = 'buy' if leg['side'] == 'sell' else 'sell'
                 place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
                 leg['active'] = False
+                closed_legs.append(leg)
+                print(f"{tag} ✓ Closed {leg['side'].upper()} {leg.get('type','').upper()} {leg.get('strike','')} (expires today)")
 
-        # Calculate PnL for this resumed session
-        for leg in sell_legs:
-            exit_p = leg.get('exit_price', leg.get('entry_price', 0))
-            session_pnl += (leg.get('entry_price', 0) - exit_p) * leg['size'] * cv
-        for leg in buy_legs:
-            exit_p = leg.get('exit_price', leg.get('entry_price', 0))
-            session_pnl += (exit_p - leg.get('entry_price', 0)) * leg['size'] * cv
+        # Calculate PnL only for closed legs
+        for leg in closed_legs:
+            if leg.get('exit_price') is not None:
+                if leg['side'] == 'sell':
+                    session_pnl += (leg.get('entry_price', 0) - leg['exit_price']) * leg['size'] * cv
+                else:
+                    session_pnl += (leg['exit_price'] - leg.get('entry_price', 0)) * leg['size'] * cv
 
         self.cumulative_pnl += session_pnl
         self._pnl = session_pnl
 
-        # Clean shared legs
+        # Clean only closed legs from shared state; kept legs remain
         with self._legs_lock:
-            for leg in sell_legs + buy_legs:
+            for leg in closed_legs:
                 if leg in self.legs:
                     self.legs.remove(leg)
 
@@ -265,7 +288,8 @@ class HybridSwitch(BaseStrategy):
                 'resumed': True,
             })
 
-        print(f"{tag} Resumed session done | PnL: ${session_pnl:+.2f} | Cumulative: ${self.cumulative_pnl:+.2f}")
+        kept_info = f" | Kept {len(kept_legs)} leg(s) for tomorrow" if kept_legs else ""
+        print(f"{tag} Resumed session done | PnL: ${session_pnl:+.2f} | Cumulative: ${self.cumulative_pnl:+.2f}{kept_info}")
         self._persist_state()
 
     def _run_session(self, tag, day_num):
