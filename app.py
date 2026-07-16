@@ -2267,11 +2267,13 @@ def api_strategy_detail(sid):
             entry['trade_log'] = strat.trade_log[-20:]
             entry['days_traded'] = strat.total_days_traded
             for leg in strat.legs:
+                if not leg.get('active', False):
+                    continue
                 live_legs.append({'symbol': leg['symbol'], 'type': leg['type'], 'strike': leg['strike'],
                     'side': leg['side'], 'size': leg['size'], 'entry_price': round(leg['entry_price'], 2),
                     'current_mark': round(leg.get('current_mark', 0), 2),
                     'current_pnl': round(leg.get('current_pnl', 0), 2),
-                    'role': leg.get('role', ''), 'active': leg.get('active', False)})
+                    'role': leg.get('role', ''), 'active': True})
             if hasattr(strat, '_pnl_history') and strat._pnl_history:
                 pnl_history = list(strat._pnl_history[-500:])
         elif sid in _futures_traders:
@@ -3810,12 +3812,14 @@ def hybrid_status(sid):
     uid = e.get('user_id')
     enriched_legs = []
     for l in s.legs:
+        if not l.get('active', False):
+            continue
         mark, pnl = _enrich_leg(l, getattr(s, 'asset', 'BTC'), profile_id=profile_id, user_id=uid)
         enriched_legs.append({
             'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
             'side': l['side'], 'size': l['size'], 'entry_price': round(l['entry_price'], 2),
             'mark_price': mark, 'pnl': pnl,
-            'role': l.get('role', ''), 'active': l.get('active', False),
+            'role': l.get('role', ''), 'active': True,
             'product_id': l.get('product_id'),
         })
     return jsonify(

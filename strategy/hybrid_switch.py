@@ -76,6 +76,10 @@ class HybridSwitch(BaseStrategy):
         return True
 
     def monitor(self):
+        # On restore: clean up any inactive/stale legs that shouldn't be in self.legs
+        with self._legs_lock:
+            self.legs = [l for l in self.legs if l.get('active', False)]
+
         # On restore: if there are active legs from a previous session, resume monitoring them
         if self.legs:
             active_legs = [l for l in self.legs if l.get('active', True)]
@@ -665,6 +669,8 @@ class HybridSwitch(BaseStrategy):
             }
             legs_data = []
             for leg in self.legs:
+                if not leg.get('active', False):
+                    continue
                 legs_data.append({k: v for k, v in leg.items()
                                   if not callable(v) and k != '_lock'})
             update_strategy_db(sid, details=details,
