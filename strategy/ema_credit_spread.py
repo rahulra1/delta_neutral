@@ -98,7 +98,7 @@ class EMACreditSpread(BaseStrategy):
             tag = f"[EMA Day{day_num}]"
 
             print(f"\n{tag} ═══ {datetime.now(IST).strftime('%Y-%m-%d %H:%M')} IST ═══")
-            day_legs, day_premium, direction = self._open_daily_trade(tag)
+            day_legs, day_premium, direction = self._open_daily_trade(tag, day_num)
             if not day_legs:
                 print(f"{tag} No trade today")
                 continue
@@ -140,7 +140,7 @@ class EMACreditSpread(BaseStrategy):
 
     # --- Daily trade ---
 
-    def _open_daily_trade(self, tag):
+    def _open_daily_trade(self, tag, day_num):
         """Check EMA, place spread. Returns (legs, premium, direction) or ([], 0, '')."""
         candles = get_candles(self.asset, '1d')
         if not candles or len(candles) < self.ema_period + 1:
@@ -190,10 +190,12 @@ class EMACreditSpread(BaseStrategy):
         day_legs = [
             {'symbol': sell_leg['symbol'], 'product_id': sell_leg['product_id'],
              'side': 'sell', 'type': opt_type, 'delta': sell_leg['delta'],
-             'strike': sell_leg['strike_price'], 'entry_price': sell_leg['mark_price'], 'size': self.lot_size},
+             'strike': sell_leg['strike_price'], 'entry_price': sell_leg['mark_price'],
+             'size': self.lot_size, 'day_num': day_num},
             {'symbol': buy_leg['symbol'], 'product_id': buy_leg['product_id'],
              'side': 'buy', 'type': opt_type, 'delta': buy_leg['delta'],
-             'strike': buy_leg['strike_price'], 'entry_price': buy_leg['mark_price'], 'size': self.lot_size},
+             'strike': buy_leg['strike_price'], 'entry_price': buy_leg['mark_price'],
+             'size': self.lot_size, 'day_num': day_num},
         ]
 
         from config import get_contract_value
@@ -373,6 +375,7 @@ class EMACreditSpread(BaseStrategy):
                     'strike': leg.get('strike', 0),
                     'entry_price': leg.get('entry_price', 0),
                     'size': leg.get('size', 0),
+                    'day_num': leg.get('day_num', 0),
                 })
             update_strategy_db(sid,
                                details=details,

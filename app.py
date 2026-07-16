@@ -624,19 +624,48 @@ def _resume_db_strategies():
                         for t in s.trade_log:
                             print(f"[EMA Day{t.get('day',0)}] {t.get('date','')} | {t.get('direction','')} | {t.get('exit_reason','')} | PnL: ${t.get('pnl',0):+.4f}")
                         print(f"[EMA Spread] Restored {len(s.trade_log)} days | Cum PnL: ${s.cumulative_pnl:+.4f}")
-                    # Resume monitoring for open legs
+                    # Resume monitoring for open legs — group into spread pairs (sell+buy)
+                    # and spawn a separate monitor thread per pair so logs show per-day
                     if legs:
                         import threading as _thr
                         from config import get_contract_value
                         cv = get_contract_value(details.get('asset', 'BTC'))
-                        sell_legs = [l for l in legs if l.get('side') == 'sell']
-                        buy_legs = [l for l in legs if l.get('side') == 'buy']
-                        premium = sum((l['entry_price'] for l in sell_legs), 0) - sum((l['entry_price'] for l in buy_legs), 0)
-                        premium *= int(details.get('lot_size', 100)) * cv
-                        day_num = s.total_days_traded or 1
-                        direction = 'bear_call' if any(l.get('type') == 'call' for l in legs) else 'bull_put'
-                        _thr.Thread(target=s._monitor_day_trade,
-                                    args=(legs, premium, day_num, direction), daemon=True).start()
+                        lot_size = int(details.get('lot_size', 100))
+                        # Group legs by day_num if available, else pair sequentially
+                        day_groups = {}
+                        has_day_nums = any(l.get('day_num') for l in legs)
+                        if has_day_nums:
+                            for l in legs:
+                                dn = l.get('day_num', 0)
+                                day_groups.setdefault(dn, []).append(l)
+                        else:
+                            # Legacy: no day_num — pair sell+buy sequentially
+                            sell_queue = [l for l in legs if l.get('side') == 'sell']
+                            buy_queue = [l for l in legs if l.get('side') == 'buy']
+                            paired_buys = set()
+                            for idx, sl in enumerate(sell_queue):
+                                best = None
+                                for i, bl in enumerate(buy_queue):
+                                    if i not in paired_buys and bl.get('type') == sl.get('type'):
+                                        best = i
+                                        break
+                                if best is not None:
+                                    paired_buys.add(best)
+                                    day_groups[idx + 1] = [sl, buy_queue[best]]
+                                else:
+                                    day_groups[idx + 1] = [sl]
+                            for i, bl in enumerate(buy_queue):
+                                if i not in paired_buys:
+                                    day_groups.setdefault(0, []).append(bl)
+
+                        for day_num, pair_legs in sorted(day_groups.items()):
+                            sell_in_pair = [l for l in pair_legs if l.get('side') == 'sell']
+                            buy_in_pair = [l for l in pair_legs if l.get('side') == 'buy']
+                            premium = sum(l['entry_price'] for l in sell_in_pair) - sum(l['entry_price'] for l in buy_in_pair)
+                            premium *= lot_size * cv
+                            direction = 'bear_call' if any(l.get('type') == 'call' for l in pair_legs) else 'bull_put'
+                            _thr.Thread(target=s._monitor_day_trade,
+                                        args=(pair_legs, premium, day_num, direction), daemon=True).start()
                     s.monitor()
                 except Exception as e:
                     logger.error(f"[resume] EMA Spread {sid} error: {e}")
