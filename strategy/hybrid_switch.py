@@ -108,9 +108,12 @@ class HybridSwitch(BaseStrategy):
         from config import set_thread_credentials
         if hasattr(self, '_api_key') and self._api_key:
             set_thread_credentials(self._api_key, self._api_secret, self._broker)
+        # Ensure log capture is active for this thread
+        from app import LogCapture
         if hasattr(self, '_log_queue') and self._log_queue:
-            from app import LogCapture
             LogCapture._local.log_queue = self._log_queue
+            LogCapture._local.log_history = self._log_history
+        elif hasattr(self, '_log_history') and self._log_history is not None:
             LogCapture._local.log_history = self._log_history
 
         cv = get_contract_value(self.asset)
@@ -228,6 +231,8 @@ class HybridSwitch(BaseStrategy):
         today_date = datetime.now(IST).date()
         closed_legs = []
         kept_legs = []
+        active_count = sum(1 for l in sell_legs + buy_legs if l.get('active', True))
+        print(f"{tag} ⏰ Exit time reached — processing {active_count} active leg(s) | BTST carry-forward check")
 
         for leg in sell_legs + buy_legs:
             if not leg.get('active', True):
@@ -244,7 +249,7 @@ class HybridSwitch(BaseStrategy):
 
             if leg_expiry_date and leg_expiry_date > today_date:
                 # This leg expires TOMORROW or later — keep it active for BTST
-                print(f"{tag} ↪ Keeping {leg['side'].upper()} {leg.get('type','').upper()} {leg.get('strike','')} (expires {leg_expiry_date.strftime('%d-%m-%Y')}) — BTST carry")
+                print(f"{tag} ↪ KEEPING {leg['side'].upper()} {leg.get('type','').upper()} {leg.get('strike','')} (expires {leg_expiry_date.strftime('%d-%m-%Y')}) — BTST carry to next session")
                 kept_legs.append(leg)
             else:
                 # This leg expires TODAY or expiry unknown — close it
@@ -254,7 +259,14 @@ class HybridSwitch(BaseStrategy):
                 place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
                 leg['active'] = False
                 closed_legs.append(leg)
-                print(f"{tag} ✓ Closed {leg['side'].upper()} {leg.get('type','').upper()} {leg.get('strike','')} (expires today)")
+                leg_pnl = 0
+                if leg['side'] == 'sell':
+                    leg_pnl = (leg.get('entry_price', 0) - leg['exit_price']) * leg['size'] * cv
+                else:
+                    leg_pnl = (leg['exit_price'] - leg.get('entry_price', 0)) * leg['size'] * cv
+                print(f"{tag} ✓ CLOSED {leg['side'].upper()} {leg.get('type','').upper()} {leg.get('strike','')} @ ${leg['exit_price']:.2f} (expires today) | Leg PnL: ${leg_pnl:+.2f}")
+
+        print(f"{tag} 📊 Exit summary: Closed {len([l for l in closed_legs if l.get('exit_price')])} leg(s), Keeping {len(kept_legs)} leg(s) for BTST")
 
         # Calculate PnL only for closed legs
         for leg in closed_legs:
@@ -297,9 +309,12 @@ class HybridSwitch(BaseStrategy):
         from config import set_thread_credentials
         if hasattr(self, '_api_key') and self._api_key:
             set_thread_credentials(self._api_key, self._api_secret, self._broker)
+        # Ensure log capture is active for this thread
+        from app import LogCapture
         if hasattr(self, '_log_queue') and self._log_queue:
-            from app import LogCapture
             LogCapture._local.log_queue = self._log_queue
+            LogCapture._local.log_history = self._log_history
+        elif hasattr(self, '_log_history') and self._log_history is not None:
             LogCapture._local.log_history = self._log_history
 
         cv = get_contract_value(self.asset)
@@ -476,6 +491,7 @@ class HybridSwitch(BaseStrategy):
             time.sleep(self.monitor_interval)
 
         # Close remaining active legs
+        print(f"{tag} 📋 Exit sequence: closing {sum(1 for l in sell_legs + buy_legs if l['active'])} active leg(s)")
         for leg in sell_legs + buy_legs:
             if leg['active']:
                 data = get_current_price(leg['product_id'], self.asset)
@@ -483,6 +499,12 @@ class HybridSwitch(BaseStrategy):
                 close_side = 'buy' if leg['side'] == 'sell' else 'sell'
                 place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
                 leg['active'] = False
+                leg_pnl = 0
+                if leg['side'] == 'sell':
+                    leg_pnl = (leg['entry_price'] - leg['exit_price']) * leg['size'] * cv
+                else:
+                    leg_pnl = (leg['exit_price'] - leg['entry_price']) * leg['size'] * cv
+                print(f"{tag} ✓ Closed {leg['side'].upper()} {leg.get('type','').upper()} {leg.get('strike','')} @ ${leg['exit_price']:.2f} | Leg PnL: ${leg_pnl:+.2f}")
 
         # Calculate PnL
         for leg in sell_legs:
