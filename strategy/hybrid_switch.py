@@ -359,8 +359,25 @@ class HybridSwitch(BaseStrategy):
             self.legs.extend(sell_legs)
         self._persist_state()
 
-        # Monitor session
+        # Monitor session — include any pre-existing BTST carry-over legs
         buy_legs = []  # activated lazy legs
+        carried_sell_legs = []
+        carried_buy_legs = []
+        with self._legs_lock:
+            for leg in self.legs:
+                if leg in sell_legs:
+                    continue  # skip the ones we just placed
+                if not leg.get('active', False):
+                    continue
+                if leg.get('side') == 'sell':
+                    carried_sell_legs.append(leg)
+                elif leg.get('side') == 'buy':
+                    carried_buy_legs.append(leg)
+        if carried_sell_legs or carried_buy_legs:
+            print(f"{tag} 📌 Also monitoring {len(carried_sell_legs)} carried SELL + {len(carried_buy_legs)} carried BUY leg(s) from BTST")
+            sell_legs.extend(carried_sell_legs)
+            buy_legs.extend(carried_buy_legs)
+
         session_pnl = 0.0
         expiry_date_obj = datetime.strptime(expiry, '%d-%m-%Y').date()
 
