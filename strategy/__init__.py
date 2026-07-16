@@ -395,6 +395,7 @@ class DeltaNeutralStrategy(BaseStrategy):
 
     def close_all_positions(self):
         logger.info("[CLOSING] Closing all positions...")
+        self.running = False
         for label, pos, cv in [
             ("CALL", self.call_position, self.call_contract_value),
             ("PUT", self.put_position, self.put_contract_value)
