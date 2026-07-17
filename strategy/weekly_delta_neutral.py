@@ -504,28 +504,36 @@ class WeeklyDeltaNeutral(BaseStrategy):
     def _wait_for_start_day(self):
         """Sleep until the configured start day and entry time.
 
-        If today IS the start day and we're within a 2-hour grace window
-        after entry time, trade immediately.
+        - If today IS the start day and entry time hasn't passed → wait until entry time today
+        - If today IS the start day and entry time already passed (within 2h grace) → trade now
+        - Otherwise → wait for next occurrence of start day at entry time
         """
         now = datetime.now(IST)
+        entry_today = now.replace(hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
 
-        # Check if today is the start day within grace window
         if now.weekday() == self.trade_day:
-            entry_time = now.replace(hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
-            if timedelta(0) <= (now - entry_time) <= timedelta(hours=2):
-                return  # within window, trade now
+            if now < entry_today:
+                # Today is start day, entry time hasn't come yet — wait for it
+                wait = (entry_today - now).total_seconds()
+                logger.info(f"[Weekly DN] Today is {self.start_day.title()} — waiting for entry time {self.entry_hour}:{self.entry_minute:02d} IST ({wait/60:.0f}m)")
+                self._interruptible_sleep(wait)
+                return
+            elif (now - entry_today) <= timedelta(hours=2):
+                # Entry time passed but within grace window — trade now
+                return
 
-        # Calculate next occurrence of the start day
+        # Not start day or past grace window — wait for next occurrence
         days_ahead = (self.trade_day - now.weekday()) % 7
         if days_ahead == 0:
-            # Same day but past the window — wait till next week
+            # Same day but past the grace window — wait till next week
             days_ahead = 7
         target_date = now + timedelta(days=days_ahead)
         target_time = target_date.replace(hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
 
         wait = (target_time - now).total_seconds()
         if wait > 60:
-            logger.info(f"[Weekly DN] Next trade: {target_time.strftime('%A %Y-%m-%d %H:%M')} IST ({wait/3600:.1f}h)")
+            day_name = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][target_date.weekday()]
+            logger.info(f"[Weekly DN] Next trade: {target_time.strftime('%Y-%m-%d %H:%M')} IST ({day_name}, {wait/3600:.1f}h)")
         self._interruptible_sleep(wait)
 
     def _interruptible_sleep(self, seconds):

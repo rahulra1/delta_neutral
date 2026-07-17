@@ -153,7 +153,7 @@ const WDN_FIELDS = [
   { key: 'max_adjustments', label: 'Max Adjustments', type: 'number', default: 5 },
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 5 },
   { key: 'expiry_week', label: 'Expiry Week (nth Friday)', type: 'number', default: 3 },
-  { key: 'start_day', label: 'Start Day', type: 'select', options: [{value:'monday',label:'Monday'},{value:'tuesday',label:'Tuesday'},{value:'wednesday',label:'Wednesday'},{value:'thursday',label:'Thursday'},{value:'friday',label:'Friday'}], default: 'friday' },
+  { key: 'start_day', label: 'Start Day', type: 'select', options: [{value:'monday',label:'Monday'},{value:'tuesday',label:'Tuesday'},{value:'wednesday',label:'Wednesday'},{value:'thursday',label:'Thursday'},{value:'friday',label:'Friday'},{value:'saturday',label:'Saturday'},{value:'sunday',label:'Sunday'}], default: 'friday' },
   { key: 'entry_hour', label: 'Entry Hour (24h IST)', type: 'number', default: 21 },
   { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 0 },
 ];
