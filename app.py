@@ -539,18 +539,28 @@ def _resume_db_strategies():
                         delta_tolerance=float(details.get('delta_tolerance', 0.05)),
                         lot_size=int(details.get('lot_size', 100)),
                         premium_threshold=float(details.get('premium_threshold', 40)) / 100,
-                        target_pnl=float(details.get('target_pnl', 25)),
+                        tp_percent=float(details.get('tp_percent', details.get('tp_sl_percent', 70))) / 100,
+                        sl_percent=float(details.get('sl_percent', details.get('tp_sl_percent', 70))) / 100,
                         max_adjustments=int(details.get('max_adjustments', 5)),
                         monitoring_interval=int(details.get('monitoring_interval', 5)),
+                        expiry_week=int(details.get('expiry_week', 3)),
+                        start_day=details.get('start_day', 'friday'),
                         entry_hour=int(details.get('entry_hour', 21)),
                         entry_minute=int(details.get('entry_minute', 0)),
                     )
                     entry['strategy'] = s
                     entry['running'] = True
+                    s._sid = sid
                     s.cumulative_pnl = float(details.get('cumulative_pnl', 0))
                     s.weeks_traded = int(details.get('weeks_traded', 0))
                     s.trade_log = details.get('trade_log', [])
+                    s.sessions = details.get('sessions', [])
                     s.initialize()
+                    # Restore any mid-cycle sessions that were running before restart
+                    active_session_state = details.get('active_session_state', [])
+                    if active_session_state:
+                        logger.info(f"[resume] Weekly DN {sid} — restoring {len(active_session_state)} active session(s)")
+                        s._restore_active_sessions(active_session_state)
                     s.monitor()
                 except Exception as e:
                     logger.error(f"[resume] Weekly DN {sid} error: {e}")
@@ -3880,9 +3890,12 @@ def run_weekly_dn(sid, params):
             delta_tolerance=float(params.get('delta_tolerance', 0.05)),
             lot_size=int(params.get('lot_size', 100)),
             premium_threshold=float(params.get('premium_threshold', 40)) / 100,
-            target_pnl=float(params.get('target_pnl', 25)),
+            tp_percent=float(params.get('tp_percent', 70)) / 100,
+            sl_percent=float(params.get('sl_percent', 70)) / 100,
             max_adjustments=int(params.get('max_adjustments', 5)),
             monitoring_interval=int(params.get('monitoring_interval', 5)),
+            expiry_week=int(params.get('expiry_week', 3)),
+            start_day=params.get('start_day', 'friday'),
             entry_hour=int(params.get('entry_hour', 21)),
             entry_minute=int(params.get('entry_minute', 0)),
         )
@@ -3992,14 +4005,35 @@ def weekly_dn_status(sid):
     s = e.get('strategy')
     if not e['running'] or not s:
         return jsonify(running=False)
+
+    # Active sessions with live P&L
+    active_sessions = []
+    for strat in s._active_strategies:
+        sess_id = getattr(strat, '_session_id', '?')
+        active_sessions.append({
+            'session_id': sess_id,
+            'expiry': strat.expiry_date,
+            'pnl': round(strat.total_pnl, 2),
+            'adjustments': strat.adjustment_count,
+            'call_strike': strat.call_position.get('strike_price') if strat.call_position else None,
+            'put_strike': strat.put_position.get('strike_price') if strat.put_position else None,
+            'status': 'running',
+        })
+
     return jsonify(
         running=True,
         cumulative_pnl=round(s.cumulative_pnl, 2),
         current_pnl=round(s.pnl, 2),
         weeks_traded=s.weeks_traded,
         entry_time=f"{s.entry_hour}:{s.entry_minute:02d}",
+        start_day=s.start_day.title(),
+        expiry_week=s.expiry_week,
+        tp_percent=int(s.tp_percent * 100),
+        sl_percent=int(s.sl_percent * 100),
         trade_log=s.trade_log[-10:],
-        has_active_trade=s._current_strategy is not None,
+        sessions=s.sessions[-20:],
+        active_sessions=active_sessions,
+        active_count=len(active_sessions),
     )
 
 

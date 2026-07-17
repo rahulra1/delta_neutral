@@ -148,10 +148,13 @@ const WDN_FIELDS = [
   { key: 'target_delta', label: 'Target Delta', type: 'number', step: '0.01', default: 0.20 },
   { key: 'delta_tolerance', label: 'Delta Tolerance', type: 'number', step: '0.01', default: 0.05 },
   { key: 'premium_threshold', label: 'Premium Threshold (%)', type: 'number', default: 40 },
-  { key: 'target_pnl', label: 'Target P&L ($)', type: 'number', default: 25 },
+  { key: 'tp_percent', label: 'Take Profit (% of premium)', type: 'number', default: 70 },
+  { key: 'sl_percent', label: 'Stop Loss (% of premium)', type: 'number', default: 70 },
   { key: 'max_adjustments', label: 'Max Adjustments', type: 'number', default: 5 },
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 5 },
-  { key: 'entry_hour', label: 'Entry Hour (24h)', type: 'number', default: 21 },
+  { key: 'expiry_week', label: 'Expiry Week (nth Friday)', type: 'number', default: 3 },
+  { key: 'start_day', label: 'Start Day', type: 'select', options: [{value:'monday',label:'Monday'},{value:'tuesday',label:'Tuesday'},{value:'wednesday',label:'Wednesday'},{value:'thursday',label:'Thursday'},{value:'friday',label:'Friday'}], default: 'friday' },
+  { key: 'entry_hour', label: 'Entry Hour (24h IST)', type: 'number', default: 21 },
   { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 0 },
 ];
 
@@ -720,16 +723,57 @@ export default function Strategy() {
                 <div className="stat-card"><div className="label">Current P&L</div><div className="value" style={{ color: (s.current_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.current_pnl||0).toFixed(2)}</div></div>
                 <div className="stat-card"><div className="label">Cumulative</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(2)}</div></div>
                 <div className="stat-card"><div className="label">Weeks Traded</div><div className="value">{s.weeks_traded || 0}</div></div>
-                <div className="stat-card"><div className="label">Active Trade</div><div className="value">{s.has_active_trade ? '🟢 Yes' : '⏸ Waiting'}</div></div>
+                <div className="stat-card"><div className="label">Active Sessions</div><div className="value">{s.active_count || 0}</div></div>
               </div>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Start Day</div><div className="value">{s.start_day || 'Friday'}</div></div>
+                <div className="stat-card"><div className="label">Entry Time</div><div className="value">{s.entry_time || '21:00'} IST</div></div>
+                <div className="stat-card"><div className="label">Expiry Week</div><div className="value">Week {s.expiry_week || 3}</div></div>
+                <div className="stat-card"><div className="label">TP / SL</div><div className="value">{s.tp_percent || 70}% / {s.sl_percent || 70}%</div></div>
+              </div>
+              {(s.active_sessions || []).length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>🟢 Active Sessions</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Session', 'Expiry', 'Call', 'Put', 'P&L', 'Adj'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{(s.active_sessions || []).map((sess, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>{sess.session_id}</td>
+                        <td style={{ padding: '4px 8px' }}>{sess.expiry}</td>
+                        <td style={{ padding: '4px 8px' }}>{sess.call_strike || '—'}</td>
+                        <td style={{ padding: '4px 8px' }}>{sess.put_strike || '—'}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: (sess.pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(sess.pnl||0).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px' }}>{sess.adjustments}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+              {(s.sessions || []).length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Session History</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Session', 'Expiry', 'Status', 'P&L', 'Adj', 'Started'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{(s.sessions || []).slice(-10).reverse().map((sess, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>{sess.session_id}</td>
+                        <td style={{ padding: '4px 8px' }}>{sess.expiry}</td>
+                        <td style={{ padding: '4px 8px' }}><span className={`badge ${sess.status === 'completed' ? 'badge-green' : sess.status === 'running' ? 'badge-blue' : 'badge-red'}`}>{sess.status}</span></td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: (sess.pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(sess.pnl||0).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px' }}>{sess.adjustments}</td>
+                        <td style={{ padding: '4px 8px', fontSize: '.72rem' }}>{sess.started_at ? sess.started_at.split('T')[0] : '—'}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
               {(s.trade_log || []).length > 0 && (
                 <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
                   <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Weekly Log</div>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
-                    <thead><tr>{['Date', 'P&L', 'Adjustments'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <thead><tr>{['Date', 'Session', 'P&L', 'Adjustments'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
                     <tbody>{(s.trade_log || []).slice(-10).reverse().map((t, i) => (
                       <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
                         <td style={{ padding: '4px 8px' }}>{t.date}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>{t.session_id || `S${t.week}`}</td>
                         <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${t.pnl}</td>
                         <td style={{ padding: '4px 8px' }}>{t.adjustments}</td>
                       </tr>))}</tbody>

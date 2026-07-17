@@ -16,7 +16,8 @@ logger = logging.getLogger(__name__)
 class DeltaNeutralStrategy(BaseStrategy):
     def __init__(self, asset='BTC', expiry_date='01-04-2026', target_delta=0.20,
                  delta_tolerance=0.05, lot_size=100, premium_threshold=0.4,
-                 target_pnl=25, max_adjustments=5, monitoring_interval=5):
+                 target_pnl=25, max_adjustments=5, monitoring_interval=5,
+                 tp_sl_percent=0.70, tp_percent=None, sl_percent=None):
         self.asset = asset
         self.expiry_date = expiry_date
         self.target_delta = target_delta
@@ -26,6 +27,10 @@ class DeltaNeutralStrategy(BaseStrategy):
         self.target_pnl = target_pnl
         self.max_adjustments = max_adjustments
         self.monitoring_interval = monitoring_interval
+        self.tp_sl_percent = tp_sl_percent
+        # Separate TP/SL support; fall back to tp_sl_percent
+        self.tp_percent = tp_percent if tp_percent is not None else tp_sl_percent
+        self.sl_percent = sl_percent if sl_percent is not None else tp_sl_percent
 
         self.call_position = None
         self.put_position = None
@@ -39,7 +44,7 @@ class DeltaNeutralStrategy(BaseStrategy):
         self.cumulative_realized_pnl = 0
         self.realized_pnl_snapshot = 0
         self.total_premium_collected = 0
-        self.stop_loss = target_pnl  # default; overridden in initialize() to 50% of premium
+        self.stop_loss = target_pnl  # default; overridden in initialize() based on tp_sl_percent
         self.adjustment_count = 0
         self.adjustment_history = []  # [{leg, symbol, entry, exit, pnl, timestamp}]
         self.call_actual_entry_price = 0
@@ -147,10 +152,10 @@ class DeltaNeutralStrategy(BaseStrategy):
         call_prem = call_option['mark_price'] * self.lot_size * self.call_contract_value
         put_prem = put_option['mark_price'] * self.lot_size * self.put_contract_value
         self.total_premium_collected = call_prem + put_prem
-        self.target_pnl = self.total_premium_collected * 0.5  # TP = 50% of premium
-        self.stop_loss = self.total_premium_collected * 0.5   # SL = 50% of premium (same)
+        self.target_pnl = self.total_premium_collected * self.tp_percent
+        self.stop_loss = self.total_premium_collected * self.sl_percent
         logger.info(f"Expected Premium: Call=${call_prem:.2f} + Put=${put_prem:.2f} = ${self.total_premium_collected:.2f}")
-        logger.info(f"TP: ${self.target_pnl:.2f} (50%) | SL: -${self.stop_loss:.2f} (50%)")
+        logger.info(f"TP: ${self.target_pnl:.2f} ({int(self.tp_percent*100)}%) | SL: -${self.stop_loss:.2f} ({int(self.sl_percent*100)}%)")
 
         logger.info("[4/4] Placing initial orders...")
         call_order = place_order(call_option['product_id'], call_option['symbol'], self.lot_size, 'sell')
@@ -262,10 +267,11 @@ class DeltaNeutralStrategy(BaseStrategy):
 
                 if self.total_pnl >= self.target_pnl or self.total_pnl <= -self.stop_loss:
                     logger.info("=" * 70)
+                    pct_label = int(self.tp_sl_percent * 100)
                     if self.total_pnl >= self.target_pnl:
-                        logger.info(f"🎯 TARGET PROFIT REACHED! Total: ${self.total_pnl:.2f} | Target: ${self.target_pnl:.2f} (50% of ${self.total_premium_collected:.2f})")
+                        logger.info(f"🎯 TARGET PROFIT REACHED! Total: ${self.total_pnl:.2f} | Target: ${self.target_pnl:.2f} ({int(self.tp_percent*100)}% of ${self.total_premium_collected:.2f})")
                     else:
-                        logger.info(f"🛑 STOP LOSS HIT! Total: ${self.total_pnl:.2f} | SL: -${self.stop_loss:.2f} (50% of ${self.total_premium_collected:.2f})")
+                        logger.info(f"🛑 STOP LOSS HIT! Total: ${self.total_pnl:.2f} | SL: -${self.stop_loss:.2f} ({int(self.sl_percent*100)}% of ${self.total_premium_collected:.2f})")
                     logger.info(f"  Adjustments: {self.adjustment_count}")
                     logger.info("=" * 70)
                     self.close_all_positions()
