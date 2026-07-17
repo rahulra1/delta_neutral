@@ -382,6 +382,27 @@ class WeeklyDeltaNeutral(BaseStrategy):
 
     def _run_cycle(self, expiry, week_num):
         """Run a single cycle: create DeltaNeutralStrategy with all params, run it."""
+        # Set up log routing for this thread (inherits from parent's log_queue)
+        try:
+            from app import LogCapture
+            if hasattr(self, '_log_queue') and self._log_queue:
+                LogCapture._local.log_queue = self._log_queue
+                LogCapture._local.log_history = self._log_history
+        except Exception:
+            pass
+
+        # Set up API credentials for this thread
+        try:
+            from config import set_thread_credentials, get_api_key, get_api_secret
+            import config as _cfg
+            api_key = getattr(_cfg._thread_local, 'api_key', None) or _cfg.get_api_key()
+            api_secret = getattr(_cfg._thread_local, 'api_secret', None) or _cfg.get_api_secret()
+            broker = getattr(_cfg._thread_local, 'broker', 'demo')
+            if api_key and api_secret:
+                set_thread_credentials(api_key, api_secret, broker)
+        except Exception:
+            pass
+
         tag = f"[Weekly DN #{week_num}]"
         session_id = f"S{week_num}"
         started_at = datetime.now(IST).isoformat()

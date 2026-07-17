@@ -3901,6 +3901,9 @@ def run_weekly_dn(sid, params):
         )
         entry['strategy'] = s
         entry['running'] = True
+        s._log_queue = entry['log_queue']
+        s._log_history = entry['log_history']
+        s._sid = sid
         record_start(sid, params, user_id=uid)
         if not s.initialize():
             entry['log_queue'].put("✗ Init failed")
