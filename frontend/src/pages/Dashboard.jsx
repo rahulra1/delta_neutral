@@ -128,27 +128,6 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* Mini live chart */}
-          {livePnlHistory.length > 2 && (
-            <div style={{ height: 60, marginBottom: 12 }}>
-              <Line data={{
-                labels: livePnlHistory.map(p => p.time),
-                datasets: [{
-                  data: livePnlHistory.map(p => p.pnl),
-                  borderColor: livePnl.total_live_pnl >= 0 ? '#22c55e' : '#ef4444',
-                  borderWidth: 1.5,
-                  pointRadius: 0,
-                  tension: 0.3,
-                  fill: { target: 'origin', above: 'rgba(34,197,94,0.05)', below: 'rgba(239,68,68,0.05)' },
-                }]
-              }} options={{
-                responsive: true, maintainAspectRatio: false, animation: false,
-                plugins: { legend: { display: false }, tooltip: { enabled: false } },
-                scales: { x: { display: false }, y: { display: false } },
-              }} />
-            </div>
-          )}
-
           {/* Per-strategy breakdown */}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {livePnl.strategies.map((s, i) => (
@@ -186,8 +165,29 @@ export default function Dashboard() {
                 style={{ padding: '6px 10px', border: '1.5px solid var(--border)', borderRadius: 6, fontSize: '.82rem', background: 'var(--bg)', color: 'var(--text)' }} />
             </div>
           )}
-          {pnlSeries.length > 0 ? (
-            <Line data={{ labels: pnlSeries.map(s => s.date), datasets: [{ data: pnlSeries.map(s => s.pnl), borderColor: data.total_pnl >= 0 ? '#22c55e' : '#ef4444', borderWidth: 2, pointRadius: pnlSeries.length < 30 ? 3 : 0, tension: 0.3, fill: { target: 'origin', above: 'rgba(34,197,94,0.08)', below: 'rgba(239,68,68,0.08)' } }] }}
+          {pnlSeries.length > 0 || livePnlHistory.length > 2 ? (
+            <Line data={{
+              labels: [
+                ...pnlSeries.map(s => s.date),
+                ...livePnlHistory.map(p => p.time),
+              ],
+              datasets: [{
+                label: 'Total P&L',
+                data: [
+                  ...pnlSeries.map(s => s.pnl),
+                  ...livePnlHistory.map(p => {
+                    // Total = last historical cumulative + current live pnl
+                    const basePnl = pnlSeries.length > 0 ? pnlSeries[pnlSeries.length - 1].pnl : 0;
+                    return basePnl + p.pnl - (livePnlHistory.length > 0 ? 0 : 0);
+                  }),
+                ],
+                borderColor: (data.total_pnl + livePnl.total_live_pnl) >= 0 ? '#22c55e' : '#ef4444',
+                borderWidth: 2,
+                pointRadius: (pnlSeries.length + livePnlHistory.length) < 30 ? 3 : 0,
+                tension: 0.3,
+                fill: { target: 'origin', above: 'rgba(34,197,94,0.08)', below: 'rgba(239,68,68,0.08)' },
+              }]
+            }}
               options={{ responsive: true, animation: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => `P&L: $${ctx.parsed.y.toFixed(2)}` } } }, scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 8, font: { size: 10 }, color: '#aaa' } }, y: { grid: { color: '#f0f0f0' }, ticks: { font: { size: 10 }, color: '#aaa', callback: v => '$' + v } } } }} />
           ) : (
             <div style={{ color: 'var(--muted)', fontSize: '.85rem', padding: 20, textAlign: 'center' }}>No data for this range</div>
@@ -195,8 +195,8 @@ export default function Dashboard() {
         </div>
         <div className="card">
           <div style={{ fontWeight: 700, marginBottom: 8 }}>ROI</div>
-          <div style={{ fontSize: '1.8rem', fontWeight: 800, color: data.total_pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${data.total_pnl.toFixed(2)}</div>
-          <div style={{ fontSize: '.75rem', color: 'var(--muted)', marginBottom: 16 }}>All time P&L</div>
+          <div style={{ fontSize: '1.8rem', fontWeight: 800, color: (data.total_pnl + livePnl.total_live_pnl) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(data.total_pnl + livePnl.total_live_pnl).toFixed(2)}</div>
+          <div style={{ fontSize: '.75rem', color: 'var(--muted)', marginBottom: 16 }}>All time P&L (incl. live)</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
             <div><div style={{ fontSize: '.7rem', color: 'var(--muted)' }}>Avg Gain</div><div style={{ fontWeight: 700, color: 'var(--green)' }}>${data.avg_gain.toFixed(2)}</div></div>
             <div><div style={{ fontSize: '.7rem', color: 'var(--muted)' }}>Avg Loss</div><div style={{ fontWeight: 700, color: 'var(--red)' }}>${data.avg_loss.toFixed(2)}</div></div>
