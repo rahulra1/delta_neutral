@@ -1753,6 +1753,13 @@ def api_dashboard():
     losses = [p for p in pnls if p < 0]
     total_pnl = sum(pnls)
 
+    # Add live P&L from running strategies
+    live_pnl = 0.0
+    running_trades = [t for t in trades if t.get('status') == 'running']
+    for t in running_trades:
+        live_pnl += t.get('pnl', 0)
+    total_pnl += live_pnl
+
     # P&L over time for chart — sorted by end date, deduplicated per day
     completed_sorted = sorted(completed, key=lambda t: t.get('ended_at') or t.get('started_at', ''))
     pnl_by_date = {}
@@ -1761,6 +1768,12 @@ def api_dashboard():
         cumulative += t.get('pnl', 0)
         date_key = (t.get('ended_at') or t.get('started_at', ''))[:10]
         pnl_by_date[date_key] = round(cumulative, 2)
+
+    # Add today's live P&L to the chart so it reflects real-time
+    if live_pnl != 0:
+        today_key = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        pnl_by_date[today_key] = round(cumulative + live_pnl, 2)
+
     pnl_series = [{'date': d, 'pnl': p} for d, p in pnl_by_date.items()]
 
     # Asset allocation from params
@@ -2856,6 +2869,29 @@ def api_pnl_series():
     completed = [t for t in trades if t.get('status') == 'completed']
     completed.sort(key=lambda t: t.get('ended_at') or t.get('started_at', ''))
 
+    # Inject live P&L into running strategies
+    with _state_lock:
+        for t in trades:
+            if t.get('status') != 'running':
+                continue
+            sid = t.get('sid')
+            if sid in strategies and strategies[sid].get('strategy'):
+                t['pnl'] = round(strategies[sid]['strategy'].total_pnl, 2)
+            elif sid in weekly_dn_strategies and weekly_dn_strategies[sid].get('strategy'):
+                t['pnl'] = round(weekly_dn_strategies[sid]['strategy'].pnl, 2)
+            elif sid in strangle_strategies and strangle_strategies[sid].get('strategy'):
+                t['pnl'] = round(strangle_strategies[sid]['strategy'].pnl, 2)
+            elif sid in portfolio_strangle_strategies and portfolio_strangle_strategies[sid].get('strategy'):
+                t['pnl'] = round(portfolio_strangle_strategies[sid]['strategy'].pnl, 4)
+            elif sid in ema_spread_strategies and ema_spread_strategies[sid].get('strategy'):
+                t['pnl'] = round(ema_spread_strategies[sid]['strategy'].pnl, 4)
+            elif sid in pivot_st_strategies and pivot_st_strategies[sid].get('strategy'):
+                t['pnl'] = round(pivot_st_strategies[sid]['strategy'].pnl, 4)
+            elif sid in hybrid_strategies and hybrid_strategies[sid].get('strategy'):
+                t['pnl'] = round(hybrid_strategies[sid]['strategy'].pnl, 2)
+            elif sid in iv_crush_strategies and iv_crush_strategies[sid].get('strategy'):
+                t['pnl'] = round(iv_crush_strategies[sid]['strategy'].total_pnl, 4)
+
     # Apply date filters
     if since:
         completed = [t for t in completed if (t.get('ended_at') or t.get('started_at', ''))[:10] >= since]
@@ -2868,6 +2904,15 @@ def api_pnl_series():
         cumulative += t.get('pnl', 0)
         date_key = (t.get('ended_at') or t.get('started_at', ''))[:10]
         pnl_by_date[date_key] = round(cumulative, 2)
+
+    # Add live P&L from running strategies as today's data point
+    running_trades = [t for t in trades if t.get('status') == 'running']
+    live_pnl = sum(t.get('pnl', 0) for t in running_trades)
+    if live_pnl != 0:
+        today_key = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        if not until or today_key <= until:
+            pnl_by_date[today_key] = round(cumulative + live_pnl, 2)
+
     series = [{'date': d, 'pnl': p} for d, p in pnl_by_date.items()]
 
     # Also include DB snapshots for running strategies (intraday granularity)

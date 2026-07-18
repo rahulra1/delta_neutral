@@ -48,6 +48,8 @@ export default function Dashboard() {
           const updated = [...prev, { time: new Date(d.timestamp).toLocaleTimeString(), pnl: d.total_live_pnl }];
           return updated.slice(-60); // keep last 60 data points (5 min at 5s intervals)
         });
+        // Update total P&L in the top stat to include live
+        setData(prev => prev ? { ...prev, total_pnl: (prev._base_pnl ?? prev.total_pnl) + d.total_live_pnl, _base_pnl: prev._base_pnl ?? prev.total_pnl } : prev);
       } catch {}
     };
     es.onerror = () => {};
