@@ -99,6 +99,18 @@ class WeeklyDeltaNeutral(BaseStrategy):
 
     def initialize(self):
         self._running = True
+
+        # Capture credentials from the calling thread so we can pass them to child threads
+        try:
+            from config import get_api_key, get_api_secret, _thread_local
+            self._api_key = get_api_key()
+            self._api_secret = get_api_secret()
+            self._broker = getattr(_thread_local, 'broker', 'demo')
+        except Exception:
+            self._api_key = ''
+            self._api_secret = ''
+            self._broker = 'demo'
+
         logger.info("=" * 70)
         logger.info("WEEKLY DELTA NEUTRAL STRATEGY")
         logger.info("=" * 70)
@@ -348,6 +360,10 @@ class WeeklyDeltaNeutral(BaseStrategy):
 
             def _resume_session(strategy=s, sess=session_entry, tag=tag):
                 try:
+                    # Set up API credentials for this thread
+                    from config import set_thread_credentials
+                    if self._api_key and self._api_secret:
+                        set_thread_credentials(self._api_key, self._api_secret, self._broker)
                     strategy.running = True
                     strategy.ws_manager.start()
                     time.sleep(2)
@@ -405,13 +421,9 @@ class WeeklyDeltaNeutral(BaseStrategy):
 
         # Set up API credentials for this thread
         try:
-            from config import set_thread_credentials, get_api_key, get_api_secret
-            import config as _cfg
-            api_key = getattr(_cfg._thread_local, 'api_key', None) or _cfg.get_api_key()
-            api_secret = getattr(_cfg._thread_local, 'api_secret', None) or _cfg.get_api_secret()
-            broker = getattr(_cfg._thread_local, 'broker', 'demo')
-            if api_key and api_secret:
-                set_thread_credentials(api_key, api_secret, broker)
+            from config import set_thread_credentials
+            if self._api_key and self._api_secret:
+                set_thread_credentials(self._api_key, self._api_secret, self._broker)
         except Exception:
             pass
 

@@ -643,11 +643,36 @@ def _resume_db_strategies():
                         lot_size = int(details.get('lot_size', 100))
                         # Group legs by day_num if available, else pair sequentially
                         day_groups = {}
-                        has_day_nums = any(l.get('day_num') for l in legs)
+                        has_day_nums = any(l.get('day_num', 0) > 0 for l in legs)
                         if has_day_nums:
-                            for l in legs:
-                                dn = l.get('day_num', 0)
+                            # Separate legs with valid day_num from legacy ones (day_num=0)
+                            valid_legs = [l for l in legs if l.get('day_num', 0) > 0]
+                            legacy_legs = [l for l in legs if l.get('day_num', 0) <= 0]
+
+                            for l in valid_legs:
+                                dn = l['day_num']
                                 day_groups.setdefault(dn, []).append(l)
+
+                            # Pair legacy legs (day_num=0) into sell+buy spreads
+                            if legacy_legs:
+                                sell_q = [l for l in legacy_legs if l.get('side') == 'sell']
+                                buy_q = [l for l in legacy_legs if l.get('side') == 'buy']
+                                used_buys = set()
+                                # Use negative day_nums to avoid collision with valid ones
+                                neg_day = 0
+                                for sl in sell_q:
+                                    neg_day -= 1
+                                    pair = [sl]
+                                    for i, bl in enumerate(buy_q):
+                                        if i not in used_buys and bl.get('type') == sl.get('type'):
+                                            pair.append(bl)
+                                            used_buys.add(i)
+                                            break
+                                    day_groups[neg_day] = pair
+                                for i, bl in enumerate(buy_q):
+                                    if i not in used_buys:
+                                        neg_day -= 1
+                                        day_groups[neg_day] = [bl]
                         else:
                             # Legacy: no day_num — pair sell+buy sequentially
                             sell_queue = [l for l in legs if l.get('side') == 'sell']

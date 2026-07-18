@@ -191,11 +191,13 @@ class EMACreditSpread(BaseStrategy):
             {'symbol': sell_leg['symbol'], 'product_id': sell_leg['product_id'],
              'side': 'sell', 'type': opt_type, 'delta': sell_leg['delta'],
              'strike': sell_leg['strike_price'], 'entry_price': sell_leg['mark_price'],
-             'size': self.lot_size, 'day_num': day_num},
+             'size': self.lot_size, 'day_num': day_num,
+             'opened_at': datetime.now(IST).strftime('%Y-%m-%d')},
             {'symbol': buy_leg['symbol'], 'product_id': buy_leg['product_id'],
              'side': 'buy', 'type': opt_type, 'delta': buy_leg['delta'],
              'strike': buy_leg['strike_price'], 'entry_price': buy_leg['mark_price'],
-             'size': self.lot_size, 'day_num': day_num},
+             'size': self.lot_size, 'day_num': day_num,
+             'opened_at': datetime.now(IST).strftime('%Y-%m-%d')},
         ]
 
         from config import get_contract_value
@@ -227,6 +229,14 @@ class EMACreditSpread(BaseStrategy):
         sl = premium * self.sl_pct
         cycle = 0
 
+        # Compute day label once (includes opened date if available)
+        opened_date = ''
+        for leg in day_legs:
+            if leg.get('opened_at'):
+                opened_date = leg['opened_at']
+                break
+        day_label = f"[EMA Day{day_num} ({opened_date})]" if opened_date else f"[EMA Day{day_num}]"
+
         while self._running:
             time.sleep(self.monitor_interval)
             cycle += 1
@@ -254,9 +264,9 @@ class EMACreditSpread(BaseStrategy):
             # Handle consecutive failures
             if not all_legs_ok:
                 self._consecutive_failures += 1
-                print(f"[EMA Day{day_num}] ⚠ Price fetch failed ({self._consecutive_failures}/{self._max_consecutive_failures})")
+                print(f"{day_label} ⚠ Price fetch failed ({self._consecutive_failures}/{self._max_consecutive_failures})")
                 if self._consecutive_failures >= self._max_consecutive_failures:
-                    print(f"[EMA Day{day_num}] 🚨 EMERGENCY: {self._consecutive_failures} consecutive failures — closing legs")
+                    print(f"{day_label} 🚨 EMERGENCY: {self._consecutive_failures} consecutive failures — closing legs")
                     self._close_day_legs(day_legs)
                     self._record_day(day_num, pnl, premium, 'api_failure', direction)
                     return
@@ -292,15 +302,15 @@ class EMACreditSpread(BaseStrategy):
                     pass
 
             legs_str = ' | '.join(leg_details) if leg_details else ''
-            print(f"[EMA Day{day_num}] PnL: ${pnl:+.4f} ({pnl/premium*100:+.1f}%) | Cum: ${self.cumulative_pnl:+.4f} | {legs_str}")
+            print(f"{day_label} PnL: ${pnl:+.4f} ({pnl/premium*100:+.1f}%) | Cum: ${self.cumulative_pnl:+.4f} | {legs_str}")
 
             if pnl >= target:
-                print(f"[EMA Day{day_num}] 🎯 TP hit: ${pnl:.4f}")
+                print(f"{day_label} 🎯 TP hit: ${pnl:.4f}")
                 self._close_day_legs(day_legs)
                 self._record_day(day_num, pnl, premium, 'target', direction)
                 return
             if pnl <= -sl:
-                print(f"[EMA Day{day_num}] 🛑 SL hit: ${pnl:.4f}")
+                print(f"{day_label} 🛑 SL hit: ${pnl:.4f}")
                 self._close_day_legs(day_legs)
                 self._record_day(day_num, pnl, premium, 'stoploss', direction)
                 return
@@ -376,6 +386,7 @@ class EMACreditSpread(BaseStrategy):
                     'entry_price': leg.get('entry_price', 0),
                     'size': leg.get('size', 0),
                     'day_num': leg.get('day_num', 0),
+                    'opened_at': leg.get('opened_at', ''),
                 })
             update_strategy_db(sid,
                                details=details,
