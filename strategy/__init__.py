@@ -122,6 +122,18 @@ class DeltaNeutralStrategy(BaseStrategy):
         self.stop_loss = state.get('stop_loss', self.stop_loss)
         self.adjustment_count = state.get('adjustment_count', 0)
         self.adjustment_history = state.get('adjustment_history', [])
+
+        # Reconcile: adjustment_history is the source of truth for realized PnL.
+        # If cumulative_realized_pnl is stale (e.g., server crashed after adjustment
+        # but before state was fully persisted), reconstruct from history.
+        if self.adjustment_history:
+            history_pnl = sum(h.get('pnl', 0) for h in self.adjustment_history)
+            if abs(history_pnl - self.cumulative_realized_pnl) > 0.01:
+                logger.warning(f"  ⚠ Realized PnL mismatch: saved=${self.cumulative_realized_pnl:.2f} vs history=${history_pnl:.2f}")
+                logger.warning(f"  ⚠ Using adjustment history as source of truth: ${history_pnl:.2f}")
+                self.cumulative_realized_pnl = history_pnl
+                self.realized_pnl_snapshot = history_pnl
+
         self.call_position = call_pos
         self.put_position = put_pos
         self.call_entry_price = state.get('call_entry_price', 0)

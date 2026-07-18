@@ -312,6 +312,17 @@ class WeeklyDeltaNeutral(BaseStrategy):
             s.realized_pnl_snapshot = sess_state.get('realized_pnl_snapshot', 0)
             s.adjustment_history = sess_state.get('adjustment_history', [])
 
+            # Reconcile: adjustment_history is the source of truth for realized PnL.
+            # If cumulative_realized_pnl is stale (server crashed after adjustment
+            # but before DB was updated), reconstruct from history.
+            if s.adjustment_history:
+                history_pnl = sum(h.get('pnl', 0) for h in s.adjustment_history)
+                if abs(history_pnl - s.cumulative_realized_pnl) > 0.01:
+                    logger.warning(f"  ⚠ Realized PnL mismatch: saved=${s.cumulative_realized_pnl:.2f} vs history=${history_pnl:.2f}")
+                    logger.warning(f"  ⚠ Using adjustment history as source of truth: ${history_pnl:.2f}")
+                    s.cumulative_realized_pnl = history_pnl
+                    s.realized_pnl_snapshot = history_pnl
+
             if s.call_position:
                 session_entry['call_strike'] = s.call_position.get('strike_price')
             if s.put_position:
