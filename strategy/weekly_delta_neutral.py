@@ -291,6 +291,7 @@ class WeeklyDeltaNeutral(BaseStrategy):
                 sl_percent=self.sl_percent,
             )
             s._session_id = session_id
+            s._on_state_change = self._persist_state  # persist to DB after each adjustment
 
             # Restore position state — includes updated baselines after adjustments
             # After adjustment: entry_price = current tracking baseline (not original entry)
@@ -438,6 +439,7 @@ class WeeklyDeltaNeutral(BaseStrategy):
             sl_percent=self.sl_percent,
         )
         s._session_id = session_id
+        s._on_state_change = self._persist_state  # persist to DB after each adjustment
         self._active_strategies.append(s)
 
         if not s.initialize():

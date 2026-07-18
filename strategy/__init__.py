@@ -9,6 +9,7 @@ from api import (
 )
 from websocket import WebSocketManager
 from strategy.base import BaseStrategy
+from strategy.state import save_state, load_state, clear_state
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,100 @@ class DeltaNeutralStrategy(BaseStrategy):
         self._state_lock = threading.Lock()  # protects shared mutable state
         self._consecutive_failures = 0
         self._max_consecutive_failures = 10  # emergency exit after this many
+        self._on_state_change = None  # optional callback for parent to persist state
+
+    def _save_state(self):
+        """Persist current state to disk and notify parent."""
+        try:
+            save_state(self)
+        except Exception as e:
+            logger.error(f"State save failed: {e}")
+        # Notify parent (e.g., WeeklyDeltaNeutral) to persist to DB
+        if self._on_state_change:
+            try:
+                self._on_state_change()
+            except Exception as e:
+                logger.debug(f"State change callback failed: {e}")
+
+    def try_restore(self):
+        """Try to restore from saved state file.
+
+        If a state file exists and the positions are still open on the exchange,
+        restores cumulative_realized_pnl, adjustment_count, positions, etc.
+        Returns True if restored successfully, False otherwise.
+        """
+        state = load_state()
+        if not state:
+            return False
+
+        # Check that expiry matches (don't restore stale state from a different cycle)
+        if state.get('expiry_date') != self.expiry_date:
+            logger.info(f"State file expiry ({state.get('expiry_date')}) != current ({self.expiry_date}) — ignoring")
+            clear_state()
+            return False
+
+        # Verify positions still exist on exchange
+        positions = get_positions()
+        if positions is None:
+            logger.warning("Cannot verify positions — skipping restore")
+            return False
+
+        call_pos = state.get('call_position')
+        put_pos = state.get('put_position')
+        if not call_pos or not put_pos:
+            logger.warning("State has no positions — starting fresh")
+            clear_state()
+            return False
+
+        # Check if at least one leg is still open on exchange
+        open_product_ids = {pos.get('product_id') for pos in positions if int(pos.get('size', 0)) != 0}
+        call_open = call_pos.get('product_id') in open_product_ids
+        put_open = put_pos.get('product_id') in open_product_ids
+
+        if not call_open and not put_open:
+            logger.warning("Neither position from state is open — starting fresh")
+            clear_state()
+            return False
+
+        # Restore state
+        self.cumulative_realized_pnl = state.get('cumulative_realized_pnl', 0)
+        self.realized_pnl_snapshot = state.get('realized_pnl_snapshot', 0)
+        self.total_premium_collected = state.get('total_premium_collected', 0)
+        self.target_pnl = state.get('target_pnl', self.target_pnl)
+        self.stop_loss = state.get('stop_loss', self.stop_loss)
+        self.adjustment_count = state.get('adjustment_count', 0)
+        self.adjustment_history = state.get('adjustment_history', [])
+        self.call_position = call_pos
+        self.put_position = put_pos
+        self.call_entry_price = state.get('call_entry_price', 0)
+        self.put_entry_price = state.get('put_entry_price', 0)
+        self.call_actual_entry_price = state.get('call_actual_entry_price', 0)
+        self.put_actual_entry_price = state.get('put_actual_entry_price', 0)
+        self.call_contract_value = state.get('call_contract_value', 0.001)
+        self.put_contract_value = state.get('put_contract_value', 0.001)
+
+        logger.info("=" * 70)
+        logger.info("✓ STATE RESTORED FROM DISK")
+        logger.info(f"  Realized PnL: ${self.cumulative_realized_pnl:.2f}")
+        logger.info(f"  Adjustments: {self.adjustment_count}/{self.max_adjustments}")
+        logger.info(f"  Call: {call_pos['symbol']} (entry ${self.call_entry_price:.2f}) {'[OPEN]' if call_open else '[CLOSED]'}")
+        logger.info(f"  Put:  {put_pos['symbol']} (entry ${self.put_entry_price:.2f}) {'[OPEN]' if put_open else '[CLOSED]'}")
+        logger.info(f"  TP: ${self.target_pnl:.2f} | SL: -${self.stop_loss:.2f}")
+        logger.info("=" * 70)
+
+        # Start WebSocket for open positions
+        self.ws_manager.start()
+        time.sleep(2)
+        symbols = []
+        if call_open:
+            symbols.append(call_pos['symbol'])
+        if put_open:
+            symbols.append(put_pos['symbol'])
+        if symbols:
+            self.ws_manager.subscribe(symbols)
+            logger.info(f"✓ Subscribed to: {symbols}")
+
+        return True
 
     def on_price_update(self, symbol, mark_price, delta):
         now = time.time()
@@ -120,6 +215,11 @@ class DeltaNeutralStrategy(BaseStrategy):
             self.adjust_position('put', current_delta, other_price, current_price)
 
     def initialize(self):
+        # Try to restore from a previous run (handles server restart mid-cycle)
+        if self.try_restore():
+            logger.info("✓ Resumed from saved state — skipping fresh initialization")
+            return True
+
         logger.info("=" * 70)
         logger.info("DELTA NEUTRAL OPTIONS STRATEGY (WebSocket Enabled)")
         logger.info("=" * 70)
@@ -187,6 +287,9 @@ class DeltaNeutralStrategy(BaseStrategy):
         symbols = [self.call_position['symbol'], self.put_position['symbol']]
         self.ws_manager.subscribe(symbols)
         logger.info(f"✓ Subscribed to real-time updates for {symbols}")
+
+        # Save initial state so we can recover if server restarts
+        self._save_state()
         return True
 
     def monitor_and_adjust(self):
@@ -399,6 +502,9 @@ class DeltaNeutralStrategy(BaseStrategy):
         logger.info(f"  ✓ Adjustment #{self.adjustment_count} done | Cumulative PnL: ${self.cumulative_realized_pnl:.2f}")
         logger.info(f"  ✓ New baselines — Call: ${self.call_entry_price:.2f} | Put: ${self.put_entry_price:.2f}")
 
+        # Persist state after every adjustment so realized PnL survives restart
+        self._save_state()
+
     def close_all_positions(self):
         logger.info("[CLOSING] Closing all positions...")
         self.running = False
@@ -419,6 +525,9 @@ class DeltaNeutralStrategy(BaseStrategy):
         time.sleep(2)
         self.ws_manager.stop()
         logger.info(f"✓ All positions closed | Final PnL: ${self.cumulative_realized_pnl:.2f} | Adjustments: {self.adjustment_count}")
+
+        # Clear state file — strategy completed normally, no need to recover
+        clear_state()
 
     def monitor(self):
         self.monitor_and_adjust()
