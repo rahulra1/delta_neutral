@@ -21,14 +21,37 @@ export default function Dashboard() {
   const [chartFrom, setChartFrom] = useState('');
   const [chartTo, setChartTo] = useState('');
   const [pnlSeries, setPnlSeries] = useState([]);
+  const [livePnl, setLivePnl] = useState({ total_live_pnl: 0, active_count: 0, strategies: [] });
+  const [livePnlHistory, setLivePnlHistory] = useState([]);
   const nav = useNavigate();
 
   useEffect(() => {
     api.get('/dashboard').then(r => setData(r.data));
     api.get('/profiles').then(r => setProfiles(r.data.profiles || []));
     loadStrats();
-    const t = setInterval(loadStrats, 10000);
+    const t = setInterval(() => {
+      loadStrats();
+      api.get('/dashboard').then(r => setData(r.data));
+    }, 10000);
     return () => clearInterval(t);
+  }, []);
+
+  // Live P&L SSE stream
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    const es = new EventSource(`/api/dashboard/live-pnl?token=${token}`);
+    es.onmessage = (e) => {
+      try {
+        const d = JSON.parse(e.data);
+        setLivePnl(d);
+        setLivePnlHistory(prev => {
+          const updated = [...prev, { time: new Date(d.timestamp).toLocaleTimeString(), pnl: d.total_live_pnl }];
+          return updated.slice(-60); // keep last 60 data points (5 min at 5s intervals)
+        });
+      } catch {}
+    };
+    es.onerror = () => {};
+    return () => es.close();
   }, []);
 
   useEffect(() => {
@@ -87,6 +110,53 @@ export default function Dashboard() {
         <div className="stat-card"><div className="label">📈 Total Trades</div><div className="value">{data.total_trades}</div><div className="sub">Completed</div></div>
         <div className="stat-card"><div className="label">🎯 Win Rate</div><div className="value">{data.win_rate.toFixed(1)}%</div><div className="sub">All closed</div></div>
       </div>
+
+      {/* Live P&L Ticker */}
+      {livePnl.active_count > 0 && (
+        <div className="card" style={{ marginBottom: 20, background: 'linear-gradient(135deg, var(--card) 0%, var(--bg) 100%)', border: '1.5px solid var(--accent)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', animation: 'pulse 2s infinite' }} />
+              <span style={{ fontWeight: 700, fontSize: '.9rem' }}>Live P&L</span>
+              <span style={{ fontSize: '.75rem', color: 'var(--muted)' }}>({livePnl.active_count} active)</span>
+            </div>
+            <div style={{ fontSize: '1.4rem', fontWeight: 800, color: livePnl.total_live_pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
+              ${livePnl.total_live_pnl.toFixed(4)}
+            </div>
+          </div>
+
+          {/* Mini live chart */}
+          {livePnlHistory.length > 2 && (
+            <div style={{ height: 60, marginBottom: 12 }}>
+              <Line data={{
+                labels: livePnlHistory.map(p => p.time),
+                datasets: [{
+                  data: livePnlHistory.map(p => p.pnl),
+                  borderColor: livePnl.total_live_pnl >= 0 ? '#22c55e' : '#ef4444',
+                  borderWidth: 1.5,
+                  pointRadius: 0,
+                  tension: 0.3,
+                  fill: { target: 'origin', above: 'rgba(34,197,94,0.05)', below: 'rgba(239,68,68,0.05)' },
+                }]
+              }} options={{
+                responsive: true, maintainAspectRatio: false, animation: false,
+                plugins: { legend: { display: false }, tooltip: { enabled: false } },
+                scales: { x: { display: false }, y: { display: false } },
+              }} />
+            </div>
+          )}
+
+          {/* Per-strategy breakdown */}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {livePnl.strategies.map((s, i) => (
+              <div key={i} style={{ padding: '6px 12px', borderRadius: 6, background: 'var(--bg)', border: '1px solid var(--border)', fontSize: '.78rem' }}>
+                <span style={{ color: 'var(--muted)', marginRight: 6 }}>{s.name}</span>
+                <span style={{ fontWeight: 700, color: s.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${s.pnl.toFixed(4)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 300px', gap: 20, marginBottom: 24 }}>
         <div className="card">

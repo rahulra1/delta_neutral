@@ -249,7 +249,27 @@ class WeeklyDeltaNeutral(BaseStrategy):
                 'sessions': self.sessions[-20:],
                 'active_session_state': active_session_state,
             }
-            update_strategy_db(sid, details=details,
+
+            # Also save current legs to the legs column as a fallback
+            legs_data = []
+            for strat in self._active_strategies:
+                if not strat.running:
+                    continue
+                for leg_name in ('call', 'put'):
+                    pos = getattr(strat, f'{leg_name}_position', None)
+                    if pos:
+                        legs_data.append({
+                            'product_id': pos.get('product_id'),
+                            'symbol': pos.get('symbol', ''),
+                            'type': leg_name,
+                            'strike': pos.get('strike_price', ''),
+                            'side': 'sell',
+                            'size': strat.lot_size,
+                            'entry_price': round(getattr(strat, f'{leg_name}_entry_price', 0), 2),
+                            'session_id': getattr(strat, '_session_id', ''),
+                        })
+
+            update_strategy_db(sid, details=details, legs=legs_data,
                                pnl=round(self.cumulative_pnl, 2))
         except Exception as e:
             logger.warning(f"[Weekly DN] Persist state failed: {e}")

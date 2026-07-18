@@ -561,6 +561,42 @@ def _resume_db_strategies():
                     if active_session_state:
                         logger.info(f"[resume] Weekly DN {sid} — restoring {len(active_session_state)} active session(s)")
                         s._restore_active_sessions(active_session_state)
+                    elif legs:
+                        # Fallback: reconstruct session from legs column
+                        call_leg = next((l for l in legs if l.get('type') == 'call'), None)
+                        put_leg = next((l for l in legs if l.get('type') == 'put'), None)
+                        if call_leg and put_leg:
+                            logger.info(f"[resume] Weekly DN {sid} — no active_session_state, restoring from legs column")
+                            fallback_session = [{
+                                'session_id': call_leg.get('session_id', f"S{s.weeks_traded + 1}"),
+                                'expiry_date': details.get('expiry_date', ''),
+                                'call_position': {
+                                    'product_id': call_leg['product_id'],
+                                    'symbol': call_leg.get('symbol', ''),
+                                    'strike_price': call_leg.get('strike', ''),
+                                    'mark_price': call_leg.get('entry_price', 0),
+                                },
+                                'put_position': {
+                                    'product_id': put_leg['product_id'],
+                                    'symbol': put_leg.get('symbol', ''),
+                                    'strike_price': put_leg.get('strike', ''),
+                                    'mark_price': put_leg.get('entry_price', 0),
+                                },
+                                'call_entry_price': call_leg.get('entry_price', 0),
+                                'put_entry_price': put_leg.get('entry_price', 0),
+                                'call_actual_entry_price': call_leg.get('entry_price', 0),
+                                'put_actual_entry_price': put_leg.get('entry_price', 0),
+                                'call_contract_value': 0.001,
+                                'put_contract_value': 0.001,
+                                'total_premium_collected': details.get('total_premium_collected', 0),
+                                'target_pnl': details.get('target_pnl', 0),
+                                'stop_loss': details.get('stop_loss', 0),
+                                'adjustment_count': details.get('adjustment_count', 0) or d.get('adjustment_count', 0) or 0,
+                                'cumulative_realized_pnl': float(d.get('pnl', 0) or 0),
+                                'realized_pnl_snapshot': 0,
+                                'adjustment_history': [],
+                            }]
+                            s._restore_active_sessions(fallback_session)
                     s.monitor()
                 except Exception as e:
                     logger.error(f"[resume] Weekly DN {sid} error: {e}")
@@ -1478,6 +1514,120 @@ def api_test_connection():
 
 
 # ── Strategy Routes (per-user isolated) ──
+
+@app.route('/api/dashboard/live-pnl')
+@login_required
+def dashboard_live_pnl():
+    """SSE endpoint streaming real-time aggregated P&L for all active strategies."""
+    uid = current_user_id()
+    import json as _json
+
+    def generate():
+        while True:
+            try:
+                active_pnls = []
+                total_live_pnl = 0.0
+
+                with _state_lock:
+                    for sid, e in strategies.items():
+                        if e.get('user_id') != uid or not e.get('running'):
+                            continue
+                        s = e.get('strategy')
+                        if s:
+                            pnl = round(s.total_pnl, 4)
+                            total_live_pnl += pnl
+                            active_pnls.append({'sid': sid, 'name': 'Delta Neutral', 'pnl': pnl})
+
+                    for sid, e in weekly_dn_strategies.items():
+                        if e.get('user_id') != uid or not e.get('running'):
+                            continue
+                        s = e.get('strategy')
+                        if s:
+                            pnl = round(s.pnl, 4)
+                            total_live_pnl += pnl
+                            active_pnls.append({'sid': sid, 'name': 'Weekly DN', 'pnl': pnl, 'weeks': s.weeks_traded})
+
+                    for sid, e in strangle_strategies.items():
+                        if e.get('user_id') != uid or not e.get('running'):
+                            continue
+                        s = e.get('strategy')
+                        if s:
+                            pnl = round(s.pnl, 4)
+                            total_live_pnl += pnl
+                            active_pnls.append({'sid': sid, 'name': 'Daily Strangle', 'pnl': pnl})
+
+                    for sid, e in portfolio_strangle_strategies.items():
+                        if e.get('user_id') != uid or not e.get('running'):
+                            continue
+                        s = e.get('strategy')
+                        if s:
+                            pnl = round(s.pnl, 4)
+                            total_live_pnl += pnl
+                            active_pnls.append({'sid': sid, 'name': 'Portfolio Strangle', 'pnl': pnl})
+
+                    for sid, e in ema_spread_strategies.items():
+                        if e.get('user_id') != uid or not e.get('running'):
+                            continue
+                        s = e.get('strategy')
+                        if s:
+                            pnl = round(s.pnl, 4)
+                            total_live_pnl += pnl
+                            active_pnls.append({'sid': sid, 'name': 'EMA Spread', 'pnl': pnl})
+
+                    for sid, e in pivot_st_strategies.items():
+                        if e.get('user_id') != uid or not e.get('running'):
+                            continue
+                        s = e.get('strategy')
+                        if s:
+                            pnl = round(s.pnl, 4)
+                            total_live_pnl += pnl
+                            active_pnls.append({'sid': sid, 'name': 'Pivot SuperTrend', 'pnl': pnl})
+
+                    for sid, e in hybrid_strategies.items():
+                        if e.get('user_id') != uid or not e.get('running'):
+                            continue
+                        s = e.get('strategy')
+                        if s:
+                            pnl = round(s.pnl, 4)
+                            total_live_pnl += pnl
+                            active_pnls.append({'sid': sid, 'name': 'Hybrid', 'pnl': pnl})
+
+                    for sid, e in iv_crush_strategies.items():
+                        if e.get('user_id') != uid or not e.get('running'):
+                            continue
+                        s = e.get('strategy')
+                        if s:
+                            pnl = round(s.total_pnl, 4)
+                            total_live_pnl += pnl
+                            active_pnls.append({'sid': sid, 'name': 'IV Crush', 'pnl': pnl})
+
+                    for sid, e in _futures_traders.items():
+                        if e.get('user_id') != uid or not e['trader'].running:
+                            continue
+                        pnl = round(e['trader'].pnl, 4)
+                        total_live_pnl += pnl
+                        active_pnls.append({'sid': sid, 'name': 'Futures Signal', 'pnl': pnl})
+
+                for rs in registry.get_running(uid):
+                    pnl = round(rs.current_pnl, 4)
+                    total_live_pnl += pnl
+                    active_pnls.append({'sid': rs.sid, 'name': rs.name, 'pnl': pnl})
+
+                payload = _json.dumps({
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'total_live_pnl': round(total_live_pnl, 4),
+                    'active_count': len(active_pnls),
+                    'strategies': active_pnls,
+                })
+                yield f"data: {payload}\n\n"
+            except Exception:
+                yield f": heartbeat\n\n"
+
+            time.sleep(5)
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
 
 @app.route('/api/dashboard')
 @login_required
