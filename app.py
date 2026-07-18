@@ -1522,6 +1522,8 @@ def dashboard_live_pnl():
     uid = current_user_id()
     import json as _json
 
+    _last_persist = [0]  # mutable ref for closure
+
     def generate():
         while True:
             try:
@@ -1620,6 +1622,28 @@ def dashboard_live_pnl():
                     'strategies': active_pnls,
                 })
                 yield f"data: {payload}\n\n"
+
+                # Persist snapshots to DB every 30 seconds
+                now_ts = time.time()
+                if now_ts - _last_persist[0] >= 30 and active_pnls:
+                    _last_persist[0] = now_ts
+                    try:
+                        for s in active_pnls:
+                            save_pnl_snapshot(uid, s['sid'], s['pnl'])
+                            # Keep all_tracked in sync so /dashboard reflects live P&L
+                            with _state_lock:
+                                if s['sid'] in all_tracked:
+                                    all_tracked[s['sid']]['pnl'] = s['pnl']
+                        # Also save aggregated total as a special "dashboard" entry
+                        save_pnl_snapshot(uid, f"_dashboard_{uid}", total_live_pnl)
+                        # Update DB pnl field for each strategy so it survives restart
+                        for s in active_pnls:
+                            try:
+                                update_strategy_db(s['sid'], pnl=round(s['pnl'], 4))
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
             except Exception:
                 yield f": heartbeat\n\n"
 

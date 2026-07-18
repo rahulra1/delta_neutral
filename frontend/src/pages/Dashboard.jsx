@@ -46,10 +46,8 @@ export default function Dashboard() {
         setLivePnl(d);
         setLivePnlHistory(prev => {
           const updated = [...prev, { time: new Date(d.timestamp).toLocaleTimeString(), pnl: d.total_live_pnl }];
-          return updated.slice(-60); // keep last 60 data points (5 min at 5s intervals)
+          return updated.slice(-60);
         });
-        // Update total P&L in the top stat to include live
-        setData(prev => prev ? { ...prev, total_pnl: (prev._base_pnl ?? prev.total_pnl) + d.total_live_pnl, _base_pnl: prev._base_pnl ?? prev.total_pnl } : prev);
       } catch {}
     };
     es.onerror = () => {};
@@ -65,7 +63,10 @@ export default function Dashboard() {
       const days = { '7d': 7, '30d': 30, '90d': 90 }[chartRange] || 0;
       if (days) params.since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
     }
-    api.get('/pnl-series', { params }).then(r => setPnlSeries(r.data.pnl_series || []));
+    const fetchPnl = () => api.get('/pnl-series', { params }).then(r => setPnlSeries(r.data.pnl_series || []));
+    fetchPnl();
+    const t = setInterval(fetchPnl, 5000);
+    return () => clearInterval(t);
   }, [chartRange, chartFrom, chartTo]);
 
   const loadStrats = () => api.get('/strategies').then(r => {
@@ -107,7 +108,7 @@ export default function Dashboard() {
       <div className="page-title">Hello, {JSON.parse(localStorage.getItem('user'))?.username} 👋</div>
 
       <div className="top-stats">
-        <div className="stat-card"><div className="label">💰 Total P&L</div><div className="value" style={{ color: data.total_pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${data.total_pnl.toFixed(2)}</div><div className="sub">All time</div></div>
+        <div className="stat-card"><div className="label">💰 Total P&L</div><div className="value" style={{ color: (data.total_pnl + livePnl.total_live_pnl) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(data.total_pnl + livePnl.total_live_pnl).toFixed(2)}</div><div className="sub">All time (live)</div></div>
         <div className="stat-card"><div className="label">📊 Open Positions</div><div className="value">{data.open_positions}</div><div className="sub">Active</div></div>
         <div className="stat-card"><div className="label">📈 Total Trades</div><div className="value">{data.total_trades}</div><div className="sub">Completed</div></div>
         <div className="stat-card"><div className="label">🎯 Win Rate</div><div className="value">{data.win_rate.toFixed(1)}%</div><div className="sub">All closed</div></div>
