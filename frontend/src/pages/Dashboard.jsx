@@ -108,7 +108,7 @@ export default function Dashboard() {
       <div className="page-title">Hello, {JSON.parse(localStorage.getItem('user'))?.username} 👋</div>
 
       <div className="top-stats">
-        <div className="stat-card"><div className="label">💰 Total P&L</div><div className="value" style={{ color: (data.total_pnl + livePnl.total_live_pnl) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(data.total_pnl + livePnl.total_live_pnl).toFixed(2)}</div><div className="sub">All time (live)</div></div>
+        <div className="stat-card"><div className="label">💰 Total P&L</div><div className="value" style={{ color: data.total_pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${data.total_pnl.toFixed(2)}</div><div className="sub">All time</div></div>
         <div className="stat-card"><div className="label">📊 Open Positions</div><div className="value">{data.open_positions}</div><div className="sub">Active</div></div>
         <div className="stat-card"><div className="label">📈 Total Trades</div><div className="value">{data.total_trades}</div><div className="sub">Completed</div></div>
         <div className="stat-card"><div className="label">🎯 Win Rate</div><div className="value">{data.win_rate.toFixed(1)}%</div><div className="sub">All closed</div></div>
@@ -167,23 +167,23 @@ export default function Dashboard() {
           )}
           {pnlSeries.length > 0 || livePnlHistory.length > 2 ? (
             <Line data={{
-              labels: [
-                ...pnlSeries.map(s => s.date),
-                ...livePnlHistory.map(p => p.time),
-              ],
+              labels: livePnlHistory.length > 2
+                ? [...pnlSeries.slice(0, -1).map(s => s.date), ...livePnlHistory.map(p => p.time)]
+                : pnlSeries.map(s => s.date),
               datasets: [{
                 label: 'Total P&L',
-                data: [
-                  ...pnlSeries.map(s => s.pnl),
-                  ...livePnlHistory.map(p => {
-                    // Total = last historical cumulative + current live pnl
-                    const basePnl = pnlSeries.length > 0 ? pnlSeries[pnlSeries.length - 1].pnl : 0;
-                    return basePnl + p.pnl - (livePnlHistory.length > 0 ? 0 : 0);
-                  }),
-                ],
-                borderColor: (data.total_pnl + livePnl.total_live_pnl) >= 0 ? '#22c55e' : '#ef4444',
+                data: livePnlHistory.length > 2
+                  ? [
+                      ...pnlSeries.slice(0, -1).map(s => s.pnl),
+                      ...livePnlHistory.map(p => {
+                        const basePnl = pnlSeries.length > 1 ? pnlSeries[pnlSeries.length - 2].pnl : 0;
+                        return basePnl + p.pnl;
+                      }),
+                    ]
+                  : pnlSeries.map(s => s.pnl),
+                borderColor: data.total_pnl >= 0 ? '#22c55e' : '#ef4444',
                 borderWidth: 2,
-                pointRadius: (pnlSeries.length + livePnlHistory.length) < 30 ? 3 : 0,
+                pointRadius: 0,
                 tension: 0.3,
                 fill: { target: 'origin', above: 'rgba(34,197,94,0.08)', below: 'rgba(239,68,68,0.08)' },
               }]
@@ -195,8 +195,8 @@ export default function Dashboard() {
         </div>
         <div className="card">
           <div style={{ fontWeight: 700, marginBottom: 8 }}>ROI</div>
-          <div style={{ fontSize: '1.8rem', fontWeight: 800, color: (data.total_pnl + livePnl.total_live_pnl) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(data.total_pnl + livePnl.total_live_pnl).toFixed(2)}</div>
-          <div style={{ fontSize: '.75rem', color: 'var(--muted)', marginBottom: 16 }}>All time P&L (incl. live)</div>
+          <div style={{ fontSize: '1.8rem', fontWeight: 800, color: data.total_pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${data.total_pnl.toFixed(2)}</div>
+          <div style={{ fontSize: '.75rem', color: 'var(--muted)', marginBottom: 16 }}>All time P&L</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
             <div><div style={{ fontSize: '.7rem', color: 'var(--muted)' }}>Avg Gain</div><div style={{ fontWeight: 700, color: 'var(--green)' }}>${data.avg_gain.toFixed(2)}</div></div>
             <div><div style={{ fontSize: '.7rem', color: 'var(--muted)' }}>Avg Loss</div><div style={{ fontWeight: 700, color: 'var(--red)' }}>${data.avg_loss.toFixed(2)}</div></div>
