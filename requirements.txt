@@ -5,3 +5,5 @@ python-dotenv==1.1.0
 gunicorn==23.0.0
 bcrypt==4.3.0
 PyJWT==2.10.1
+growwapi==1.5.0
+pyotp==2.9.0
