@@ -77,6 +77,10 @@ const STRATEGIES = [
     desc: '0DTE short strangle: sell ~$100 call + put at 9 AM, 100% SL per leg (premium doubles), exit 5:15 PM. Daily recurring.',
     features: ['0DTE Expiry', '9AM Entry / 5PM Exit', '100% SL Per Leg', 'Daily Auto-Trade'],
     rec: '⏱ Daily 9:00 AM · BTC options · $200 margin for 0.1 BTC' },
+  { key: 'nse_strangle', label: 'NSE Strangle', icon: '🇮🇳', type: 'Options',
+    desc: 'Paper-trade short strangle on NIFTY/BANKNIFTY. Sell OTM call + put nearest ₹target premium, configurable SL & trading days.',
+    features: ['NSE Index Options', 'Configurable Days', 'Paper Trading', 'Per-Leg SL + Re-entry'],
+    rec: '⏱ Market Hours 9:15–3:30 · NIFTY, BANKNIFTY, FINNIFTY' },
   { key: 'pivot_supertrend', label: 'Pivot + SuperTrend', icon: '📡', type: 'Options',
     desc: '0DTE directional option selling: SuperTrend(7,3) + Daily Pivot R1/S1. Sell ATM put on breakout above R1, sell ATM call below S1. Exit on ST flip.',
     features: ['0DTE ATM Selling', 'SuperTrend Exit', 'Pivot Filter', 'Max 3 Trades/Day'],
@@ -180,6 +184,20 @@ const STRANGLE_FIELDS = [
   { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 17 },
   { key: 'exit_minute', label: 'Exit Minute', type: 'number', default: 15 },
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 10 },
+];
+
+const NSE_STRANGLE_FIELDS = [
+  { key: 'symbol', label: 'Symbol', type: 'select', options: [{value:'NIFTY',label:'NIFTY'},{value:'BANKNIFTY',label:'BANKNIFTY'},{value:'FINNIFTY',label:'FINNIFTY'},{value:'MIDCPNIFTY',label:'MIDCPNIFTY'}], default: 'NIFTY' },
+  { key: 'lots', label: 'Number of Lots', type: 'number', default: 1 },
+  { key: 'lot_size', label: 'Lot Size (override)', type: 'number', default: 65, hint: 'NIFTY=65, BANKNIFTY=30, FINNIFTY=65' },
+  { key: 'target_premium', label: 'Target Premium (₹)', type: 'number', default: 100, hint: 'Premium per leg to sell' },
+  { key: 'sl_pct', label: 'Stop Loss (%)', type: 'number', default: 200, hint: '200 = SL when premium doubles' },
+  { key: 'trading_days', label: 'Trading Days', type: 'text', default: '0,1,2,3,4', hint: '0=Mon,1=Tue,2=Wed,3=Thu,4=Fri' },
+  { key: 'entry_hour', label: 'Entry Hour (24h IST)', type: 'number', default: 9 },
+  { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 20 },
+  { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 15 },
+  { key: 'exit_minute', label: 'Exit Minute', type: 'number', default: 15 },
+  { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 15 },
 ];
 
 const PIVOT_ST_FIELDS = [
@@ -503,6 +521,60 @@ export default function Strategy() {
                         <td style={{ padding: '4px 8px' }}>{t.date}</td>
                         <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${t.pnl}</td>
                         <td style={{ padding: '4px 8px' }}>{t.exit_reason === 'both_sl' ? '🛑 Both SL' : t.exit_reason === 'one_sl' ? '⚠️ One SL' : '⏰ EOD Exit'}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )} />
+      )}
+      {activeTab === 'nse_strangle' && (
+        <StrategyTemplate title="NSE Strangle (Paper)" icon="🇮🇳" type="Options" description="Paper-trade short strangle on NIFTY/BANKNIFTY. Sell OTM call + put at target premium with per-leg SL." profiles={profiles}
+          configFields={NSE_STRANGLE_FIELDS}
+          onStart={async (config) => {
+            const c = { ...config };
+            if (typeof c.trading_days === 'string') c.trading_days = c.trading_days.split(',').map(d => parseInt(d.trim()));
+            const { data } = await api.post('/nse-strangle/start', c);
+            return data;
+          }}
+          onStop={async (sid) => { await api.post('/nse-strangle/stop', { sid }); }}
+          statusEndpoint="/nse-strangle/status" streamEndpoint="/nse-strangle/stream"
+          renderStatus={(s) => (
+            <>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Session P&L</div><div className="value" style={{ color: (s.session_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{(s.session_pnl || 0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Cumulative P&L</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{(s.cumulative_pnl||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Total (incl. Open)</div><div className="value" style={{ color: (s.total_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{(s.total_pnl||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Days Traded</div><div className="value">{s.days_traded || 0}</div></div>
+              </div>
+              {s.legs && s.legs.length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Active Legs</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Type', 'Strike', 'Entry', 'Mark', 'SL', 'P&L', 'Status'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{s.legs.map((l, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}><span className={`badge ${l.type === 'call' ? 'badge-green' : 'badge-red'}`}>{l.type.toUpperCase()}</span></td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>{l.strike}</td>
+                        <td style={{ padding: '4px 8px' }}>₹{l.entry_price.toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>₹{(l.mark_price || 0).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px', color: 'var(--red)' }}>₹{(l.entry_price * 2).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: (l.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{(l.pnl || 0).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px' }}>{l.stopped ? <span className="badge badge-red">Stopped</span> : <span className="badge badge-green">Active</span>}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+              {(s.trade_log || []).length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Trade Log</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Date', 'P&L', 'Exit Reason'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{(s.trade_log || []).slice(-10).reverse().map((t, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}>{t.date}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{t.pnl}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.exit_reason === 'both_sl' ? '🛑 Both SL' : t.exit_reason?.includes('sl') ? '⚠️ SL Hit' : '⏰ EOD Exit'}</td>
                       </tr>))}</tbody>
                   </table>
                 </div>

@@ -1,11 +1,12 @@
 import os
 import threading
-from config import delta_exchange, demo
+from config import delta_exchange, demo, groww
 
 # Registry of available brokers
 BROKERS = {
     'delta_exchange': delta_exchange,
     'demo': demo,
+    'groww': groww,
 }
 
 DEFAULT_BROKER = 'demo'
