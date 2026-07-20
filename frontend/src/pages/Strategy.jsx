@@ -85,6 +85,10 @@ const STRATEGIES = [
     desc: 'Delta-neutral short strangle on NSE indices. Sells at matching deltas, adjusts when premium spikes (close opposite, re-enter). TP/SL as % of premium.',
     features: ['Delta-Based Entry', 'Auto Rebalance', 'TP/SL % Premium', 'Market Hours Aware'],
     rec: '⏱ Market Hours 9:15–3:30 · NIFTY, BANKNIFTY' },
+  { key: 'nse_ema_spread', label: 'NSE EMA Spread', icon: '📈🇮🇳', type: 'Options',
+    desc: 'Daily EMA10 direction → bear call or bull put spread on NSE indices. 90% TP / 150% SL of premium. Trades Mon-Fri at 10:25 AM.',
+    features: ['EMA10 Direction', 'Credit Spread', 'Daily Auto-Trade', '90% TP / 150% SL'],
+    rec: '⏱ Daily 10:25 AM IST · NIFTY, BANKNIFTY' },
   { key: 'pivot_supertrend', label: 'Pivot + SuperTrend', icon: '📡', type: 'Options',
     desc: '0DTE directional option selling: SuperTrend(7,3) + Daily Pivot R1/S1. Sell ATM put on breakout above R1, sell ATM call below S1. Exit on ST flip.',
     features: ['0DTE ATM Selling', 'SuperTrend Exit', 'Pivot Filter', 'Max 3 Trades/Day'],
@@ -217,6 +221,24 @@ const NSE_DN_FIELDS = [
   { key: 'trading_days', label: 'Trading Days', type: 'text', default: '0,1,2,3,4', hint: '0=Mon,1=Tue,2=Wed,3=Thu,4=Fri' },
   { key: 'entry_hour', label: 'Entry Hour (24h IST)', type: 'number', default: 9 },
   { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 20 },
+  { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 15 },
+  { key: 'exit_minute', label: 'Exit Minute', type: 'number', default: 15 },
+  { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 15 },
+  { key: 'paper_trade', label: 'Paper Trade', type: 'select', options: [{value:true,label:'Yes (Paper)'},{value:false,label:'No (Live)'}], default: true },
+];
+
+const NSE_EMA_SPREAD_FIELDS = [
+  { key: 'symbol', label: 'Symbol', type: 'select', options: [{value:'NIFTY',label:'NIFTY'},{value:'BANKNIFTY',label:'BANKNIFTY'},{value:'FINNIFTY',label:'FINNIFTY'},{value:'MIDCPNIFTY',label:'MIDCPNIFTY'}], default: 'NIFTY' },
+  { key: 'lots', label: 'Number of Lots', type: 'number', default: 1 },
+  { key: 'lot_size', label: 'Lot Size (override)', type: 'number', default: 65, hint: 'NIFTY=65, BANKNIFTY=30' },
+  { key: 'ema_period', label: 'EMA Period', type: 'number', default: 10 },
+  { key: 'sell_delta', label: 'Sell Delta', type: 'number', step: '0.01', default: 0.20 },
+  { key: 'buy_delta', label: 'Buy Delta', type: 'number', step: '0.01', default: 0.10 },
+  { key: 'tp_pct', label: 'Take Profit (% of Premium)', type: 'number', default: 90 },
+  { key: 'sl_pct', label: 'Stop Loss (% of Premium)', type: 'number', default: 150 },
+  { key: 'trading_days', label: 'Trading Days', type: 'text', default: '0,1,2,3,4', hint: '0=Mon,1=Tue,2=Wed,3=Thu,4=Fri' },
+  { key: 'entry_hour', label: 'Entry Hour (24h IST)', type: 'number', default: 10 },
+  { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 25 },
   { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 15 },
   { key: 'exit_minute', label: 'Exit Minute', type: 'number', default: 15 },
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 15 },
@@ -661,6 +683,62 @@ export default function Strategy() {
                         <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{t.pnl}</td>
                         <td style={{ padding: '4px 8px' }}>{t.adjustments || 0}</td>
                         <td style={{ padding: '4px 8px' }}>{t.exit_reason === 'target_profit' ? '🎯 TP' : t.exit_reason === 'stop_loss' ? '🛑 SL' : t.exit_reason === 'max_adjustments' ? '⚙️ Max Adj' : '⏰ EOD'}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )} />
+      )}
+      {activeTab === 'nse_ema_spread' && (
+        <StrategyTemplate title="NSE EMA Credit Spread" icon="📈🇮🇳" type="Options" description="Daily EMA10-based credit spread on NSE indices. Bearish = bear call, bullish = bull put. 90% TP / 150% SL." profiles={profiles}
+          configFields={NSE_EMA_SPREAD_FIELDS}
+          onStart={async (config) => {
+            const c = { ...config };
+            if (typeof c.trading_days === 'string') c.trading_days = c.trading_days.split(',').map(d => parseInt(d.trim()));
+            if (c.paper_trade === 'true' || c.paper_trade === true) c.paper_trade = true;
+            else c.paper_trade = false;
+            const { data } = await api.post('/nse-ema/start', c);
+            return data;
+          }}
+          onStop={async (sid) => { await api.post('/nse-ema/stop', { sid }); }}
+          statusEndpoint="/nse-ema/status" streamEndpoint="/nse-ema/stream"
+          renderStatus={(s) => (
+            <>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Total P&L</div><div className="value" style={{ color: (s.total_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{(s.total_pnl||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Cumulative P&L</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{(s.cumulative_pnl||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Days Traded</div><div className="value">{s.days_traded || 0}</div></div>
+                <div className="stat-card"><div className="label">Direction</div><div className="value">{s.direction || '—'}</div></div>
+              </div>
+              {s.legs && s.legs.length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Spread Legs</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Side', 'Type', 'Strike', 'Entry', 'Mark', 'P&L'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{s.legs.map((l, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}><span className={`badge ${l.side === 'sell' ? 'badge-red' : 'badge-green'}`}>{l.side.toUpperCase()}</span></td>
+                        <td style={{ padding: '4px 8px' }}>{(l.type||'').toUpperCase()}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>{l.strike}</td>
+                        <td style={{ padding: '4px 8px' }}>₹{(l.entry_price||0).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>₹{(l.current_mark||0).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: (l.current_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{(l.current_pnl||0).toFixed(2)}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+              {(s.trade_log || []).length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Trade Log</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Date', 'Direction', 'P&L', 'Exit'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{(s.trade_log || []).slice(-10).reverse().map((t, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}>{t.date}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.direction === 'bear_call' ? '🐻 Bear Call' : '🐂 Bull Put'}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{t.pnl}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.exit_reason === 'target' ? '🎯 TP' : t.exit_reason === 'stoploss' ? '🛑 SL' : '⏰ EOD'}</td>
                       </tr>))}</tbody>
                   </table>
                 </div>
