@@ -81,6 +81,10 @@ const STRATEGIES = [
     desc: 'Paper-trade short strangle on NIFTY/BANKNIFTY. Sell OTM call + put nearest ₹target premium, configurable SL & trading days.',
     features: ['NSE Index Options', 'Configurable Days', 'Paper Trading', 'Per-Leg SL + Re-entry'],
     rec: '⏱ Market Hours 9:15–3:30 · NIFTY, BANKNIFTY, FINNIFTY' },
+  { key: 'nse_delta_neutral', label: 'NSE Delta Neutral', icon: '🎯🇮🇳', type: 'Options',
+    desc: 'Delta-neutral short strangle on NSE indices. Sells at matching deltas, adjusts when premium spikes (close opposite, re-enter). TP/SL as % of premium.',
+    features: ['Delta-Based Entry', 'Auto Rebalance', 'TP/SL % Premium', 'Market Hours Aware'],
+    rec: '⏱ Market Hours 9:15–3:30 · NIFTY, BANKNIFTY' },
   { key: 'pivot_supertrend', label: 'Pivot + SuperTrend', icon: '📡', type: 'Options',
     desc: '0DTE directional option selling: SuperTrend(7,3) + Daily Pivot R1/S1. Sell ATM put on breakout above R1, sell ATM call below S1. Exit on ST flip.',
     features: ['0DTE ATM Selling', 'SuperTrend Exit', 'Pivot Filter', 'Max 3 Trades/Day'],
@@ -198,6 +202,25 @@ const NSE_STRANGLE_FIELDS = [
   { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 15 },
   { key: 'exit_minute', label: 'Exit Minute', type: 'number', default: 15 },
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 15 },
+];
+
+const NSE_DN_FIELDS = [
+  { key: 'symbol', label: 'Symbol', type: 'select', options: [{value:'NIFTY',label:'NIFTY'},{value:'BANKNIFTY',label:'BANKNIFTY'},{value:'FINNIFTY',label:'FINNIFTY'},{value:'MIDCPNIFTY',label:'MIDCPNIFTY'}], default: 'NIFTY' },
+  { key: 'lots', label: 'Number of Lots', type: 'number', default: 1 },
+  { key: 'lot_size', label: 'Lot Size (override)', type: 'number', default: 65, hint: 'NIFTY=65, BANKNIFTY=30' },
+  { key: 'target_delta', label: 'Target Delta', type: 'number', step: '0.01', default: 0.20 },
+  { key: 'delta_tolerance', label: 'Delta Tolerance', type: 'number', step: '0.01', default: 0.05 },
+  { key: 'premium_threshold', label: 'Adjustment Threshold (%)', type: 'number', default: 40, hint: 'Trigger adjustment when premium rises this %' },
+  { key: 'tp_percent', label: 'Take Profit (% of Premium)', type: 'number', default: 70 },
+  { key: 'sl_percent', label: 'Stop Loss (% of Premium)', type: 'number', default: 70 },
+  { key: 'max_adjustments', label: 'Max Adjustments', type: 'number', default: 5 },
+  { key: 'trading_days', label: 'Trading Days', type: 'text', default: '0,1,2,3,4', hint: '0=Mon,1=Tue,2=Wed,3=Thu,4=Fri' },
+  { key: 'entry_hour', label: 'Entry Hour (24h IST)', type: 'number', default: 9 },
+  { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 20 },
+  { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 15 },
+  { key: 'exit_minute', label: 'Exit Minute', type: 'number', default: 15 },
+  { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 15 },
+  { key: 'paper_trade', label: 'Paper Trade', type: 'select', options: [{value:true,label:'Yes (Paper)'},{value:false,label:'No (Live)'}], default: true },
 ];
 
 const PIVOT_ST_FIELDS = [
@@ -575,6 +598,69 @@ export default function Strategy() {
                         <td style={{ padding: '4px 8px' }}>{t.date}</td>
                         <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{t.pnl}</td>
                         <td style={{ padding: '4px 8px' }}>{t.exit_reason === 'both_sl' ? '🛑 Both SL' : t.exit_reason?.includes('sl') ? '⚠️ SL Hit' : '⏰ EOD Exit'}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )} />
+      )}
+      {activeTab === 'nse_delta_neutral' && (
+        <StrategyTemplate title="NSE Delta Neutral" icon="🎯🇮🇳" type="Options" description="Delta-neutral short strangle on NSE indices. Sells at matching deltas, adjusts when premium spikes. TP/SL as % of premium collected." profiles={profiles}
+          configFields={NSE_DN_FIELDS}
+          onStart={async (config) => {
+            const c = { ...config };
+            if (typeof c.trading_days === 'string') c.trading_days = c.trading_days.split(',').map(d => parseInt(d.trim()));
+            if (c.paper_trade === 'true' || c.paper_trade === true) c.paper_trade = true;
+            else c.paper_trade = false;
+            const { data } = await api.post('/nse-dn/start', c);
+            return data;
+          }}
+          onStop={async (sid) => { await api.post('/nse-dn/stop', { sid }); }}
+          statusEndpoint="/nse-dn/status" streamEndpoint="/nse-dn/stream"
+          renderStatus={(s) => (
+            <>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Total P&L</div><div className="value" style={{ color: (s.total_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{(s.total_pnl||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Realized P&L</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{(s.cumulative_pnl||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Adjustments</div><div className="value">{s.adjustment_count || 0} / {s.max_adjustments || 3}</div></div>
+                <div className="stat-card"><div className="label">Days Traded</div><div className="value">{s.days_traded || 0}</div></div>
+              </div>
+              {s.premium_collected > 0 && (
+                <div className="top-stats" style={{ gridTemplateColumns: 'repeat(3,1fr)', marginBottom: 12 }}>
+                  <div className="stat-card"><div className="label">Premium Collected</div><div className="value">₹{(s.premium_collected||0).toFixed(2)}</div></div>
+                  <div className="stat-card"><div className="label">Target Profit</div><div className="value" style={{ color: 'var(--green)' }}>₹{(s.target_pnl||0).toFixed(2)}</div></div>
+                  <div className="stat-card"><div className="label">Stop Loss</div><div className="value" style={{ color: 'var(--red)' }}>₹{(s.stop_loss||0).toFixed(2)}</div></div>
+                </div>
+              )}
+              {s.legs && s.legs.length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Active Positions</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Type', 'Strike', 'Delta', 'Entry', 'Mark', 'P&L'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{s.legs.map((l, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}><span className={`badge ${l.type === 'call' ? 'badge-green' : 'badge-red'}`}>{l.type.toUpperCase()}</span></td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>{l.strike}</td>
+                        <td style={{ padding: '4px 8px' }}>{(l.delta||0).toFixed(4)}</td>
+                        <td style={{ padding: '4px 8px' }}>₹{(l.entry_price||0).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>₹{(l.current_mark||0).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: (l.current_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{(l.current_pnl||0).toFixed(2)}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+              {(s.trade_log || []).length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Trade Log</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Date', 'P&L', 'Adj', 'Exit Reason'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{(s.trade_log || []).slice(-10).reverse().map((t, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}>{t.date}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{t.pnl}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.adjustments || 0}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.exit_reason === 'target_profit' ? '🎯 TP' : t.exit_reason === 'stop_loss' ? '🛑 SL' : t.exit_reason === 'max_adjustments' ? '⚙️ Max Adj' : '⏰ EOD'}</td>
                       </tr>))}</tbody>
                   </table>
                 </div>

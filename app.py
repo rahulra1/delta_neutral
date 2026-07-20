@@ -54,6 +54,7 @@ hybrid_strategies = {}
 weekly_dn_strategies = {}
 ema_spread_strategies = {}
 pivot_st_strategies = {}
+nse_dn_strategies = {}
 _futures_traders = {}
 
 # Resume strategies from DB on startup
@@ -144,14 +145,15 @@ def _resume_db_strategies():
             # Daily-recurring strategies don't need legs to resume — they open trades on schedule
             if source not in ('EMA Spread', 'OI Strategy', 'Daily Strangle', 'Weekly DN',
                               'Portfolio Strangle', 'Hybrid Switch', 'Pivot SuperTrend',
-                              'NSE Strangle'):
+                              'NSE Strangle', 'NSE Delta Neutral'):
                 continue
 
         # Skip strategies where all legs have no product_id (invalid/empty data)
         valid_legs = [l for l in legs if l.get('product_id')]
         if not valid_legs and source not in ('EMA Spread', 'OI Strategy', 'Daily Strangle',
                                               'Weekly DN', 'Portfolio Strangle', 'Hybrid Switch',
-                                              'Pivot SuperTrend', 'NSE Strangle'):
+                                              'Pivot SuperTrend', 'NSE Strangle',
+                                              'NSE Delta Neutral'):
             logger.warning(f"[resume] Skipping {sid} — no valid legs (missing product_id)")
             all_tracked[sid]['status'] = 'closed'
             try:
@@ -845,11 +847,18 @@ def _resume_db_strategies():
         elif source == 'NSE Strangle':
             entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
                      'log_history': [], 'running': False, 'params': details,
-                     'user_id': user_id}
+                     'user_id': user_id, 'profile_id': profile_id}
             nse_strangle_strategies[sid] = entry
 
             def _resume_nse_strangle(sid=sid, entry=entry, details=details, user_id=user_id, legs=legs):
-                if not _setup_strategy_thread(entry):
+                for attempt in range(5):
+                    if _setup_strategy_thread(entry):
+                        break
+                    logger.warning(f"[resume] NSE Strangle {sid} — setup failed (attempt {attempt+1}/5), retrying in 30s")
+                    entry['running'] = False
+                    time.sleep(30)
+                else:
+                    logger.error(f"[resume] NSE Strangle {sid} — setup failed after 5 attempts")
                     return
                 try:
                     from strategy.nse_daily_strangle import NseDailyStrangle
@@ -879,6 +888,15 @@ def _resume_db_strategies():
                     s.initialize()
                     if s.trade_log:
                         print(f"[NSE Strangle] Restored {len(s.trade_log)} days | Cum PnL: ₹{s.cumulative_pnl:+.2f}")
+                    # Resume monitoring for open (non-stopped) legs
+                    if legs:
+                        open_legs = [l for l in legs if not l.get('stopped', False)]
+                        if open_legs:
+                            import threading as _thr
+                            day_num = s.total_days_traded or 1
+                            _thr.Thread(target=s._monitor_day,
+                                        args=(open_legs, day_num), daemon=True).start()
+                            print(f"[NSE Strangle] Resumed monitoring {len(open_legs)} open leg(s)")
                     s.monitor()
                 except Exception as e:
                     logger.error(f"[resume] NSE Strangle {sid} error: {e}")
@@ -891,13 +909,118 @@ def _resume_db_strategies():
                     elif not strategy:
                         logger.warning(f"[resume] NSE Strangle {sid} — no strategy object")
                     else:
-                        logger.warning(f"[resume] NSE Strangle {sid} — thread exited unexpectedly")
+                        logger.warning(f"[resume] NSE Strangle {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
                     _teardown_strategy_thread(entry)
 
             t = threading.Thread(target=_resume_nse_strangle, daemon=True)
             entry['thread'] = t
             t.start()
             logger.info(f"[resume] Resumed NSE Strangle {sid}")
+
+        # 10a2. Resume NSE Delta Neutral
+        elif source == 'NSE Delta Neutral':
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
+                     'log_history': [], 'running': False, 'params': details,
+                     'user_id': user_id, 'profile_id': profile_id}
+            nse_dn_strategies[sid] = entry
+
+            def _resume_nse_dn(sid=sid, entry=entry, details=details, user_id=user_id, legs=legs):
+                for attempt in range(5):
+                    if _setup_strategy_thread(entry):
+                        break
+                    logger.warning(f"[resume] NSE DN {sid} — setup failed (attempt {attempt+1}/5), retrying in 30s")
+                    entry['running'] = False
+                    time.sleep(30)
+                else:
+                    logger.error(f"[resume] NSE DN {sid} — setup failed after 5 attempts")
+                    return
+                try:
+                    from strategy.nse_delta_neutral import NseDeltaNeutral
+                    trading_days = details.get('trading_days', [0, 1, 2, 3, 4])
+                    s = NseDeltaNeutral(
+                        symbol=details.get('symbol', 'NIFTY'),
+                        lots=int(details.get('lots', 1)),
+                        target_delta=float(details.get('target_delta', 0.20)),
+                        delta_tolerance=float(details.get('delta_tolerance', 0.05)),
+                        premium_threshold=float(details.get('premium_threshold', 40)) / 100,
+                        tp_percent=float(details.get('tp_percent', 70)) / 100,
+                        sl_percent=float(details.get('sl_percent', 70)) / 100,
+                        max_adjustments=int(details.get('max_adjustments', 5)),
+                        monitor_interval=int(details.get('monitoring_interval', 15)),
+                        entry_hour=int(details.get('entry_hour', 9)),
+                        entry_minute=int(details.get('entry_minute', 20)),
+                        exit_hour=int(details.get('exit_hour', 15)),
+                        exit_minute=int(details.get('exit_minute', 15)),
+                        trading_days=trading_days,
+                        lot_size=int(details['lot_size']) if details.get('lot_size') else None,
+                        paper_trade=details.get('paper_trade', True),
+                    )
+                    s._log_queue = entry['log_queue']
+                    s._log_history = entry['log_history']
+                    s._sid = sid
+                    entry['strategy'] = s
+                    entry['running'] = True
+                    s.cumulative_realized_pnl = float(details.get('cumulative_realized_pnl', 0))
+                    s.total_days_traded = int(details.get('total_days_traded', 0))
+                    s.adjustment_count = int(details.get('adjustment_count', 0))
+                    s.total_premium_collected = float(details.get('total_premium_collected', 0))
+                    s.target_pnl = float(details.get('target_pnl', 0))
+                    s.stop_loss = float(details.get('stop_loss', 0))
+                    s._expiry = details.get('expiry')
+                    s.trade_log = details.get('trade_log', [])
+                    s.adjustment_history = details.get('adjustment_history', [])
+                    # Restore positions from legs
+                    if legs:
+                        call_leg = next((l for l in legs if l.get('type') == 'call'), None)
+                        put_leg = next((l for l in legs if l.get('type') == 'put'), None)
+                        if call_leg:
+                            s.call_position = {
+                                'symbol': call_leg.get('symbol', ''),
+                                'trading_symbol': call_leg.get('trading_symbol', ''),
+                                'strike': call_leg.get('strike', ''),
+                                'mark_price': call_leg.get('entry_price', 0),
+                                'delta': call_leg.get('delta', 0),
+                            }
+                            s.call_entry_price = float(call_leg.get('entry_price', 0))
+                            s._call_current = float(call_leg.get('current_mark', 0))
+                        if put_leg:
+                            s.put_position = {
+                                'symbol': put_leg.get('symbol', ''),
+                                'trading_symbol': put_leg.get('trading_symbol', ''),
+                                'strike': put_leg.get('strike', ''),
+                                'mark_price': put_leg.get('entry_price', 0),
+                                'delta': put_leg.get('delta', 0),
+                            }
+                            s.put_entry_price = float(put_leg.get('entry_price', 0))
+                            s._put_current = float(put_leg.get('current_mark', 0))
+                    s.initialize()
+                    if s.trade_log:
+                        print(f"[NSE DN] Restored {len(s.trade_log)} days | Cum PnL: ₹{s.cumulative_realized_pnl:+.2f}")
+                    # If positions are open, resume intraday monitoring
+                    if s.call_position or s.put_position:
+                        import threading as _thr
+                        tag = f"[NSE DN D{s.total_days_traded}]"
+                        _thr.Thread(target=s._monitor_intraday, args=(tag,), daemon=True).start()
+                        print(f"[NSE DN] Resumed intraday monitoring with open positions")
+                    s.monitor()
+                except Exception as e:
+                    logger.error(f"[resume] NSE DN {sid} error: {e}")
+                finally:
+                    strategy = entry.get('strategy')
+                    if strategy and not strategy._running:
+                        pnl = round(strategy.cumulative_realized_pnl, 2)
+                        record_end(sid, pnl, getattr(strategy, 'total_days_traded', 0))
+                        update_tracked(sid, status='completed', pnl=pnl, exit_reason='intentional_close')
+                    elif not strategy:
+                        logger.warning(f"[resume] NSE DN {sid} — no strategy object")
+                    else:
+                        logger.warning(f"[resume] NSE DN {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
+                    _teardown_strategy_thread(entry)
+
+            t = threading.Thread(target=_resume_nse_dn, daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed NSE Delta Neutral {sid}")
 
         # 10b. Resume Pivot SuperTrend
         elif source == 'Pivot SuperTrend':
@@ -1395,6 +1518,71 @@ def _save_dn_legs(sid, s):
             pass
 
 
+def _save_nse_dn_legs(sid, s):
+    """Persist NSE Delta Neutral strategy state to DB — called periodically and on adjustments."""
+    legs = []
+    if s.call_position:
+        legs.append({
+            'symbol': s.call_position.get('symbol', ''),
+            'trading_symbol': s.call_position.get('trading_symbol', ''),
+            'strike': s.call_position.get('strike', ''),
+            'type': 'call',
+            'side': 'sell',
+            'size': s.quantity,
+            'entry_price': round(s.call_entry_price, 2),
+            'delta': s.call_position.get('delta', 0),
+            'current_mark': round(s._call_current, 2),
+            'expiry': s._expiry,
+        })
+    if s.put_position:
+        legs.append({
+            'symbol': s.put_position.get('symbol', ''),
+            'trading_symbol': s.put_position.get('trading_symbol', ''),
+            'strike': s.put_position.get('strike', ''),
+            'type': 'put',
+            'side': 'sell',
+            'size': s.quantity,
+            'entry_price': round(s.put_entry_price, 2),
+            'delta': s.put_position.get('delta', 0),
+            'current_mark': round(s._put_current, 2),
+            'expiry': s._expiry,
+        })
+    details = {
+        'symbol': s.symbol,
+        'lots': s.lots,
+        'lot_size': s.lot_size,
+        'quantity': s.quantity,
+        'target_delta': s.target_delta,
+        'delta_tolerance': s.delta_tolerance,
+        'premium_threshold': int(s.premium_threshold * 100),
+        'tp_percent': int(s.tp_percent * 100),
+        'sl_percent': int(s.sl_percent * 100),
+        'max_adjustments': s.max_adjustments,
+        'monitoring_interval': s.monitor_interval,
+        'entry_hour': s.entry_hour,
+        'entry_minute': s.entry_minute,
+        'exit_hour': s.exit_hour,
+        'exit_minute': s.exit_minute,
+        'trading_days': s.trading_days,
+        'paper_trade': s.paper_trade,
+        'cumulative_realized_pnl': round(s.cumulative_realized_pnl, 2),
+        'total_days_traded': s.total_days_traded,
+        'adjustment_count': s.adjustment_count,
+        'total_premium_collected': round(s.total_premium_collected, 2),
+        'target_pnl': round(s.target_pnl, 2),
+        'stop_loss': round(s.stop_loss, 2),
+        'expiry': s._expiry,
+        'trade_log': s.trade_log[-50:],
+        'adjustment_history': s.adjustment_history[-20:],
+    }
+    try:
+        update_strategy_db(sid, legs=legs, details=details,
+                           pnl=round(s.pnl, 2),
+                           adjustment_count=s.adjustment_count)
+    except Exception:
+        pass
+
+
 # Install once at import time — all threads share this, but each routes to its own queue
 import sys
 sys.stdout = LogCapture(sys.stdout)
@@ -1684,6 +1872,24 @@ def dashboard_live_pnl():
                         total_live_pnl += pnl
                         active_pnls.append({'sid': sid, 'name': 'Futures Signal', 'pnl': pnl})
 
+                    for sid, e in nse_strangle_strategies.items():
+                        if e.get('user_id') != uid or not e.get('running'):
+                            continue
+                        s = e.get('strategy')
+                        if s:
+                            pnl = round(s.pnl, 2)
+                            total_live_pnl += pnl
+                            active_pnls.append({'sid': sid, 'name': 'NSE Strangle', 'pnl': pnl})
+
+                    for sid, e in nse_dn_strategies.items():
+                        if e.get('user_id') != uid or not e.get('running'):
+                            continue
+                        s = e.get('strategy')
+                        if s:
+                            pnl = round(s.pnl, 2)
+                            total_live_pnl += pnl
+                            active_pnls.append({'sid': sid, 'name': 'NSE Delta Neutral', 'pnl': pnl})
+
                 for rs in registry.get_running(uid):
                     pnl = round(rs.current_pnl, 4)
                     total_live_pnl += pnl
@@ -1827,6 +2033,16 @@ def api_dashboard():
                     s = hybrid_strategies[sid]['strategy']
                     t['pnl'] = round(s.pnl, 2)
                     t['cumulative_pnl'] = round(s.cumulative_pnl, 2)
+                # Check NSE Strangle
+                elif sid in nse_strangle_strategies and nse_strangle_strategies[sid].get('strategy'):
+                    s = nse_strangle_strategies[sid]['strategy']
+                    t['pnl'] = round(s.pnl, 2)
+                    t['cumulative_pnl'] = round(s.cumulative_pnl, 2)
+                # Check NSE Delta Neutral
+                elif sid in nse_dn_strategies and nse_dn_strategies[sid].get('strategy'):
+                    s = nse_dn_strategies[sid]['strategy']
+                    t['pnl'] = round(s.pnl, 2)
+                    t['cumulative_pnl'] = round(s.cumulative_realized_pnl, 2)
                 # Check unified tracker
                 rs = registry.get(sid)
                 if rs and rs.running:
@@ -1842,6 +2058,7 @@ def api_dashboard():
         running_count += sum(1 for sid, e in ema_spread_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in strangle_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in nse_strangle_strategies.items() if e.get('user_id') == uid and e.get('running'))
+        running_count += sum(1 for sid, e in nse_dn_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in pivot_st_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in portfolio_strangle_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in hybrid_strategies.items() if e.get('user_id') == uid and e.get('running'))
@@ -2017,6 +2234,14 @@ def api_all_strategies():
                              'stopped': l.get('stopped', False)}
                             for l in s.legs
                         ]
+                elif sid in nse_dn_strategies and nse_dn_strategies[sid].get('strategy'):
+                    s = nse_dn_strategies[sid]['strategy']
+                    entry['pnl'] = round(s.pnl, 2)
+                    if not s._running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.pnl, 2))
+                        continue
+                    entry['legs'] = s.legs
                 elif sid in pivot_st_strategies and pivot_st_strategies[sid].get('strategy'):
                     s = pivot_st_strategies[sid]['strategy']
                     entry['pnl'] = round(s.pnl, 4)
@@ -2579,6 +2804,24 @@ def api_strategy_detail(sid):
                     'stopped': leg.get('stopped', False)})
             if hasattr(strat, '_pnl_history') and strat._pnl_history:
                 pnl_history = list(strat._pnl_history[-500:])
+        elif sid in nse_dn_strategies and nse_dn_strategies[sid].get('strategy'):
+            ndn = nse_dn_strategies[sid]
+            strat = ndn['strategy']
+            entry['pnl'] = round(strat.pnl, 2)
+            entry['cumulative_pnl'] = round(strat.cumulative_realized_pnl, 2)
+            entry['running'] = ndn.get('running', False)
+            logs = ndn.get('log_history', [])
+            entry['trade_log'] = strat.trade_log[-20:]
+            entry['days_traded'] = strat.total_days_traded
+            entry['adjustment_count'] = strat.adjustment_count
+            entry['max_adjustments'] = strat.max_adjustments
+            entry['premium_collected'] = round(strat.total_premium_collected, 2)
+            entry['target_pnl'] = round(strat.target_pnl, 2)
+            entry['stop_loss'] = round(strat.stop_loss, 2)
+            for leg in strat.legs:
+                live_legs.append(leg)
+            if hasattr(strat, '_pnl_history') and strat._pnl_history:
+                pnl_history = list(strat._pnl_history[-500:])
         elif sid in pivot_st_strategies and pivot_st_strategies[sid].get('strategy'):
             pst = pivot_st_strategies[sid]
             strat = pst['strategy']
@@ -3024,6 +3267,10 @@ def api_pnl_series():
                 t['pnl'] = round(hybrid_strategies[sid]['strategy'].pnl, 2)
             elif sid in iv_crush_strategies and iv_crush_strategies[sid].get('strategy'):
                 t['pnl'] = round(iv_crush_strategies[sid]['strategy'].total_pnl, 4)
+            elif sid in nse_strangle_strategies and nse_strangle_strategies[sid].get('strategy'):
+                t['pnl'] = round(nse_strangle_strategies[sid]['strategy'].pnl, 2)
+            elif sid in nse_dn_strategies and nse_dn_strategies[sid].get('strategy'):
+                t['pnl'] = round(nse_dn_strategies[sid]['strategy'].pnl, 2)
 
     # Apply date filters
     if since:
@@ -3795,7 +4042,9 @@ def nse_strangle_start():
     entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
              'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     nse_strangle_strategies[sid] = entry
-    track_strategy(sid, 'NSE Strangle', f"{symbol} Paper Strangle", current_user_id(), details=params)
+    # Include profile_id in details so it's persisted and available on resume
+    save_details = {**params, 'profile_id': profile_id}
+    track_strategy(sid, 'NSE Strangle', f"{symbol} Paper Strangle", current_user_id(), details=save_details)
     entry['thread'] = threading.Thread(target=run_nse_strangle_strategy, args=(sid, params), daemon=True)
     entry['thread'].start()
     return jsonify(status="started", sid=sid)
@@ -3869,6 +4118,172 @@ def nse_strangle_status(sid):
         days_traded=s.total_days_traded,
         trade_log=s.trade_log[-10:],
         legs=enriched_legs,
+        symbol=s.symbol,
+        lot_size=s.lot_size,
+        quantity=s.quantity,
+    )
+
+
+# ── NSE Delta Neutral Routes ──
+
+
+def run_nse_dn_strategy(sid, params):
+    entry = nse_dn_strategies[sid]
+    uid = entry['user_id']
+    if not _setup_strategy_thread(entry):
+        entry['log_queue'].put("__STOPPED__")
+        return
+
+    try:
+        from strategy.nse_delta_neutral import NseDeltaNeutral
+        trading_days = params.get('trading_days', [0, 1, 2, 3, 4])
+        if isinstance(trading_days, str):
+            import json as _j
+            trading_days = _j.loads(trading_days)
+        s = NseDeltaNeutral(
+            symbol=params.get('symbol', 'NIFTY'),
+            lots=int(params.get('lots', 1)),
+            target_delta=float(params.get('target_delta', 0.20)),
+            delta_tolerance=float(params.get('delta_tolerance', 0.05)),
+            premium_threshold=float(params.get('premium_threshold', 40)) / 100,
+            tp_percent=float(params.get('tp_percent', 70)) / 100,
+            sl_percent=float(params.get('sl_percent', 70)) / 100,
+            max_adjustments=int(params.get('max_adjustments', 5)),
+            monitor_interval=int(params.get('monitoring_interval', 15)),
+            entry_hour=int(params.get('entry_hour', 9)),
+            entry_minute=int(params.get('entry_minute', 20)),
+            exit_hour=int(params.get('exit_hour', 15)),
+            exit_minute=int(params.get('exit_minute', 15)),
+            trading_days=trading_days,
+            lot_size=int(params['lot_size']) if params.get('lot_size') else None,
+            paper_trade=params.get('paper_trade', True),
+        )
+        s._log_queue = entry['log_queue']
+        s._log_history = entry['log_history']
+        s._sid = sid
+        entry['strategy'] = s
+        entry['running'] = True
+        record_start(sid, params, user_id=uid)
+        if not s.initialize():
+            entry['log_queue'].put("✗ Init failed")
+            entry['running'] = False
+            entry['log_queue'].put("__STOPPED__")
+            return
+
+        # Periodic DB persistence: hook time.sleep to save state every 6 ticks
+        import strategy.nse_delta_neutral as _nse_dn_mod
+        _orig_sleep = _nse_dn_mod.time.sleep
+        _tick = [0]
+        def _snap_sleep(secs):
+            _orig_sleep(secs)
+            _tick[0] += 1
+            if _tick[0] % 6 == 0:
+                try:
+                    _save_nse_dn_legs(sid, s)
+                    save_pnl_snapshot(uid, sid, round(s.pnl, 2))
+                except Exception:
+                    pass
+        _nse_dn_mod.time.sleep = _snap_sleep
+        try:
+            s.monitor()
+        finally:
+            _nse_dn_mod.time.sleep = _orig_sleep
+    except Exception as e:
+        entry['log_queue'].put(f"❌ Error: {e}")
+    finally:
+        strategy = entry.get('strategy')
+        if strategy and not strategy._running:
+            pnl = round(strategy.cumulative_realized_pnl, 2)
+            record_end(sid, pnl, strategy.total_days_traded)
+            update_tracked(sid, status='completed', pnl=pnl,
+                           exit_reason='intentional_close')
+        elif not strategy:
+            logger.warning(f"[deploy] NSE DN {sid} — thread exited without strategy object")
+        else:
+            logger.warning(f"[deploy] NSE DN {sid} — thread exited unexpectedly, keeping status 'running'")
+        _teardown_strategy_thread(entry)
+
+
+@app.route('/api/nse-dn/start', methods=['POST'])
+@login_required
+def nse_dn_start():
+    params = request.json
+    profile_id = params.pop('profile_id', None)
+    sid = str(uuid.uuid4())[:8]
+    symbol = params.get('symbol', 'NIFTY')
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
+             'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    nse_dn_strategies[sid] = entry
+    save_details = {**params, 'profile_id': profile_id}
+    track_strategy(sid, 'NSE Delta Neutral', f"{symbol} Delta Neutral", current_user_id(), details=save_details)
+    entry['thread'] = threading.Thread(target=run_nse_dn_strategy, args=(sid, params), daemon=True)
+    entry['thread'].start()
+    return jsonify(status="started", sid=sid)
+
+
+@app.route('/api/nse-dn/stop', methods=['POST'])
+@login_required
+def nse_dn_stop():
+    sid = request.json.get('sid')
+    e = nse_dn_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error="Not found"), 404
+    if e.get('strategy'):
+        try:
+            e['strategy']._running = False
+            e['strategy'].close_all()
+        except Exception as ex:
+            logger.error(f"[nse_dn_stop] {sid} error: {ex}")
+    return jsonify(status="stopping")
+
+
+@app.route('/api/nse-dn/stream/<sid>')
+@login_required
+def nse_dn_stream(sid):
+    e = nse_dn_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
+    q = e['log_queue']
+    history = e.get('log_history', [])
+    def generate():
+        for msg in list(history):
+            yield f"data: {msg}\n\n"
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                if msg == "__STOPPED__":
+                    yield f"event: stopped\ndata: done\n\n"
+                    break
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield f": heartbeat\n\n"
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/nse-dn/status/<sid>')
+@login_required
+def nse_dn_status(sid):
+    e = nse_dn_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(running=False)
+    if not e['running']:
+        return jsonify(running=False)
+    s = e.get('strategy')
+    if not s:
+        return jsonify(running=True, total_pnl=0, cumulative_pnl=0, days_traded=0, trade_log=[], legs=[])
+    return jsonify(
+        running=True,
+        total_pnl=round(s.pnl, 2),
+        cumulative_pnl=round(s.cumulative_realized_pnl, 2),
+        days_traded=s.total_days_traded,
+        adjustment_count=s.adjustment_count,
+        max_adjustments=s.max_adjustments,
+        target_pnl=round(s.target_pnl, 2),
+        stop_loss=round(s.stop_loss, 2),
+        premium_collected=round(s.total_premium_collected, 2),
+        trade_log=s.trade_log[-10:],
+        legs=s.legs,
         symbol=s.symbol,
         lot_size=s.lot_size,
         quantity=s.quantity,
