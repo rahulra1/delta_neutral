@@ -82,7 +82,7 @@ const STRATEGIES = [
     features: ['NSE Index Options', 'Configurable Days', 'Paper Trading', 'Per-Leg SL + Re-entry'],
     rec: '⏱ Market Hours 9:15–3:30 · NIFTY, BANKNIFTY, FINNIFTY' },
   { key: 'nse_delta_neutral', label: 'NSE Delta Neutral', icon: '🎯🇮🇳', type: 'Options',
-    desc: 'Delta-neutral short strangle on NSE indices. Sells at matching deltas, adjusts when premium spikes (close opposite, re-enter). TP/SL as % of premium.',
+    desc: 'Weekly positional short strangle on NSE indices. Enters Wednesday 9:20, exits on TP/SL/max adj or Tuesday 15:15. NRML orders.',
     features: ['Delta-Based Entry', 'Auto Rebalance', 'TP/SL % Premium', 'Market Hours Aware'],
     rec: '⏱ Market Hours 9:15–3:30 · NIFTY, BANKNIFTY' },
   { key: 'nse_ema_spread', label: 'NSE EMA Spread', icon: '📈🇮🇳', type: 'Options',
@@ -218,11 +218,6 @@ const NSE_DN_FIELDS = [
   { key: 'tp_percent', label: 'Take Profit (% of Premium)', type: 'number', default: 70 },
   { key: 'sl_percent', label: 'Stop Loss (% of Premium)', type: 'number', default: 70 },
   { key: 'max_adjustments', label: 'Max Adjustments', type: 'number', default: 5 },
-  { key: 'trading_days', label: 'Trading Days', type: 'text', default: '0,1,2,3,4', hint: '0=Mon,1=Tue,2=Wed,3=Thu,4=Fri' },
-  { key: 'entry_hour', label: 'Entry Hour (24h IST)', type: 'number', default: 9 },
-  { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 20 },
-  { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 15 },
-  { key: 'exit_minute', label: 'Exit Minute', type: 'number', default: 15 },
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 15 },
   { key: 'paper_trade', label: 'Paper Trade', type: 'select', options: [{value:true,label:'Yes (Paper)'},{value:false,label:'No (Live)'}], default: true },
 ];
@@ -646,7 +641,7 @@ export default function Strategy() {
                 <div className="stat-card"><div className="label">Total P&L</div><div className="value" style={{ color: (s.total_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{(s.total_pnl||0).toFixed(2)}</div></div>
                 <div className="stat-card"><div className="label">Realized P&L</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{(s.cumulative_pnl||0).toFixed(2)}</div></div>
                 <div className="stat-card"><div className="label">Adjustments</div><div className="value">{s.adjustment_count || 0} / {s.max_adjustments || 3}</div></div>
-                <div className="stat-card"><div className="label">Days Traded</div><div className="value">{s.days_traded || 0}</div></div>
+                <div className="stat-card"><div className="label">Weeks Traded</div><div className="value">{s.weeks_traded || 0}</div></div>
               </div>
               {s.premium_collected > 0 && (
                 <div className="top-stats" style={{ gridTemplateColumns: 'repeat(3,1fr)', marginBottom: 12 }}>

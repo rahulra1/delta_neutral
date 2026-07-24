@@ -1,13 +1,21 @@
-"""NSE Delta Neutral Short Strangle — Indian market.
+"""NSE Delta Neutral Short Strangle — Indian market (Weekly Positional).
 
 Sells a call and put at matching deltas (short strangle) on NSE index options.
-Monitors in real-time, rebalances when premiums deviate, and respects
-Indian market hours (9:15 AM – 3:30 PM IST, Mon–Fri).
+Enters every Wednesday at 9:20 AM IST and holds the position until:
+- Take Profit (TP) hit, OR
+- Stop Loss (SL) hit, OR
+- Max adjustments exhausted, OR
+- Tuesday 3:15 PM IST (mandatory exit before weekly expiry)
+
+Whichever comes first triggers the exit. After exit, waits for next Wednesday
+to re-enter a fresh strangle. Monitors only during market hours (9:15–15:30 IST).
 
 Supports both paper trading (NSE/Groww LTP) and live trading (Groww orders).
 
-Key differences from crypto DeltaNeutralStrategy:
-- Market hours aware: only trades/monitors during 9:15–15:30 IST
+Key characteristics:
+- Weekly cycle: Enter Wednesday 9:20, forced exit Tuesday 15:15
+- Positional: positions held overnight (NRML orders)
+- Market hours aware: monitors only during 9:15–15:30 IST, Mon–Fri
 - Uses Groww API or NSE scraper for option chain + greeks
 - P&L in ₹ (not $)
 - Lot-size based (NSE standard lots)
@@ -47,10 +55,14 @@ DEFAULT_TP_PERCENT = 0.70  # 70% of premium collected
 DEFAULT_SL_PERCENT = 0.70  # 70% of premium collected
 DEFAULT_MAX_ADJUSTMENTS = 5
 DEFAULT_MONITOR_INTERVAL = 15  # seconds
-DEFAULT_ENTRY_HOUR = 9
-DEFAULT_ENTRY_MINUTE = 20
-DEFAULT_EXIT_HOUR = 15
-DEFAULT_EXIT_MINUTE = 15
+
+# Weekly cycle: Enter Wednesday 9:20, Exit Tuesday 15:15
+ENTRY_DAY = 2       # Wednesday (0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri)
+ENTRY_HOUR = 9
+ENTRY_MINUTE = 20
+EXIT_DAY = 1        # Tuesday
+EXIT_HOUR = 15
+EXIT_MINUTE = 15
 
 
 def _get_data_source():
@@ -76,8 +88,6 @@ class NseDeltaNeutral(BaseStrategy):
                  tp_percent=DEFAULT_TP_PERCENT, sl_percent=DEFAULT_SL_PERCENT,
                  max_adjustments=DEFAULT_MAX_ADJUSTMENTS,
                  monitor_interval=DEFAULT_MONITOR_INTERVAL,
-                 entry_hour=DEFAULT_ENTRY_HOUR, entry_minute=DEFAULT_ENTRY_MINUTE,
-                 exit_hour=DEFAULT_EXIT_HOUR, exit_minute=DEFAULT_EXIT_MINUTE,
                  trading_days=None, lot_size=None, paper_trade=True):
         # Symbol & sizing
         self.symbol = symbol
@@ -99,10 +109,6 @@ class NseDeltaNeutral(BaseStrategy):
 
         # Timing
         self.monitor_interval = monitor_interval
-        self.entry_hour = entry_hour
-        self.entry_minute = entry_minute
-        self.exit_hour = exit_hour
-        self.exit_minute = exit_minute
         self.trading_days = trading_days if trading_days is not None else [0, 1, 2, 3, 4]
 
         # Mode
@@ -121,7 +127,6 @@ class NseDeltaNeutral(BaseStrategy):
         self.adjustment_history = []
         self.cumulative_realized_pnl = 0.0
         self.trade_log = []
-        self.total_days_traded = 0
 
         self._running = False
         self._legs_lock = threading.Lock()
@@ -130,6 +135,8 @@ class NseDeltaNeutral(BaseStrategy):
         self._max_consecutive_failures = 10
         self._pnl_history = []
         self._snap_counter = 0
+        self._sid = None  # Set externally after creation for DB persistence
+        self._user_id = None
 
         # Current prices (updated each tick)
         self._call_current = 0.0
@@ -142,6 +149,20 @@ class NseDeltaNeutral(BaseStrategy):
 
         # Expiry used for current cycle
         self._expiry = None
+
+        # Base params for DB persistence (mirrors ema_credit_spread.py pattern)
+        self._base_params = {
+            'symbol': symbol, 'lots': lots,
+            'lot_size': self.lot_size, 'quantity': self.quantity,
+            'target_delta': target_delta, 'delta_tolerance': delta_tolerance,
+            'premium_threshold': int(premium_threshold * 100),
+            'tp_percent': int(tp_percent * 100),
+            'sl_percent': int(sl_percent * 100),
+            'max_adjustments': max_adjustments,
+            'monitoring_interval': monitor_interval,
+            'trading_days': self.trading_days,
+            'paper_trade': paper_trade,
+        }
 
     # ─── Initialization ─────────────────────────────────────────────────
 
@@ -156,12 +177,13 @@ class NseDeltaNeutral(BaseStrategy):
         self._broker = getattr(_thread_local, 'broker', '')
 
         days_str = ','.join(['Mon', 'Tue', 'Wed', 'Thu', 'Fri'][d] for d in self.trading_days)
-        print(f"[NSE DN] {self.symbol} Delta Neutral Strangle {'(Paper)' if self.paper_trade else '(Live)'}")
+        print(f"[NSE DN] {self.symbol} Delta Neutral Strangle — Weekly Positional {'(Paper)' if self.paper_trade else '(Live)'}")
         print(f"[NSE DN] Delta: ±{self.target_delta} | Tolerance: {self.delta_tolerance}")
         print(f"[NSE DN] Premium threshold: {self.premium_threshold*100:.0f}% | Max adj: {self.max_adjustments}")
         print(f"[NSE DN] TP: {self.tp_percent*100:.0f}% | SL: {self.sl_percent*100:.0f}% of premium")
-        print(f"[NSE DN] Entry: {self.entry_hour}:{self.entry_minute:02d} | Exit: {self.exit_hour}:{self.exit_minute:02d} IST")
-        print(f"[NSE DN] Lots: {self.lots} ({self.quantity} qty) | Days: {days_str}")
+        print(f"[NSE DN] Lots: {self.lots} ({self.quantity} qty) | Monitor days: {days_str}")
+        print(f"[NSE DN] Entry: Wednesday 9:20 | Forced exit: Tuesday 15:15")
+        print(f"[NSE DN] Exit triggers: TP / SL / Max adjustments / Tuesday 15:15")
         return True
 
     def _set_thread_credentials(self):
@@ -310,7 +332,7 @@ class NseDeltaNeutral(BaseStrategy):
                 quantity=self.quantity,
                 transaction_type='SELL',
                 order_type='MARKET',
-                product='MIS',  # intraday
+                product='NRML',  # positional (carry-forward)
             )
             if call_resp.get('error'):
                 print(f"{tag} ✗ Call order failed: {call_resp['error']}")
@@ -322,7 +344,7 @@ class NseDeltaNeutral(BaseStrategy):
                 quantity=self.quantity,
                 transaction_type='SELL',
                 order_type='MARKET',
-                product='MIS',
+                product='NRML',  # positional (carry-forward)
             )
             if put_resp.get('error'):
                 print(f"{tag} ✗ Put order failed: {put_resp['error']}")
@@ -335,50 +357,132 @@ class NseDeltaNeutral(BaseStrategy):
             print(f"{tag} ✗ Order error: {e}")
             return False
 
-    # ─── Market Hours ────────────────────────────────────────────────────
+    # ─── Market Hours & Timing ───────────────────────────────────────────
 
     def _is_market_open(self):
-        """Check if Indian market is currently open (9:15–15:30 IST, Mon–Fri)."""
+        """Check if Indian market is likely open (9:15–15:30 IST, Mon–Fri + special sessions).
+
+        Does NOT hard-reject weekends — Muhurat trading and special Saturday sessions
+        are possible. For weekend/holiday sessions we rely on the data feed: if chain
+        data comes back with fresh prices, the market is open regardless of day.
+        During monitoring, failed data fetches are already handled gracefully.
+        """
         now = datetime.now(IST)
-        if now.weekday() > 4:  # Saturday/Sunday
-            return False
         market_open = now.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0)
         market_close = now.replace(hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MINUTE, second=0)
-        return market_open <= now <= market_close
+        if not (market_open <= now <= market_close):
+            return False
+        # Weekdays are always valid; weekends allowed (Muhurat/special sessions)
+        return True
 
-    def _is_past_exit_time(self):
-        """Check if we've passed exit time for the day."""
+    def _is_exit_time(self):
+        """Check if it's Tuesday 15:15 or later (forced exit time)."""
         now = datetime.now(IST)
-        return now.hour > self.exit_hour or (now.hour == self.exit_hour and now.minute >= self.exit_minute)
+        if now.weekday() == EXIT_DAY:
+            exit_time = now.replace(hour=EXIT_HOUR, minute=EXIT_MINUTE, second=0)
+            return now >= exit_time
+        return False
 
-    def _is_entry_time(self):
-        """Check if it's time to enter (between entry time and exit time)."""
-        now = datetime.now(IST)
-        entry = now.replace(hour=self.entry_hour, minute=self.entry_minute, second=0)
-        exit_t = now.replace(hour=self.exit_hour, minute=self.exit_minute, second=0)
-        return entry <= now <= exit_t
+    def _wait_for_entry(self):
+        """Sleep until Wednesday 9:20 IST (or next open day if Wed is a holiday).
 
-    def _wait_for_market_open(self):
-        """Sleep until next market open. Returns False if stopped."""
-        now = datetime.now(IST)
-        # Find the next valid trading day + entry time
-        target = now.replace(hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
+        Returns True when it's time to attempt entry. The caller should try
+        _open_strangle and call this again if it fails (holiday handling).
+        """
+        while self._running:
+            now = datetime.now(IST)
+            # Calculate next Wednesday at 9:20
+            days_ahead = ENTRY_DAY - now.weekday()
+            if days_ahead < 0:
+                days_ahead += 7
+            elif days_ahead == 0:
+                # It's Wednesday — check if we're past entry time
+                entry_time = now.replace(hour=ENTRY_HOUR, minute=ENTRY_MINUTE, second=0, microsecond=0)
+                if now >= entry_time and self._is_market_open():
+                    return True  # Can enter now
+                elif now < entry_time:
+                    days_ahead = 0  # Wait until later today
+                else:
+                    days_ahead = 7  # Next Wednesday
 
-        if now >= target or now.weekday() not in self.trading_days:
-            target += timedelta(days=1)
+            target = now.replace(hour=ENTRY_HOUR, minute=ENTRY_MINUTE, second=0, microsecond=0)
+            target += timedelta(days=days_ahead)
 
-        # Skip non-trading days
-        attempts = 0
-        while target.weekday() not in self.trading_days and attempts < 7:
-            target += timedelta(days=1)
-            attempts += 1
+            wait = (target - now).total_seconds()
+            if wait <= 0:
+                return self._running
 
-        wait = (target - now).total_seconds()
-        if wait > 60:
             day_name = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][target.weekday()]
-            print(f"[NSE DN] Next entry: {target.strftime('%Y-%m-%d %H:%M')} IST ({day_name}, {wait/3600:.1f}h)")
+            print(f"[NSE DN] Waiting for entry: {target.strftime('%Y-%m-%d %H:%M')} IST ({day_name}, {wait/3600:.1f}h)")
 
-        return self._interruptible_sleep(wait)
+            if not self._interruptible_sleep(min(wait, 300)):
+                return False
+
+            # After sleep, check if we've arrived at entry time
+            now = datetime.now(IST)
+            if now.weekday() == ENTRY_DAY:
+                entry_time = now.replace(hour=ENTRY_HOUR, minute=ENTRY_MINUTE, second=0)
+                if now >= entry_time and self._is_market_open():
+                    return True
+        return False
+
+    def _wait_for_next_open(self):
+        """Wait until next day 9:20 IST for retry (when Wednesday was a holiday).
+
+        Returns True when ready to retry. Returns False if stopped or if
+        we've reached Tuesday (exit window) without entering.
+        """
+        while self._running:
+            now = datetime.now(IST)
+
+            # If we've reached Tuesday exit time without entering, skip this week
+            if now.weekday() == EXIT_DAY:
+                exit_time = now.replace(hour=EXIT_HOUR, minute=EXIT_MINUTE, second=0)
+                if now >= exit_time:
+                    print(f"[NSE DN] Reached Tuesday exit window without entry — skipping this week")
+                    return False
+
+            # Wait until next day 9:20
+            target = now.replace(hour=ENTRY_HOUR, minute=ENTRY_MINUTE, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+
+            wait = (target - now).total_seconds()
+            day_name = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][target.weekday()]
+            print(f"[NSE DN] Wed holiday — retrying next open day: {target.strftime('%Y-%m-%d %H:%M')} IST ({day_name})")
+
+            if not self._interruptible_sleep(min(wait, 300)):
+                return False
+
+            # Check if we're in market hours now
+            now = datetime.now(IST)
+            if self._is_market_open():
+                return True
+        return False
+
+    def _wait_for_market(self):
+        """Sleep until market hours (9:15 IST next day). Returns False if stopped.
+
+        Does not skip weekends — Muhurat trading or special sessions may occur.
+        Checks every 5 minutes on weekends in case of special sessions.
+        """
+        while self._running and not self._is_market_open():
+            now = datetime.now(IST)
+            target = now.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            wait = (target - now).total_seconds()
+            # On weekends, check more frequently (every 5 min) in case of special sessions
+            if now.weekday() > 4:
+                sleep_time = min(wait, 300)
+            else:
+                sleep_time = min(wait, 300)
+            if wait > 60:
+                day_name = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][target.weekday()]
+                print(f"[NSE DN] Market closed. Next open: {target.strftime('%Y-%m-%d %H:%M')} IST ({day_name}, {wait/3600:.1f}h)")
+            if not self._interruptible_sleep(sleep_time):
+                return False
+        return self._running
 
     def _interruptible_sleep(self, seconds):
         """Sleep in chunks so we can respond to stop requests. Returns True if completed."""
@@ -390,34 +494,50 @@ class NseDeltaNeutral(BaseStrategy):
     # ─── Main Monitor Loop ───────────────────────────────────────────────
 
     def monitor(self):
-        """Main loop: wait for entry → open strangle → monitor → exit at EOD or TP/SL."""
+        """Main loop: weekly cycle — enter Wednesday 9:20 (or next open day), hold until TP/SL/max adj or Tuesday 15:15."""
+        tag = "[NSE DN]"
+
         while self._running:
-            # Wait until trading day + entry time
-            if not self._wait_for_market_open():
+            # Wait until Wednesday 9:20 IST
+            if not self._wait_for_entry():
                 break
 
             if not self._running:
                 break
 
-            now = datetime.now(IST)
-            if now.weekday() not in self.trading_days:
-                print(f"[NSE DN] Skipping {now.strftime('%A')} — not a trading day")
-                continue
+            # Try to open strangle — retry next day if market is closed (holiday)
+            entered = False
+            while self._running and not entered:
+                now = datetime.now(IST)
+                print(f"\n{tag} ═══ {now.strftime('%Y-%m-%d %H:%M')} IST — Attempting to open weekly strangle ═══")
 
-            self.total_days_traded += 1
-            tag = f"[NSE DN D{self.total_days_traded}]"
-            print(f"\n{tag} ═══ {now.strftime('%Y-%m-%d %H:%M')} IST ═══")
+                if self._open_strangle(tag):
+                    entered = True
+                else:
+                    print(f"{tag} Could not open strangle (market may be closed)")
+                    # Wait for next open day, stop if we reach Tuesday exit window
+                    if not self._wait_for_next_open():
+                        print(f"{tag} Skipping this week — no entry before exit window")
+                        break
 
-            # Open the strangle
-            if not self._open_strangle(tag):
-                print(f"{tag} No trade today — could not open strangle")
-                continue
+            if not entered:
+                continue  # Skip to next Wednesday
 
-            # Monitor until exit
-            self._monitor_intraday(tag)
+            # Monitor until TP/SL/max adj or Tuesday 15:15
+            self._monitor_position(tag)
 
-    def _monitor_intraday(self, tag):
-        """Monitor the open strangle position until exit time, TP/SL, or max adjustments."""
+            # After exit, reset state for next week
+            self.adjustment_count = 0
+            self.adjustment_history = []
+            self.total_premium_collected = 0
+            self._persist_state()
+
+    def _monitor_position(self, tag):
+        """Monitor the open position until TP/SL, max adjustments, or Tuesday 15:15.
+
+        Outside market hours (before 9:15 or after 15:30 IST, weekends) the loop
+        pauses monitoring but does NOT close positions.
+        """
         self._set_thread_credentials()
 
         # Set up log routing for this thread
@@ -430,9 +550,16 @@ class NseDeltaNeutral(BaseStrategy):
         while self._running:
             now = datetime.now(IST)
 
-            # Market closed check — just skip monitoring tick, don't close
+            # Tuesday 15:15 — forced exit (before weekly expiry)
+            if self._is_exit_time():
+                print(f"{tag} ⏰ Tuesday 15:15 — forced weekly exit")
+                self._close_strangle(tag, reason='weekly_exit')
+                break
+
+            # Market closed — pause monitoring, don't close positions
             if not self._is_market_open():
-                time.sleep(self.monitor_interval)
+                if not self._wait_for_market():
+                    break
                 continue
 
             # Fetch current prices
@@ -441,6 +568,7 @@ class NseDeltaNeutral(BaseStrategy):
 
             if not chain:
                 self._consecutive_failures += 1
+                print(f"{tag} ⚠ Price fetch failed ({self._consecutive_failures}/{self._max_consecutive_failures})")
                 if self._consecutive_failures >= self._max_consecutive_failures:
                     print(f"{tag} 🚨 EMERGENCY: {self._consecutive_failures} consecutive failures — closing")
                     self._close_strangle(tag, reason='data_failure')
@@ -466,19 +594,42 @@ class NseDeltaNeutral(BaseStrategy):
             unrealized = call_pnl + put_pnl
             total_pnl = self.cumulative_realized_pnl + unrealized
 
-            # Log status
+            # Log every tick with per-leg breakdown
             iteration += 1
-            if iteration % 4 == 1:  # Log every ~4 ticks
-                call_chg = (call_price - self.call_entry_price) / self.call_entry_price if self.call_entry_price > 0 else 0
-                put_chg = (put_price - self.put_entry_price) / self.put_entry_price if self.put_entry_price > 0 else 0
-                print(f"{tag} #{iteration} | Adj: {self.adjustment_count}/{self.max_adjustments}")
-                print(f"{tag}   Call: ₹{call_price:.2f} ({call_chg:+.1%}) | Put: ₹{put_price:.2f} ({put_chg:+.1%})")
-                print(f"{tag}   PnL: R=₹{self.cumulative_realized_pnl:.2f} | U=₹{unrealized:.2f} | T=₹{total_pnl:.2f}")
+            call_chg = (call_price - self.call_entry_price) / self.call_entry_price if self.call_entry_price > 0 else 0
+            put_chg = (put_price - self.put_entry_price) / self.put_entry_price if self.put_entry_price > 0 else 0
+            call_strike = self.call_position.get('strike', '?') if self.call_position else '?'
+            put_strike = self.put_position.get('strike', '?') if self.put_position else '?'
+            legs_str = (f"SELL C{call_strike}: ₹{call_pnl:+.2f} ({call_chg:+.1%}) | "
+                        f"SELL P{put_strike}: ₹{put_pnl:+.2f} ({put_chg:+.1%})")
+            print(f"{tag} #{iteration} PnL: ₹{total_pnl:+.2f} (R=₹{self.cumulative_realized_pnl:.2f} U=₹{unrealized:+.2f}) "
+                  f"| Adj: {self.adjustment_count}/{self.max_adjustments} | {legs_str}")
 
             # PnL history for charting
             self._pnl_history.append((now.isoformat(), round(total_pnl, 2)))
             if len(self._pnl_history) > 500:
                 self._pnl_history = self._pnl_history[-500:]
+
+            # Save PnL snapshot to DB every 6 ticks
+            self._snap_counter += 1
+            if self._snap_counter % 6 == 0 and self._sid:
+                try:
+                    from models import save_pnl_snapshot
+                    user_id = getattr(self, '_user_id', None)
+                    if not user_id:
+                        try:
+                            from app import nse_dn_strategies
+                            for s_id, entry in nse_dn_strategies.items():
+                                if entry.get('strategy') is self:
+                                    user_id = entry.get('user_id')
+                                    self._user_id = user_id
+                                    break
+                        except Exception:
+                            pass
+                    if user_id:
+                        save_pnl_snapshot(user_id, self._sid, round(total_pnl, 2))
+                except Exception:
+                    pass
 
             # Check TP/SL
             if total_pnl >= self.target_pnl:
@@ -509,11 +660,6 @@ class NseDeltaNeutral(BaseStrategy):
                 if put_change >= self.premium_threshold:
                     print(f"{tag} ⚠ PUT premium up {put_change:.1%} — triggering adjustment")
                     self._adjust_position('put', call_price, put_price, chain, spot, tag)
-
-            # Snapshot
-            self._snap_counter += 1
-            if self._snap_counter % 6 == 0:
-                self._do_snapshot(total_pnl)
 
             time.sleep(self.monitor_interval)
 
@@ -580,7 +726,7 @@ class NseDeltaNeutral(BaseStrategy):
                     quantity=self.quantity,
                     transaction_type='BUY',
                     order_type='MARKET',
-                    product='MIS',
+                    product='NRML',
                 )
                 if resp.get('error'):
                     print(f"{tag}   ✗ Close order failed: {resp['error']} — aborting adjustment")
@@ -627,7 +773,7 @@ class NseDeltaNeutral(BaseStrategy):
                     quantity=self.quantity,
                     transaction_type='SELL',
                     order_type='MARKET',
-                    product='MIS',
+                    product='NRML',
                 )
                 if resp.get('error'):
                     print(f"{tag}   ✗ New order failed: {resp['error']}")
@@ -695,7 +841,7 @@ class NseDeltaNeutral(BaseStrategy):
                         quantity=self.quantity,
                         transaction_type='BUY',
                         order_type='MARKET',
-                        product='MIS',
+                        product='NRML',
                     )
                 except Exception as e:
                     print(f"{tag} ⚠ Close order error for {leg_name}: {e}")
@@ -710,18 +856,12 @@ class NseDeltaNeutral(BaseStrategy):
         # Log trade
         self.trade_log.append({
             'date': datetime.now(IST).strftime('%Y-%m-%d'),
-            'day': self.total_days_traded,
             'pnl': round(final_pnl, 2),
             'adjustments': self.adjustment_count,
             'exit_reason': reason,
             'premium_collected': round(self.total_premium_collected, 2),
         })
-        print(f"{tag} ═══ Day PnL: ₹{final_pnl:+.2f} | Adj: {self.adjustment_count} | Reason: {reason} ═══")
-
-        # Reset for next day
-        self.adjustment_count = 0
-        self.adjustment_history = []
-        self.total_premium_collected = 0
+        print(f"{tag} ═══ Final PnL: ₹{final_pnl:+.2f} | Adj: {self.adjustment_count} | Reason: {reason} ═══")
         self._persist_state()
 
     def close_all(self):
@@ -815,33 +955,12 @@ class NseDeltaNeutral(BaseStrategy):
         else:
             return (None, best)
 
-    def _do_snapshot(self, total_pnl):
-        """Persist PnL snapshot to DB."""
-        try:
-            from models import save_pnl_snapshot, update_strategy_db
-            sid = getattr(self, '_sid', None)
-            user_id = getattr(self, '_user_id', None)
-            if not user_id:
-                try:
-                    from app import nse_dn_strategies
-                    for s_id, ent in nse_dn_strategies.items():
-                        if ent.get('strategy') is self:
-                            user_id = ent.get('user_id')
-                            self._user_id = user_id
-                            sid = s_id
-                            self._sid = sid
-                            break
-                except Exception:
-                    pass
-            if user_id and sid:
-                save_pnl_snapshot(user_id, sid, round(total_pnl, 2))
-        except Exception:
-            pass
-
     def _persist_state(self):
-        """Save state to DB for resume on restart."""
+        """Save trade_log, cumulative_realized_pnl, adjustment state, and legs to DB.
+        This ensures data survives server restarts."""
         try:
             from models import update_strategy_db
+            # Find sid if not set
             sid = getattr(self, '_sid', None)
             if not sid:
                 try:
@@ -856,7 +975,7 @@ class NseDeltaNeutral(BaseStrategy):
             if not sid:
                 return
 
-            # Build legs from current positions
+            # Build legs from current positions (explicit field serialization)
             legs = []
             if self.call_position:
                 legs.append({
@@ -885,39 +1004,22 @@ class NseDeltaNeutral(BaseStrategy):
                     'expiry': self._expiry,
                 })
 
-            details = {
-                'symbol': self.symbol,
-                'lots': self.lots,
-                'lot_size': self.lot_size,
-                'quantity': self.quantity,
-                'target_delta': self.target_delta,
-                'delta_tolerance': self.delta_tolerance,
-                'premium_threshold': int(self.premium_threshold * 100),
-                'tp_percent': int(self.tp_percent * 100),
-                'sl_percent': int(self.sl_percent * 100),
-                'max_adjustments': self.max_adjustments,
-                'monitoring_interval': self.monitor_interval,
-                'entry_hour': self.entry_hour,
-                'entry_minute': self.entry_minute,
-                'exit_hour': self.exit_hour,
-                'exit_minute': self.exit_minute,
-                'trading_days': self.trading_days,
-                'paper_trade': self.paper_trade,
-                'cumulative_realized_pnl': self.cumulative_realized_pnl,
-                'total_days_traded': self.total_days_traded,
-                'adjustment_count': self.adjustment_count,
-                'total_premium_collected': self.total_premium_collected,
-                'target_pnl': self.target_pnl,
-                'stop_loss': self.stop_loss,
-                'expiry': self._expiry,
-                'trade_log': self.trade_log[-50:],
-                'adjustment_history': self.adjustment_history[-20:],
-            }
+            # Merge base params with runtime state
+            details = {**self._base_params,
+                       'cumulative_realized_pnl': self.cumulative_realized_pnl,
+                       'adjustment_count': self.adjustment_count,
+                       'total_premium_collected': self.total_premium_collected,
+                       'target_pnl': self.target_pnl,
+                       'stop_loss': self.stop_loss,
+                       'expiry': self._expiry,
+                       'trade_log': self.trade_log,
+                       'adjustment_history': self.adjustment_history}
 
             update_strategy_db(sid, details=details, legs=legs,
-                               pnl=round(self.pnl, 2))
+                               pnl=round(self.cumulative_realized_pnl, 2))
+            logger.debug(f"[NSE DN] State persisted: adj={self.adjustment_count}, ₹{self.cumulative_realized_pnl:.2f}")
         except Exception as e:
-            logger.warning(f"[NSE DN] Persist state failed: {e}")
+            logger.warning(f"[NSE DN] Failed to persist state: {e}")
 
     # ─── Properties ──────────────────────────────────────────────────────
 

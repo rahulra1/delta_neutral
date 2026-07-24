@@ -50,6 +50,102 @@ DEFAULT_SL_PCT = 1.50   # 150% of premium
 DEFAULT_MONITOR_INTERVAL = 15
 DEFAULT_TRADING_DAYS = [0, 1, 2, 3, 4]  # Mon-Fri
 
+# NSE holidays (dates when the exchange is closed)
+# Source: https://www.nseindia.com/resources/exchange-communication-holidays
+NSE_HOLIDAYS = {
+    # 2025
+    '26-02-2025',  # Mahashivratri
+    '14-03-2025',  # Holi
+    '31-03-2025',  # Id-Ul-Fitr (Ramadan)
+    '10-04-2025',  # Shri Mahavir Jayanti
+    '14-04-2025',  # Dr. Baba Saheb Ambedkar Jayanti
+    '18-04-2025',  # Good Friday
+    '01-05-2025',  # Maharashtra Day
+    '12-05-2025',  # Buddha Purnima
+    '07-06-2025',  # Id-Ul-Adha (Bakri Id)
+    '10-07-2025',  # Muharram
+    '15-08-2025',  # Independence Day
+    '27-08-2025',  # Janmashtami
+    '02-10-2025',  # Mahatma Gandhi Jayanti
+    '21-10-2025',  # Dussehra
+    '22-10-2025',  # Dussehra
+    '04-11-2025',  # Diwali (Laxmi Pujan)
+    '05-11-2025',  # Diwali (Balipratipada)
+    '05-12-2025',  # Guru Nanak Jayanti
+    '25-12-2025',  # Christmas
+    # 2026
+    '26-01-2026',  # Republic Day
+    '17-02-2026',  # Mahashivratri
+    '04-03-2026',  # Holi
+    '20-03-2026',  # Id-Ul-Fitr (Ramadan)
+    '25-03-2026',  # Holi (some years observed)
+    '02-04-2026',  # Shri Ram Navami
+    '06-04-2026',  # Shri Mahavir Jayanti
+    '03-04-2026',  # Good Friday
+    '14-04-2026',  # Dr. Baba Saheb Ambedkar Jayanti
+    '01-05-2026',  # Maharashtra Day
+    '25-05-2026',  # Buddha Purnima
+    '27-06-2026',  # Id-Ul-Adha (Bakri Id)
+    '08-07-2026',  # Muharram (Ashura)
+    '15-08-2026',  # Independence Day
+    '17-08-2026',  # Janmashtami
+    '07-09-2026',  # Milad-un-Nabi
+    '02-10-2026',  # Mahatma Gandhi Jayanti
+    '12-10-2026',  # Dussehra
+    '24-10-2026',  # Diwali (Laxmi Pujan)
+    '25-10-2026',  # Diwali (Balipratipada)
+    '24-11-2026',  # Guru Nanak Jayanti
+    '25-12-2026',  # Christmas
+    # 2027
+    '26-01-2027',  # Republic Day
+    '08-02-2027',  # Mahashivratri
+    '22-03-2027',  # Holi
+    '10-03-2027',  # Id-Ul-Fitr (Ramadan)
+    '14-04-2027',  # Dr. Baba Saheb Ambedkar Jayanti
+    '26-03-2027',  # Good Friday
+    '01-05-2027',  # Maharashtra Day
+    '13-05-2027',  # Buddha Purnima
+    '16-06-2027',  # Id-Ul-Adha (Bakri Id)
+    '15-08-2027',  # Independence Day
+    '06-08-2027',  # Janmashtami
+    '02-10-2027',  # Mahatma Gandhi Jayanti
+    '01-10-2027',  # Dussehra
+    '13-11-2027',  # Diwali (Laxmi Pujan)
+    '14-11-2027',  # Diwali (Balipratipada)
+    '14-11-2027',  # Guru Nanak Jayanti
+    '25-12-2027',  # Christmas
+}
+
+# Special Saturday trading sessions (Muhurat Trading, special sessions)
+# These are dates when NSE is open on a weekend (usually Saturday)
+# Format: 'DD-MM-YYYY': (open_hour, open_min, close_hour, close_min)
+NSE_SPECIAL_SESSIONS = {
+    # 2025 — Muhurat Trading (Diwali)
+    '01-11-2025': (18, 15, 19, 30),  # Muhurat Trading evening session
+    # 2026 — Muhurat Trading (Diwali)
+    '21-10-2026': (18, 15, 19, 30),  # Muhurat Trading evening session
+    # Add special Saturday sessions as NSE announces them
+    # Example format: '15-03-2025': (9, 15, 15, 30),  # Special Saturday session
+}
+
+
+def _is_nse_holiday(dt):
+    """Check if a given date is an NSE holiday (and NOT a special session)."""
+    date_str = dt.strftime('%d-%m-%Y')
+    if date_str in NSE_SPECIAL_SESSIONS:
+        return False  # Special session overrides holiday
+    return date_str in NSE_HOLIDAYS
+
+
+def _is_special_session(dt):
+    """Check if a given date has a special trading session."""
+    return dt.strftime('%d-%m-%Y') in NSE_SPECIAL_SESSIONS
+
+
+def _get_special_session_hours(dt):
+    """Get market hours for a special session. Returns (open_h, open_m, close_h, close_m) or None."""
+    return NSE_SPECIAL_SESSIONS.get(dt.strftime('%d-%m-%Y'))
+
 
 def _get_data_source():
     """Determine which data source to use based on thread-local broker setting."""
@@ -109,6 +205,20 @@ class NseEmaCreditSpread(BaseStrategy):
         self._api_secret = None
         self._broker = None
 
+        # Base params for DB persistence (mirrors ema_credit_spread.py pattern)
+        self._base_params = {
+            'symbol': symbol, 'lots': lots,
+            'lot_size': self.lot_size, 'quantity': self.quantity,
+            'ema_period': ema_period,
+            'sell_delta': sell_delta, 'buy_delta': buy_delta,
+            'tp_pct': int(tp_pct * 100), 'sl_pct': int(sl_pct * 100),
+            'monitoring_interval': monitor_interval,
+            'entry_hour': entry_hour, 'entry_minute': entry_minute,
+            'exit_hour': exit_hour, 'exit_minute': exit_minute,
+            'trading_days': self.trading_days,
+            'paper_trade': paper_trade,
+        }
+
     def initialize(self):
         self._running = True
         # Capture thread-local credentials
@@ -141,8 +251,12 @@ class NseEmaCreditSpread(BaseStrategy):
                 break
 
             now = datetime.now(IST)
-            if now.weekday() not in self.trading_days:
+            if now.weekday() not in self.trading_days and not _is_special_session(now):
                 print(f"[NSE EMA] Skipping {now.strftime('%A')} — not a trading day")
+                continue
+
+            if _is_nse_holiday(now):
+                print(f"[NSE EMA] Skipping {now.strftime('%Y-%m-%d')} — NSE holiday")
                 continue
 
             self.total_days_traded += 1
@@ -293,14 +407,19 @@ class NseEmaCreditSpread(BaseStrategy):
         return day_legs, premium, direction
 
     def _find_by_delta(self, chain, spot, opt_type, target_delta):
-        """Find an OTM option closest to target delta."""
+        """Find an OTM option closest to target delta from the option chain."""
         candidates = []
+
         for row in chain:
             strike = float(row['strike'])
             opt = row.get(opt_type)
             if not opt or opt.get('mark_price', 0) <= 0:
                 continue
+
             delta = opt.get('delta', 0)
+            if delta == 0:
+                continue
+
             # OTM filter
             if opt_type == 'call' and strike <= spot:
                 continue
@@ -310,6 +429,7 @@ class NseEmaCreditSpread(BaseStrategy):
                 continue
             if opt_type == 'put' and delta >= 0:
                 continue
+
             candidates.append({
                 'symbol': opt.get('symbol', ''),
                 'trading_symbol': opt.get('trading_symbol', ''),
@@ -331,14 +451,14 @@ class NseEmaCreditSpread(BaseStrategy):
             sell_resp = place_order(
                 trading_symbol=sell_opt.get('trading_symbol', ''),
                 quantity=self.quantity,
-                transaction_type='SELL', order_type='MARKET', product='MIS')
+                transaction_type='SELL', order_type='MARKET', product='NRML')
             if sell_resp.get('error'):
                 print(f"{tag} ✗ Sell order failed: {sell_resp['error']}")
                 return False
             buy_resp = place_order(
                 trading_symbol=buy_opt.get('trading_symbol', ''),
                 quantity=self.quantity,
-                transaction_type='BUY', order_type='MARKET', product='MIS')
+                transaction_type='BUY', order_type='MARKET', product='NRML')
             if buy_resp.get('error'):
                 print(f"{tag} ✗ Buy order failed: {buy_resp['error']}")
                 return False
@@ -361,9 +481,16 @@ class NseEmaCreditSpread(BaseStrategy):
 
         target = premium * self.tp_pct
         sl = premium * self.sl_pct
-        tag = f"[NSE EMA D{day_num}]"
         expiry = day_legs[0].get('expiry', '')
         cycle = 0
+
+        # Compute day label once (includes opened date)
+        opened_date = ''
+        for leg in day_legs:
+            if leg.get('opened_at'):
+                opened_date = leg['opened_at']
+                break
+        day_label = f"[NSE EMA Day{day_num} ({opened_date})]" if opened_date else f"[NSE EMA Day{day_num}]"
 
         while self._running:
             time.sleep(self.monitor_interval)
@@ -377,24 +504,28 @@ class NseEmaCreditSpread(BaseStrategy):
             # Fetch current prices
             _get_expiries, _get_chain = _get_data_source()
             chain, spot, _ = _get_chain(self.symbol, expiry)
+
             if not chain:
                 self._consecutive_failures += 1
+                print(f"{day_label} ⚠ Price fetch failed ({self._consecutive_failures}/{self._max_consecutive_failures})")
                 if self._consecutive_failures >= self._max_consecutive_failures:
-                    print(f"{tag} 🚨 EMERGENCY: {self._consecutive_failures} failures — closing")
-                    self._close_day_legs(day_legs, tag)
+                    print(f"{day_label} 🚨 EMERGENCY: {self._consecutive_failures} consecutive failures — closing legs")
+                    self._close_day_legs(day_legs, day_label)
                     pnl = self._calc_spread_pnl(day_legs)
                     self._record_day(day_num, pnl, premium, 'data_failure', direction)
                     return
                 continue
             self._consecutive_failures = 0
 
-            # Calculate spread P&L
+            # Calculate spread P&L with per-leg details
             pnl = 0.0
+            leg_details = []
             all_ok = True
             for leg in day_legs:
                 current = self._get_price_from_chain(chain, leg)
                 if current is None:
                     all_ok = False
+                    leg_details.append(f"{leg.get('symbol', '?')}: no data")
                     continue
                 leg['current_mark'] = round(current, 2)
                 if leg['side'] == 'sell':
@@ -403,34 +534,51 @@ class NseEmaCreditSpread(BaseStrategy):
                     leg_pnl = (current - leg['entry_price']) * self.quantity
                 leg['current_pnl'] = round(leg_pnl, 2)
                 pnl += leg_pnl
+                leg_details.append(f"{leg['side'].upper()} {leg['strike']}: ₹{leg_pnl:+.2f}")
 
             if not all_ok:
                 continue
 
-            # PnL history
+            # PnL history for UI chart
             self._pnl_history.append((now.isoformat(), round(self.cumulative_pnl + pnl, 2)))
             if len(self._pnl_history) > 500:
                 self._pnl_history = self._pnl_history[-500:]
 
-            # Snapshot every 6 ticks
+            # Save PnL snapshot to DB every 6 ticks
             self._snap_counter += 1
-            if self._snap_counter % 6 == 0:
-                self._do_snapshot(self.cumulative_pnl + pnl)
+            if self._snap_counter % 6 == 0 and self._sid:
+                try:
+                    from models import save_pnl_snapshot
+                    user_id = getattr(self, '_user_id', None)
+                    if not user_id:
+                        try:
+                            from app import nse_ema_strategies
+                            for s_id, entry in nse_ema_strategies.items():
+                                if entry.get('strategy') is self:
+                                    user_id = entry.get('user_id')
+                                    self._user_id = user_id
+                                    break
+                        except Exception:
+                            pass
+                    if user_id:
+                        save_pnl_snapshot(user_id, self._sid, round(self.cumulative_pnl + pnl, 2))
+                except Exception:
+                    pass
 
-            # Log every 4 ticks
-            if cycle % 4 == 1:
-                pct = (pnl / premium * 100) if premium > 0 else 0
-                print(f"{tag} PnL: ₹{pnl:+.2f} ({pct:+.1f}%) | Cum: ₹{self.cumulative_pnl:+.2f}")
+            # Log every tick with per-leg breakdown
+            legs_str = ' | '.join(leg_details) if leg_details else ''
+            pct = (pnl / premium * 100) if premium > 0 else 0
+            print(f"{day_label} PnL: ₹{pnl:+.2f} ({pct:+.1f}%) | Cum: ₹{self.cumulative_pnl:+.2f} | {legs_str}")
 
             # Check TP/SL
             if pnl >= target:
-                print(f"{tag} 🎯 TP hit: ₹{pnl:.2f} >= ₹{target:.2f}")
-                self._close_day_legs(day_legs, tag)
+                print(f"{day_label} 🎯 TP hit: ₹{pnl:.2f} >= ₹{target:.2f}")
+                self._close_day_legs(day_legs, day_label)
                 self._record_day(day_num, pnl, premium, 'target', direction)
                 return
             if pnl <= -sl:
-                print(f"{tag} 🛑 SL hit: ₹{pnl:.2f} <= -₹{sl:.2f}")
-                self._close_day_legs(day_legs, tag)
+                print(f"{day_label} 🛑 SL hit: ₹{pnl:.2f} <= -₹{sl:.2f}")
+                self._close_day_legs(day_legs, day_label)
                 self._record_day(day_num, pnl, premium, 'stoploss', direction)
                 return
 
@@ -455,7 +603,7 @@ class NseEmaCreditSpread(BaseStrategy):
                     place_order(
                         trading_symbol=leg.get('trading_symbol', ''),
                         quantity=self.quantity,
-                        transaction_type=close_side, order_type='MARKET', product='MIS')
+                        transaction_type=close_side, order_type='MARKET', product='NRML')
             except Exception as e:
                 print(f"{tag} ⚠ Close order error: {e}")
 
@@ -494,7 +642,7 @@ class NseEmaCreditSpread(BaseStrategy):
                     place_order(
                         trading_symbol=leg.get('trading_symbol', ''),
                         quantity=self.quantity,
-                        transaction_type=close_side, order_type='MARKET', product='MIS')
+                        transaction_type=close_side, order_type='MARKET', product='NRML')
             except Exception:
                 pass
         with self._legs_lock:
@@ -525,7 +673,17 @@ class NseEmaCreditSpread(BaseStrategy):
 
     def _is_market_open(self):
         now = datetime.now(IST)
+        # Check for special session (Muhurat trading, special Saturdays)
+        special = _get_special_session_hours(now)
+        if special:
+            oh, om, ch, cm = special
+            session_open = now.replace(hour=oh, minute=om, second=0)
+            session_close = now.replace(hour=ch, minute=cm, second=0)
+            return session_open <= now <= session_close
+        # Normal day checks
         if now.weekday() > 4:
+            return False
+        if _is_nse_holiday(now):
             return False
         market_open = now.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0)
         market_close = now.replace(hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MINUTE, second=0)
@@ -543,23 +701,44 @@ class NseEmaCreditSpread(BaseStrategy):
         return None
 
     def _wait_for_next_entry(self):
-        """Wait until next trading day entry time. Skips weekends and non-trading days."""
+        """Wait until next trading day entry time. Skips weekends and NSE holidays,
+        but wakes up for special sessions (Muhurat trading, special Saturdays)."""
         now = datetime.now(IST)
         entry_today = now.replace(hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
 
-        if now < entry_today and now.weekday() in self.trading_days:
+        # Check if today is a valid trading day
+        today_is_valid = (
+            (now.weekday() in self.trading_days and not _is_nse_holiday(now))
+            or _is_special_session(now)
+        )
+
+        if now < entry_today and today_is_valid:
             target = entry_today
         else:
+            # Look ahead up to 14 days for the next valid session
             target = entry_today + timedelta(days=1)
             attempts = 0
-            while target.weekday() not in self.trading_days and attempts < 7:
+            while attempts < 14:
+                is_valid = (
+                    (target.weekday() in self.trading_days and not _is_nse_holiday(target))
+                    or _is_special_session(target)
+                )
+                if is_valid:
+                    break
                 target += timedelta(days=1)
                 attempts += 1
+
+        # For special sessions, adjust entry time to session open
+        special = _get_special_session_hours(target)
+        if special:
+            oh, om, _, _ = special
+            target = target.replace(hour=oh, minute=om + 10, second=0)  # Enter 10 min after open
 
         wait = (target - now).total_seconds()
         if wait > 60:
             day_name = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][target.weekday()]
-            print(f"[NSE EMA] Next entry: {target.strftime('%Y-%m-%d %H:%M')} IST ({day_name}, {wait/3600:.1f}h)")
+            suffix = ' (Special Session)' if special else ''
+            print(f"[NSE EMA] Next entry: {target.strftime('%Y-%m-%d %H:%M')} IST ({day_name}{suffix}, {wait/3600:.1f}h)")
         self._interruptible_sleep(wait)
 
     def _interruptible_sleep(self, seconds):
@@ -567,33 +746,12 @@ class NseEmaCreditSpread(BaseStrategy):
         while self._running and time.time() < end:
             time.sleep(min(30, end - time.time()))
 
-    def _do_snapshot(self, total_pnl):
-        """Save PnL snapshot to DB."""
-        try:
-            from models import save_pnl_snapshot
-            sid = getattr(self, '_sid', None)
-            user_id = getattr(self, '_user_id', None)
-            if not user_id:
-                try:
-                    from app import nse_ema_strategies
-                    for s_id, ent in nse_ema_strategies.items():
-                        if ent.get('strategy') is self:
-                            user_id = ent.get('user_id')
-                            self._user_id = user_id
-                            sid = s_id
-                            self._sid = sid
-                            break
-                except Exception:
-                    pass
-            if user_id and sid:
-                save_pnl_snapshot(user_id, sid, round(total_pnl, 2))
-        except Exception:
-            pass
-
     def _persist_state(self):
-        """Save state to DB for resume on restart."""
+        """Save trade_log, cumulative_pnl, total_days_traded, and legs to DB.
+        This ensures data survives server restarts."""
         try:
             from models import update_strategy_db
+            # Find sid if not set
             sid = getattr(self, '_sid', None)
             if not sid:
                 try:
@@ -608,28 +766,34 @@ class NseEmaCreditSpread(BaseStrategy):
             if not sid:
                 return
 
+            # Merge base params with runtime state
+            details = {**self._base_params,
+                       'trade_log': self.trade_log,
+                       'cumulative_pnl': self.cumulative_pnl,
+                       'total_days_traded': self.total_days_traded}
+
+            # Serialize current legs explicitly
             legs_data = []
             with self._legs_lock:
                 for leg in self.legs:
-                    legs_data.append({k: v for k, v in leg.items()})
+                    legs_data.append({
+                        'symbol': leg.get('symbol', ''),
+                        'trading_symbol': leg.get('trading_symbol', ''),
+                        'side': leg.get('side', ''),
+                        'type': leg.get('type', ''),
+                        'delta': leg.get('delta', 0),
+                        'strike': leg.get('strike', 0),
+                        'entry_price': leg.get('entry_price', 0),
+                        'size': leg.get('size', 0),
+                        'day_num': leg.get('day_num', 0),
+                        'expiry': leg.get('expiry', ''),
+                        'opened_at': leg.get('opened_at', ''),
+                    })
 
-            details = {
-                'symbol': self.symbol, 'lots': self.lots,
-                'lot_size': self.lot_size, 'quantity': self.quantity,
-                'ema_period': self.ema_period,
-                'sell_delta': self.sell_delta, 'buy_delta': self.buy_delta,
-                'tp_pct': int(self.tp_pct * 100),
-                'sl_pct': int(self.sl_pct * 100),
-                'monitoring_interval': self.monitor_interval,
-                'entry_hour': self.entry_hour, 'entry_minute': self.entry_minute,
-                'exit_hour': self.exit_hour, 'exit_minute': self.exit_minute,
-                'trading_days': self.trading_days,
-                'paper_trade': self.paper_trade,
-                'cumulative_pnl': self.cumulative_pnl,
-                'total_days_traded': self.total_days_traded,
-                'trade_log': self.trade_log[-50:],
-            }
-            update_strategy_db(sid, details=details, legs=legs_data,
-                               pnl=round(self.pnl, 2))
+            update_strategy_db(sid,
+                               details=details,
+                               legs=legs_data,
+                               pnl=round(self.cumulative_pnl, 2))
+            logger.debug(f"[NSE EMA] State persisted: {self.total_days_traded} days, ₹{self.cumulative_pnl:.2f}")
         except Exception as e:
-            logger.warning(f"[NSE EMA] Persist failed: {e}")
+            logger.warning(f"[NSE EMA] Failed to persist state: {e}")

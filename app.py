@@ -920,7 +920,7 @@ def _resume_db_strategies():
 
         # 10a2. Resume NSE Delta Neutral
         elif source == 'NSE Delta Neutral':
-            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=200),
                      'log_history': [], 'running': False, 'params': details,
                      'user_id': user_id, 'profile_id': profile_id}
             nse_dn_strategies[sid] = entry
@@ -948,10 +948,6 @@ def _resume_db_strategies():
                         sl_percent=float(details.get('sl_percent', 70)) / 100,
                         max_adjustments=int(details.get('max_adjustments', 5)),
                         monitor_interval=int(details.get('monitoring_interval', 15)),
-                        entry_hour=int(details.get('entry_hour', 9)),
-                        entry_minute=int(details.get('entry_minute', 20)),
-                        exit_hour=int(details.get('exit_hour', 15)),
-                        exit_minute=int(details.get('exit_minute', 15)),
                         trading_days=trading_days,
                         lot_size=int(details['lot_size']) if details.get('lot_size') else None,
                         paper_trade=details.get('paper_trade', True),
@@ -962,7 +958,6 @@ def _resume_db_strategies():
                     entry['strategy'] = s
                     entry['running'] = True
                     s.cumulative_realized_pnl = float(details.get('cumulative_realized_pnl', 0))
-                    s.total_days_traded = int(details.get('total_days_traded', 0))
                     s.adjustment_count = int(details.get('adjustment_count', 0))
                     s.total_premium_collected = float(details.get('total_premium_collected', 0))
                     s.target_pnl = float(details.get('target_pnl', 0))
@@ -996,13 +991,18 @@ def _resume_db_strategies():
                             s._put_current = float(put_leg.get('current_mark', 0))
                     s.initialize()
                     if s.trade_log:
-                        print(f"[NSE DN] Restored {len(s.trade_log)} days | Cum PnL: ₹{s.cumulative_realized_pnl:+.2f}")
-                    # If positions are open, resume intraday monitoring
+                        print(f"[NSE DN] Restored {len(s.trade_log)} trades | Cum PnL: ₹{s.cumulative_realized_pnl:+.2f}")
+                    # If positions are open, resume monitoring directly (blocks until exit)
                     if s.call_position or s.put_position:
-                        import threading as _thr
-                        tag = f"[NSE DN D{s.total_days_traded}]"
-                        _thr.Thread(target=s._monitor_intraday, args=(tag,), daemon=True).start()
-                        print(f"[NSE DN] Resumed intraday monitoring with open positions")
+                        tag = "[NSE DN]"
+                        print(f"[NSE DN] Resumed monitoring with open positions")
+                        s._monitor_position(tag)
+                        # After position exits, continue with weekly loop for next cycle
+                        s.adjustment_count = 0
+                        s.adjustment_history = []
+                        s.total_premium_collected = 0
+                        s._persist_state()
+                    # Run full monitor loop (waits for Wed entry for next/first cycle)
                     s.monitor()
                 except Exception as e:
                     logger.error(f"[resume] NSE DN {sid} error: {e}")
@@ -1010,7 +1010,7 @@ def _resume_db_strategies():
                     strategy = entry.get('strategy')
                     if strategy and not strategy._running:
                         pnl = round(strategy.cumulative_realized_pnl, 2)
-                        record_end(sid, pnl, getattr(strategy, 'total_days_traded', 0))
+                        record_end(sid, pnl, len(strategy.trade_log))
                         update_tracked(sid, status='completed', pnl=pnl, exit_reason='intentional_close')
                     elif not strategy:
                         logger.warning(f"[resume] NSE DN {sid} — no strategy object")
@@ -4303,10 +4303,6 @@ def run_nse_dn_strategy(sid, params):
             sl_percent=float(params.get('sl_percent', 70)) / 100,
             max_adjustments=int(params.get('max_adjustments', 5)),
             monitor_interval=int(params.get('monitoring_interval', 15)),
-            entry_hour=int(params.get('entry_hour', 9)),
-            entry_minute=int(params.get('entry_minute', 20)),
-            exit_hour=int(params.get('exit_hour', 15)),
-            exit_minute=int(params.get('exit_minute', 15)),
             trading_days=trading_days,
             lot_size=int(params['lot_size']) if params.get('lot_size') else None,
             paper_trade=params.get('paper_trade', True),
@@ -4347,7 +4343,7 @@ def run_nse_dn_strategy(sid, params):
         strategy = entry.get('strategy')
         if strategy and not strategy._running:
             pnl = round(strategy.cumulative_realized_pnl, 2)
-            record_end(sid, pnl, strategy.total_days_traded)
+            record_end(sid, pnl, len(strategy.trade_log))
             update_tracked(sid, status='completed', pnl=pnl,
                            exit_reason='intentional_close')
         elif not strategy:
@@ -4364,7 +4360,7 @@ def nse_dn_start():
     profile_id = params.pop('profile_id', None)
     sid = str(uuid.uuid4())[:8]
     symbol = params.get('symbol', 'NIFTY')
-    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=200), 'log_history': [],
              'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     nse_dn_strategies[sid] = entry
     save_details = {**params, 'profile_id': profile_id}
@@ -4424,12 +4420,12 @@ def nse_dn_status(sid):
         return jsonify(running=False)
     s = e.get('strategy')
     if not s:
-        return jsonify(running=True, total_pnl=0, cumulative_pnl=0, days_traded=0, trade_log=[], legs=[])
+        return jsonify(running=True, total_pnl=0, cumulative_pnl=0, weeks_traded=0, trade_log=[], legs=[])
     return jsonify(
         running=True,
         total_pnl=round(s.pnl, 2),
         cumulative_pnl=round(s.cumulative_realized_pnl, 2),
-        days_traded=s.total_days_traded,
+        weeks_traded=len(s.trade_log),
         adjustment_count=s.adjustment_count,
         max_adjustments=s.max_adjustments,
         target_pnl=round(s.target_pnl, 2),
