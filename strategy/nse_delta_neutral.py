@@ -1034,6 +1034,11 @@ class NseDeltaNeutral(BaseStrategy):
         return self.cumulative_realized_pnl + unrealized
 
     @property
+    def total_days_traded(self):
+        """Number of weekly cycles completed (for UI compatibility)."""
+        return len(self.trade_log)
+
+    @property
     def legs(self):
         """Return current legs as a list (for UI compatibility)."""
         result = []

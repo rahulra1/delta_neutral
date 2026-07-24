@@ -2953,6 +2953,7 @@ def api_strategy_detail(sid):
             entry['days_traded'] = strat.total_days_traded
             entry['adjustment_count'] = strat.adjustment_count
             entry['max_adjustments'] = strat.max_adjustments
+            entry['adjustment_history'] = strat.adjustment_history
             entry['premium_collected'] = round(strat.total_premium_collected, 2)
             entry['target_pnl'] = round(strat.target_pnl, 2)
             entry['stop_loss'] = round(strat.stop_loss, 2)
