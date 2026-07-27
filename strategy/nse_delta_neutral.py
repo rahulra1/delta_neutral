@@ -88,7 +88,7 @@ class NseDeltaNeutral(BaseStrategy):
                  tp_percent=DEFAULT_TP_PERCENT, sl_percent=DEFAULT_SL_PERCENT,
                  max_adjustments=DEFAULT_MAX_ADJUSTMENTS,
                  monitor_interval=DEFAULT_MONITOR_INTERVAL,
-                 trading_days=None, lot_size=None, paper_trade=True):
+                 trading_days=None, lot_size=None):
         # Symbol & sizing
         self.symbol = symbol
         self.lots = lots
@@ -112,7 +112,6 @@ class NseDeltaNeutral(BaseStrategy):
         self.trading_days = trading_days if trading_days is not None else [0, 1, 2, 3, 4]
 
         # Mode
-        self.paper_trade = paper_trade
 
         # State
         self.call_position = None  # {symbol, strike, mark_price, delta, trading_symbol}
@@ -161,7 +160,6 @@ class NseDeltaNeutral(BaseStrategy):
             'max_adjustments': max_adjustments,
             'monitoring_interval': monitor_interval,
             'trading_days': self.trading_days,
-            'paper_trade': paper_trade,
         }
 
     # ─── Initialization ─────────────────────────────────────────────────
@@ -177,7 +175,7 @@ class NseDeltaNeutral(BaseStrategy):
         self._broker = getattr(_thread_local, 'broker', '')
 
         days_str = ','.join(['Mon', 'Tue', 'Wed', 'Thu', 'Fri'][d] for d in self.trading_days)
-        print(f"[NSE DN] {self.symbol} Delta Neutral Strangle — Weekly Positional {'(Paper)' if self.paper_trade else '(Live)'}")
+        print(f"[NSE DN] {self.symbol} Delta Neutral Strangle — Weekly Positional (Live)")
         print(f"[NSE DN] Delta: ±{self.target_delta} | Tolerance: {self.delta_tolerance}")
         print(f"[NSE DN] Premium threshold: {self.premium_threshold*100:.0f}% | Max adj: {self.max_adjustments}")
         print(f"[NSE DN] TP: {self.tp_percent*100:.0f}% | SL: {self.sl_percent*100:.0f}% of premium")
@@ -296,11 +294,10 @@ class NseDeltaNeutral(BaseStrategy):
         print(f"{tag} Call: {call_opt['strike']} Δ={call_opt['delta']:.4f} @ ₹{call_opt['mark_price']:.2f}")
         print(f"{tag} Put:  {put_opt['strike']} Δ={put_opt['delta']:.4f} @ ₹{put_opt['mark_price']:.2f}")
 
-        # Place orders (or paper-record)
-        if not self.paper_trade:
-            success = self._place_live_orders(call_opt, put_opt, tag)
-            if not success:
-                return False
+        # Place orders
+        success = self._place_live_orders(call_opt, put_opt, tag)
+        if not success:
+            return False
 
         # Record positions
         self.call_position = call_opt
@@ -717,23 +714,22 @@ class NseDeltaNeutral(BaseStrategy):
             'adjustment': self.adjustment_count + 1,
         })
 
-        # Place close order if live
-        if not self.paper_trade:
-            try:
-                from api.groww import place_order
-                resp = place_order(
-                    trading_symbol=close_pos.get('trading_symbol', ''),
-                    quantity=self.quantity,
-                    transaction_type='BUY',
-                    order_type='MARKET',
-                    product='NRML',
-                )
-                if resp.get('error'):
-                    print(f"{tag}   ✗ Close order failed: {resp['error']} — aborting adjustment")
-                    return
-            except Exception as e:
-                print(f"{tag}   ✗ Close order error: {e} — aborting adjustment")
+        # Place close order
+        try:
+            from api.groww import place_order
+            resp = place_order(
+                trading_symbol=close_pos.get('trading_symbol', ''),
+                quantity=self.quantity,
+                transaction_type='BUY',
+                order_type='MARKET',
+                product='NRML',
+            )
+            if resp.get('error'):
+                print(f"{tag}   ✗ Close order failed: {resp['error']} — aborting adjustment")
                 return
+        except Exception as e:
+            print(f"{tag}   ✗ Close order error: {e} — aborting adjustment")
+            return
 
         self.cumulative_realized_pnl += realized
 
@@ -764,27 +760,26 @@ class NseDeltaNeutral(BaseStrategy):
             self._persist_state()
             return
 
-        # Place new order if live
-        if not self.paper_trade:
-            try:
-                from api.groww import place_order
-                resp = place_order(
-                    trading_symbol=new_opt.get('trading_symbol', ''),
-                    quantity=self.quantity,
-                    transaction_type='SELL',
-                    order_type='MARKET',
-                    product='NRML',
-                )
-                if resp.get('error'):
-                    print(f"{tag}   ✗ New order failed: {resp['error']}")
-                    self.adjustment_count += 1
-                    self._persist_state()
-                    return
-            except Exception as e:
-                print(f"{tag}   ✗ New order error: {e}")
+        # Place new order
+        try:
+            from api.groww import place_order
+            resp = place_order(
+                trading_symbol=new_opt.get('trading_symbol', ''),
+                quantity=self.quantity,
+                transaction_type='SELL',
+                order_type='MARKET',
+                product='NRML',
+            )
+            if resp.get('error'):
+                print(f"{tag}   ✗ New order failed: {resp['error']}")
                 self.adjustment_count += 1
                 self._persist_state()
                 return
+        except Exception as e:
+            print(f"{tag}   ✗ New order error: {e}")
+            self.adjustment_count += 1
+            self._persist_state()
+            return
 
         print(f"{tag}   [3/3] Entered NEW {close_leg.upper()}: {new_opt['strike']} @ ₹{new_opt['mark_price']:.2f}")
 
@@ -832,19 +827,18 @@ class NseDeltaNeutral(BaseStrategy):
             final_pnl += leg_pnl
             print(f"{tag} ✓ Closed {leg_name} {pos['strike']} @ ₹{current:.2f} (PnL: ₹{leg_pnl:+.2f})")
 
-            # Place close order if live
-            if not self.paper_trade:
-                try:
-                    from api.groww import place_order
-                    place_order(
-                        trading_symbol=pos.get('trading_symbol', ''),
-                        quantity=self.quantity,
-                        transaction_type='BUY',
-                        order_type='MARKET',
-                        product='NRML',
-                    )
-                except Exception as e:
-                    print(f"{tag} ⚠ Close order error for {leg_name}: {e}")
+            # Place close order
+            try:
+                from api.groww import place_order
+                place_order(
+                    trading_symbol=pos.get('trading_symbol', ''),
+                    quantity=self.quantity,
+                    transaction_type='BUY',
+                    order_type='MARKET',
+                    product='NRML',
+                )
+            except Exception as e:
+                print(f"{tag} ⚠ Close order error for {leg_name}: {e}")
 
         # Reset positions
         self.call_position = None

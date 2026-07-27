@@ -170,7 +170,7 @@ class NseEmaCreditSpread(BaseStrategy):
                  monitor_interval=DEFAULT_MONITOR_INTERVAL,
                  entry_hour=DEFAULT_ENTRY_HOUR, entry_minute=DEFAULT_ENTRY_MINUTE,
                  exit_hour=DEFAULT_EXIT_HOUR, exit_minute=DEFAULT_EXIT_MINUTE,
-                 trading_days=None, lot_size=None, paper_trade=True):
+                 trading_days=None, lot_size=None):
         self.symbol = symbol
         self.lots = lots
         self.lot_size = lot_size if lot_size else NSE_LOT_SIZES.get(symbol, 50)
@@ -186,7 +186,6 @@ class NseEmaCreditSpread(BaseStrategy):
         self.exit_hour = exit_hour
         self.exit_minute = exit_minute
         self.trading_days = trading_days if trading_days is not None else DEFAULT_TRADING_DAYS
-        self.paper_trade = paper_trade
 
         # State
         self._running = False
@@ -216,7 +215,6 @@ class NseEmaCreditSpread(BaseStrategy):
             'entry_hour': entry_hour, 'entry_minute': entry_minute,
             'exit_hour': exit_hour, 'exit_minute': exit_minute,
             'trading_days': self.trading_days,
-            'paper_trade': paper_trade,
         }
 
     def initialize(self):
@@ -228,7 +226,7 @@ class NseEmaCreditSpread(BaseStrategy):
         self._broker = getattr(_thread_local, 'broker', '')
 
         days_str = ','.join(['Mon', 'Tue', 'Wed', 'Thu', 'Fri'][d] for d in self.trading_days)
-        print(f"[NSE EMA] {self.symbol} Credit Spread {'(Paper)' if self.paper_trade else '(Live)'}")
+        print(f"[NSE EMA] {self.symbol} Credit Spread (Live)")
         print(f"[NSE EMA] EMA{self.ema_period} | Sell {self.sell_delta}Δ / Buy {self.buy_delta}Δ")
         print(f"[NSE EMA] TP: {self.tp_pct*100:.0f}% | SL: {self.sl_pct*100:.0f}% of premium")
         print(f"[NSE EMA] Entry: {self.entry_hour}:{self.entry_minute:02d} | Exit: {self.exit_hour}:{self.exit_minute:02d} IST")
@@ -374,11 +372,10 @@ class NseEmaCreditSpread(BaseStrategy):
             print(f"{tag} ✗ No net credit (sell ₹{sell_opt['mark_price']:.2f} <= buy ₹{buy_opt['mark_price']:.2f})")
             return [], 0, ''
 
-        # Place orders if live
-        if not self.paper_trade:
-            success = self._place_spread_orders(sell_opt, buy_opt, tag)
-            if not success:
-                return [], 0, ''
+        # Place orders
+        success = self._place_spread_orders(sell_opt, buy_opt, tag)
+        if not success:
+            return [], 0, ''
 
         # Build leg records
         day_legs = [
@@ -594,18 +591,17 @@ class NseEmaCreditSpread(BaseStrategy):
         return pnl
 
     def _close_day_legs(self, day_legs, tag):
-        """Close spread legs (live orders or just record exit)."""
-        if not self.paper_trade:
-            try:
-                from api.groww import place_order
-                for leg in day_legs:
-                    close_side = 'BUY' if leg['side'] == 'sell' else 'SELL'
-                    place_order(
-                        trading_symbol=leg.get('trading_symbol', ''),
-                        quantity=self.quantity,
-                        transaction_type=close_side, order_type='MARKET', product='NRML')
-            except Exception as e:
-                print(f"{tag} ⚠ Close order error: {e}")
+        """Close spread legs with live orders."""
+        try:
+            from api.groww import place_order
+            for leg in day_legs:
+                close_side = 'BUY' if leg['side'] == 'sell' else 'SELL'
+                place_order(
+                    trading_symbol=leg.get('trading_symbol', ''),
+                    quantity=self.quantity,
+                    transaction_type=close_side, order_type='MARKET', product='NRML')
+        except Exception as e:
+            print(f"{tag} ⚠ Close order error: {e}")
 
         # Remove from shared legs
         with self._legs_lock:
@@ -634,7 +630,7 @@ class NseEmaCreditSpread(BaseStrategy):
         self._running = False
         with self._legs_lock:
             legs_copy = list(self.legs)
-        if legs_copy and not self.paper_trade:
+        if legs_copy:
             try:
                 from api.groww import place_order
                 for leg in legs_copy:

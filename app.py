@@ -950,7 +950,6 @@ def _resume_db_strategies():
                         monitor_interval=int(details.get('monitoring_interval', 15)),
                         trading_days=trading_days,
                         lot_size=int(details['lot_size']) if details.get('lot_size') else None,
-                        paper_trade=details.get('paper_trade', True),
                     )
                     s._log_queue = entry['log_queue']
                     s._log_history = entry['log_history']
@@ -1058,7 +1057,6 @@ def _resume_db_strategies():
                         exit_minute=int(details.get('exit_minute', 15)),
                         trading_days=trading_days,
                         lot_size=int(details['lot_size']) if details.get('lot_size') else None,
-                        paper_trade=details.get('paper_trade', True),
                     )
                     s._log_queue = entry['log_queue']
                     s._log_history = entry['log_history']
@@ -1645,7 +1643,6 @@ def _save_nse_dn_legs(sid, s):
         'exit_hour': s.exit_hour,
         'exit_minute': s.exit_minute,
         'trading_days': s.trading_days,
-        'paper_trade': s.paper_trade,
         'cumulative_realized_pnl': round(s.cumulative_realized_pnl, 2),
         'total_days_traded': s.total_days_traded,
         'adjustment_count': s.adjustment_count,
@@ -4198,7 +4195,7 @@ def nse_strangle_start():
     nse_strangle_strategies[sid] = entry
     # Include profile_id in details so it's persisted and available on resume
     save_details = {**params, 'profile_id': profile_id}
-    track_strategy(sid, 'NSE Strangle', f"{symbol} Paper Strangle", current_user_id(), details=save_details)
+    track_strategy(sid, 'NSE Strangle', f"{symbol} Live Strangle", current_user_id(), details=save_details)
     entry['thread'] = threading.Thread(target=run_nse_strangle_strategy, args=(sid, params), daemon=True)
     entry['thread'].start()
     return jsonify(status="started", sid=sid)
@@ -4306,7 +4303,6 @@ def run_nse_dn_strategy(sid, params):
             monitor_interval=int(params.get('monitoring_interval', 15)),
             trading_days=trading_days,
             lot_size=int(params['lot_size']) if params.get('lot_size') else None,
-            paper_trade=params.get('paper_trade', True),
         )
         s._log_queue = entry['log_queue']
         s._log_history = entry['log_history']
@@ -4471,7 +4467,6 @@ def run_nse_ema_strategy(sid, params):
             exit_minute=int(params.get('exit_minute', 15)),
             trading_days=trading_days,
             lot_size=int(params['lot_size']) if params.get('lot_size') else None,
-            paper_trade=params.get('paper_trade', True),
         )
         s._log_queue = entry['log_queue']
         s._log_history = entry['log_history']
@@ -4538,7 +4533,6 @@ def _save_nse_ema_legs(sid, s):
         'exit_hour': s.exit_hour,
         'exit_minute': s.exit_minute,
         'trading_days': s.trading_days,
-        'paper_trade': s.paper_trade,
         'cumulative_pnl': round(s.cumulative_pnl, 2),
         'total_days_traded': s.total_days_traded,
         'trade_log': s.trade_log[-50:],

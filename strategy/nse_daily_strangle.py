@@ -1,4 +1,4 @@
-"""NSE Daily Short Strangle — Indian market paper trading.
+"""NSE Daily Short Strangle — Indian market options strategy.
 
 Entry: Configurable time (default 9:20 AM IST) on selected weekdays.
 Sell OTM call + OTM put nearest to target premium (in ₹).
@@ -7,7 +7,7 @@ Exit: Configurable time (default 3:15 PM IST) — square off surviving legs.
 Re-entry: After SL hit, re-enter same side once with nearest premium option.
 Market hours: 9:15 AM – 3:30 PM IST, Mon–Fri only.
 Symbols: NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY.
-Paper trading: No real orders — tracks positions via NSE LTP data.
+Executes live orders via Groww API.
 """
 
 import time
@@ -55,7 +55,7 @@ DEFAULT_TRADING_DAYS = [0, 1, 2, 3, 4]
 
 
 class NseDailyStrangle(BaseStrategy):
-    """NSE short strangle: paper trade on Indian index options with configurable days."""
+    """NSE short strangle: trades Indian index options with configurable days."""
 
     def __init__(self, symbol='NIFTY', lots=1, target_premium=TARGET_PREMIUM,
                  sl_pct=SL_PCT, entry_hour=ENTRY_HOUR, entry_minute=ENTRY_MINUTE,
@@ -96,7 +96,7 @@ class NseDailyStrangle(BaseStrategy):
         self._api_secret = get_api_secret()
         self._broker = getattr(_thread_local, 'broker', '')
         days_str = ','.join(['Mon', 'Tue', 'Wed', 'Thu', 'Fri'][d] for d in self.trading_days)
-        print(f"[NSE Strangle] {self.symbol} Paper Strangle started")
+        print(f"[NSE Strangle] {self.symbol} Live Strangle started")
         print(f"[NSE Strangle] Entry: {self.entry_hour}:{self.entry_minute:02d} | Exit: {self.exit_hour}:{self.exit_minute:02d} IST")
         print(f"[NSE Strangle] Premium: ₹{self.target_premium}/leg | SL: {self.sl_pct*100:.0f}% | Lots: {self.lots} ({self.quantity} qty)")
         print(f"[NSE Strangle] Trading days: {days_str}")
@@ -161,10 +161,30 @@ class NseDailyStrangle(BaseStrategy):
         print(f"{tag} Spot: ₹{spot:.0f} | Expiry: {expiry}")
         print(f"{tag} Call: {call_opt['strike']} @ ₹{call_opt['mark_price']:.2f} | Put: {put_opt['strike']} @ ₹{put_opt['mark_price']:.2f}")
 
+        # Place live orders
+        try:
+            from api.groww import place_order
+            for opt, opt_type in [(call_opt, 'call'), (put_opt, 'put')]:
+                resp = place_order(
+                    trading_symbol=opt.get('trading_symbol', ''),
+                    quantity=self.quantity,
+                    transaction_type='SELL',
+                    order_type='MARKET',
+                    product='NRML',
+                )
+                if resp.get('error'):
+                    print(f"{tag} ✗ SELL {opt_type.upper()} order failed: {resp['error']}")
+                    return []
+                print(f"{tag} ✓ Live SELL {opt_type.upper()} {opt['strike']} placed")
+        except Exception as e:
+            print(f"{tag} ✗ Order error: {e}")
+            return []
+
         day_legs = []
         for opt, opt_type in [(call_opt, 'call'), (put_opt, 'put')]:
             leg = {
                 'symbol': opt['symbol'],
+                'trading_symbol': opt.get('trading_symbol', ''),
                 'product_id': opt.get('product_id'),  # None for NSE paper
                 'side': 'sell',
                 'strike': opt['strike'],
@@ -256,6 +276,20 @@ class NseDailyStrangle(BaseStrategy):
                     print(f"{tag} 🛑 {leg['type'].upper()} SL hit: ₹{current:.2f} >= ₹{leg['sl_price']:.2f}")
                     leg['stopped'] = True
                     leg['exit_price'] = current
+
+                    # Place close order for stopped leg
+                    try:
+                        from api.groww import place_order
+                        place_order(
+                            trading_symbol=leg.get('trading_symbol', ''),
+                            quantity=self.quantity,
+                            transaction_type='BUY',
+                            order_type='MARKET',
+                            product='NRML',
+                        )
+                    except Exception as e:
+                        print(f"{tag} ⚠ SL close order error: {e}")
+
                     self._persist_state()
 
                     # Re-entry
@@ -337,9 +371,29 @@ class NseDailyStrangle(BaseStrategy):
             reentry_used[opt_type] = True
             return
 
+        # Place live order for re-entry
+        try:
+            from api.groww import place_order
+            resp = place_order(
+                trading_symbol=new_opt.get('trading_symbol', ''),
+                quantity=self.quantity,
+                transaction_type='SELL',
+                order_type='MARKET',
+                product='NRML',
+            )
+            if resp.get('error'):
+                print(f"{tag} ✗ Re-entry SELL order failed: {resp['error']}")
+                reentry_used[opt_type] = True
+                return
+        except Exception as e:
+            print(f"{tag} ✗ Re-entry order error: {e}")
+            reentry_used[opt_type] = True
+            return
+
         expiry = day_legs[0].get('expiry', '')
         new_leg = {
             'symbol': new_opt['symbol'],
+            'trading_symbol': new_opt.get('trading_symbol', ''),
             'product_id': new_opt.get('product_id'),
             'side': 'sell',
             'strike': new_opt['strike'],
@@ -359,7 +413,7 @@ class NseDailyStrangle(BaseStrategy):
         self._persist_state()
 
     def _close_day_legs(self, day_legs, tag):
-        """Close all non-stopped legs (paper: just record exit price from current LTP)."""
+        """Close all non-stopped legs with live BUY orders."""
         expiry = day_legs[0].get('expiry') if day_legs else None
         if expiry:
             _get_expiries, _get_chain = _get_data_source()
@@ -379,6 +433,22 @@ class NseDailyStrangle(BaseStrategy):
                     current = price_map.get((leg['type'], str(leg['strike'])))
                     leg['exit_price'] = current if current else leg.get('current_mark', leg['entry_price'])
                     leg['stopped'] = True
+
+                    # Place close order
+                    try:
+                        from api.groww import place_order
+                        resp = place_order(
+                            trading_symbol=leg.get('trading_symbol', ''),
+                            quantity=self.quantity,
+                            transaction_type='BUY',
+                            order_type='MARKET',
+                            product='NRML',
+                        )
+                        if resp.get('error'):
+                            print(f"{tag} ⚠ Close {leg['type'].upper()} order failed: {resp['error']}")
+                    except Exception as e:
+                        print(f"{tag} ⚠ Close order error: {e}")
+
                     print(f"{tag} ✓ Closed {leg['type'].upper()} {leg['strike']} @ ₹{leg['exit_price']:.2f}")
                 return
 
@@ -387,6 +457,17 @@ class NseDailyStrangle(BaseStrategy):
             if not leg.get('stopped', False):
                 leg['exit_price'] = leg.get('current_mark', leg['entry_price'])
                 leg['stopped'] = True
+                try:
+                    from api.groww import place_order
+                    place_order(
+                        trading_symbol=leg.get('trading_symbol', ''),
+                        quantity=self.quantity,
+                        transaction_type='BUY',
+                        order_type='MARKET',
+                        product='NRML',
+                    )
+                except Exception as e:
+                    print(f"{tag} ⚠ Fallback close error: {e}")
 
     def _find_nearest_premium(self, chain, opt_type, spot):
         """Find OTM option closest to target premium."""
@@ -420,6 +501,23 @@ class NseDailyStrangle(BaseStrategy):
 
     def close_all(self):
         self._running = False
+        with self._legs_lock:
+            legs_copy = list(self.legs)
+        if legs_copy:
+            try:
+                from api.groww import place_order
+                for leg in legs_copy:
+                    if leg.get('stopped', False):
+                        continue
+                    place_order(
+                        trading_symbol=leg.get('trading_symbol', ''),
+                        quantity=self.quantity,
+                        transaction_type='BUY',
+                        order_type='MARKET',
+                        product='NRML',
+                    )
+            except Exception:
+                pass
         with self._legs_lock:
             self.legs.clear()
         try:

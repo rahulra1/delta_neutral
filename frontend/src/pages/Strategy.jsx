@@ -78,8 +78,8 @@ const STRATEGIES = [
     features: ['0DTE Expiry', '9AM Entry / 5PM Exit', '100% SL Per Leg', 'Daily Auto-Trade'],
     rec: '⏱ Daily 9:00 AM · BTC options · $200 margin for 0.1 BTC' },
   { key: 'nse_strangle', label: 'NSE Strangle', icon: '🇮🇳', type: 'Options',
-    desc: 'Paper-trade short strangle on NIFTY/BANKNIFTY. Sell OTM call + put nearest ₹target premium, configurable SL & trading days.',
-    features: ['NSE Index Options', 'Configurable Days', 'Paper Trading', 'Per-Leg SL + Re-entry'],
+    desc: 'Live short strangle on NIFTY/BANKNIFTY. Sell OTM call + put nearest ₹target premium, configurable SL & trading days.',
+    features: ['NSE Index Options', 'Configurable Days', 'Live Orders', 'Per-Leg SL + Re-entry'],
     rec: '⏱ Market Hours 9:15–3:30 · NIFTY, BANKNIFTY, FINNIFTY' },
   { key: 'nse_delta_neutral', label: 'NSE Delta Neutral', icon: '🎯🇮🇳', type: 'Options',
     desc: 'Weekly positional short strangle on NSE indices. Enters Wednesday 9:20, exits on TP/SL/max adj or Tuesday 15:15. NRML orders.',
@@ -219,7 +219,6 @@ const NSE_DN_FIELDS = [
   { key: 'sl_percent', label: 'Stop Loss (% of Premium)', type: 'number', default: 70 },
   { key: 'max_adjustments', label: 'Max Adjustments', type: 'number', default: 5 },
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 15 },
-  { key: 'paper_trade', label: 'Paper Trade', type: 'select', options: [{value:true,label:'Yes (Paper)'},{value:false,label:'No (Live)'}], default: true },
 ];
 
 const NSE_EMA_SPREAD_FIELDS = [
@@ -237,7 +236,6 @@ const NSE_EMA_SPREAD_FIELDS = [
   { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 15 },
   { key: 'exit_minute', label: 'Exit Minute', type: 'number', default: 15 },
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 15 },
-  { key: 'paper_trade', label: 'Paper Trade', type: 'select', options: [{value:true,label:'Yes (Paper)'},{value:false,label:'No (Live)'}], default: true },
 ];
 
 const PIVOT_ST_FIELDS = [
@@ -569,7 +567,7 @@ export default function Strategy() {
           )} />
       )}
       {activeTab === 'nse_strangle' && (
-        <StrategyTemplate title="NSE Strangle (Paper)" icon="🇮🇳" type="Options" description="Paper-trade short strangle on NIFTY/BANKNIFTY. Sell OTM call + put at target premium with per-leg SL." profiles={profiles}
+        <StrategyTemplate title="NSE Strangle" icon="🇮🇳" type="Options" description="Live short strangle on NIFTY/BANKNIFTY. Sell OTM call + put at target premium with per-leg SL." profiles={profiles}
           configFields={NSE_STRANGLE_FIELDS}
           onStart={async (config) => {
             const c = { ...config };
@@ -628,8 +626,6 @@ export default function Strategy() {
           onStart={async (config) => {
             const c = { ...config };
             if (typeof c.trading_days === 'string') c.trading_days = c.trading_days.split(',').map(d => parseInt(d.trim()));
-            if (c.paper_trade === 'true' || c.paper_trade === true) c.paper_trade = true;
-            else c.paper_trade = false;
             const { data } = await api.post('/nse-dn/start', c);
             return data;
           }}
@@ -691,8 +687,6 @@ export default function Strategy() {
           onStart={async (config) => {
             const c = { ...config };
             if (typeof c.trading_days === 'string') c.trading_days = c.trading_days.split(',').map(d => parseInt(d.trim()));
-            if (c.paper_trade === 'true' || c.paper_trade === true) c.paper_trade = true;
-            else c.paper_trade = false;
             const { data } = await api.post('/nse-ema/start', c);
             return data;
           }}
