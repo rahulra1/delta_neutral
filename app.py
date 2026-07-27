@@ -4214,7 +4214,8 @@ def nse_strangle_stop():
             e['strategy'].close_all()
         except Exception as ex:
             logger.error(f"[nse_strangle_stop] {sid} error: {ex}")
-    return jsonify(status="stopping")
+    e['running'] = False
+    return jsonify(status="stopped")
 
 
 @app.route('/api/nse-strangle/stream/<sid>')
@@ -4380,7 +4381,8 @@ def nse_dn_stop():
             e['strategy'].close_all()
         except Exception as ex:
             logger.error(f"[nse_dn_stop] {sid} error: {ex}")
-    return jsonify(status="stopping")
+    e['running'] = False
+    return jsonify(status="stopped")
 
 
 @app.route('/api/nse-dn/stream/<sid>')
@@ -4575,7 +4577,8 @@ def nse_ema_stop():
             e['strategy'].close_all()
         except Exception as ex:
             logger.error(f"[nse_ema_stop] {sid} error: {ex}")
-    return jsonify(status="stopping")
+    e['running'] = False
+    return jsonify(status="stopped")
 
 
 @app.route('/api/nse-ema/stream/<sid>')
