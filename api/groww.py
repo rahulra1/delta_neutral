@@ -133,31 +133,28 @@ def get_groww_expiries(symbol, year=None, month=None):
             client = _get_client(force_refresh=(attempt > 0))
             now = datetime.now(IST)
             y = year or now.year
-            m = month or now.month
 
-            resp = client.get_expiries(
-                exchange='NSE',
-                underlying_symbol=symbol,
-                year=y,
-                month=m
-            )
+            # Only pass month if explicitly provided; otherwise fetch all expiries for the year
+            kwargs = {'exchange': 'NSE', 'underlying_symbol': symbol, 'year': y}
+            if month:
+                kwargs['month'] = month
+
+            resp = client.get_expiries(**kwargs)
             expiries_raw = resp.get('expiries', [])
 
-            # If current month has no future expiries, try next month
+            # Filter to future expiries only
             today_str = now.strftime('%Y-%m-%d')
             future = [e for e in expiries_raw if e >= today_str]
 
-            if not future and not year and not month:
-                # Try next month
-                next_m = m + 1 if m < 12 else 1
-                next_y = y if m < 12 else y + 1
+            # If year is almost over and we don't have enough, also fetch next year
+            if len(future) < 2 and not year and not month:
                 resp2 = client.get_expiries(
                     exchange='NSE',
                     underlying_symbol=symbol,
-                    year=next_y,
-                    month=next_m
+                    year=y + 1
                 )
-                future = [e for e in resp2.get('expiries', []) if e >= today_str]
+                next_year_expiries = [e for e in resp2.get('expiries', []) if e >= today_str]
+                future = sorted(set(future + next_year_expiries))
 
             # Convert from YYYY-MM-DD to DD-MM-YYYY (project standard)
             result = []
