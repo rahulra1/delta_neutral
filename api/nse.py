@@ -174,6 +174,67 @@ def _parse_opt(d, symbol, opt_type, strike, expiry):
     }
 
 
+def get_nse_daily_candles(symbol, days=15):
+    """Fetch daily OHLCV candles for an NSE index using Groww API.
+
+    Returns list of dicts: [{'close': float, 'open': float, 'high': float, 'low': float, 'time': str}, ...]
+    ordered oldest-first, limited to last `days` candles.
+    """
+    try:
+        from api.groww import _get_client
+        from datetime import timedelta, timezone as tz
+        IST = tz(timedelta(hours=5, minutes=30))
+
+        client = _get_client()
+        now = datetime.now(IST)
+        # Fetch extra days to account for weekends/holidays
+        start = (now - timedelta(days=days + 10)).strftime('%Y-%m-%d %H:%M:%S')
+        end = now.strftime('%Y-%m-%d %H:%M:%S')
+
+        # Groww symbol format: NSE-<SYMBOL>
+        groww_symbol = f'NSE-{symbol}'
+
+        resp = client.get_historical_candles(
+            exchange='NSE',
+            segment='CASH',
+            groww_symbol=groww_symbol,
+            start_time=start,
+            end_time=end,
+            candle_interval='1day'
+        )
+
+        candles_raw = resp.get('candles', [])
+        if not candles_raw:
+            logger.warning(f"Groww daily candles: no data for {symbol}")
+            return []
+
+        # Convert to expected format
+        result = []
+        for c in candles_raw:
+            # Groww candle format: [timestamp, open, high, low, close, volume]
+            if isinstance(c, (list, tuple)) and len(c) >= 5:
+                result.append({
+                    'close': float(c[4]),
+                    'open': float(c[1]),
+                    'high': float(c[2]),
+                    'low': float(c[3]),
+                    'time': c[0],
+                })
+            elif isinstance(c, dict):
+                result.append({
+                    'close': float(c.get('close', c.get('c', 0))),
+                    'open': float(c.get('open', c.get('o', 0))),
+                    'high': float(c.get('high', c.get('h', 0))),
+                    'low': float(c.get('low', c.get('l', 0))),
+                    'time': c.get('time', c.get('t', '')),
+                })
+
+        return result[-days:] if len(result) > days else result
+    except Exception as e:
+        logger.warning(f"Groww daily candles fetch failed for {symbol}: {e}")
+        return []
+
+
 def _generate_expiries():
     """Fallback: generate likely weekly Thursday expiries."""
     from datetime import timedelta
