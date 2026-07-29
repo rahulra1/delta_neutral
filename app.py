@@ -977,7 +977,9 @@ def _resume_db_strategies():
                                 'delta': call_leg.get('delta', 0),
                             }
                             s.call_entry_price = float(call_leg.get('entry_price', 0))
-                            s._call_current = float(call_leg.get('current_mark', 0))
+                            # Use current_mark if available, otherwise fallback to entry_price
+                            # so PnL shows correctly until live data arrives
+                            s._call_current = float(call_leg.get('current_mark', 0)) or s.call_entry_price
                         if put_leg:
                             s.put_position = {
                                 'symbol': put_leg.get('symbol', ''),
@@ -987,7 +989,7 @@ def _resume_db_strategies():
                                 'delta': put_leg.get('delta', 0),
                             }
                             s.put_entry_price = float(put_leg.get('entry_price', 0))
-                            s._put_current = float(put_leg.get('current_mark', 0))
+                            s._put_current = float(put_leg.get('current_mark', 0)) or s.put_entry_price
                     s.initialize()
                     if s.trade_log:
                         print(f"[NSE DN] Restored {len(s.trade_log)} trades | Cum PnL: ₹{s.cumulative_realized_pnl:+.2f}")
