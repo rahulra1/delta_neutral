@@ -249,6 +249,9 @@ function SignalPanel({ asset, profileId, signalKey, timeframes, setError, title 
 // ── Config-based strategy panel (Delta Neutral etc.) ──
 
 function ConfigPanel({ asset, profileId, configFields, onStart, onStop, statusEndpoint, streamEndpoint, renderStatus, setError }) {
+  // Lot size map for auto-update when symbol changes
+  const LOT_SIZE_MAP = { NIFTY: 65, BANKNIFTY: 30, FINNIFTY: 65, MIDCPNIFTY: 50, SENSEX: 20 };
+
   const [form, setForm] = useState(() => {
     const f = {};
     configFields.forEach(c => { f[c.key] = c.default ?? ''; });
@@ -264,7 +267,14 @@ function ConfigPanel({ asset, profileId, configFields, onStart, onStop, statusEn
 
   useEffect(() => () => { esRef.current?.close(); clearInterval(pollRef.current); }, []);
 
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const set = (k, v) => setForm(f => {
+    const updated = { ...f, [k]: v };
+    // Auto-update lot_size when symbol changes
+    if (k === 'symbol' && LOT_SIZE_MAP[v] && 'lot_size' in f) {
+      updated.lot_size = LOT_SIZE_MAP[v];
+    }
+    return updated;
+  });
 
   const start = async () => {
     setError(''); setLogs([]);

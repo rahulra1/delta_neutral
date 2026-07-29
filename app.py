@@ -1081,6 +1081,15 @@ def _resume_db_strategies():
                             direction = 'bear_call' if sell_legs[0].get('type') == 'call' else 'bull_put'
                             _thr.Thread(target=s._monitor_day_trade,
                                         args=(legs, premium, day_num, direction), daemon=True).start()
+                            # Tell monitor() to skip today so it doesn't open a duplicate trade
+                            # for the same day the restored legs belong to
+                            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                            _ist = _tz(_td(hours=5, minutes=30))
+                            opened_date = legs[0].get('opened_at', '')
+                            today_str = _dt.now(_ist).strftime('%Y-%m-%d')
+                            # Skip today if restored legs were opened today
+                            if opened_date == today_str:
+                                s._skip_today = today_str
                     s.monitor()
                 except Exception as e:
                     logger.error(f"[resume] NSE EMA {sid} error: {e}")
@@ -1686,7 +1695,9 @@ def _setup_strategy_thread(entry):
     broker_name = p.get('broker', '')
     if broker_name == 'groww':
         from api.groww import check_connection
-        if not check_connection(p['api_key'], p['api_secret']):
+        # Use the strategy's symbol for connection check (correct exchange for BSE symbols)
+        symbol = (entry.get('params') or {}).get('symbol', None)
+        if not check_connection(p['api_key'], p['api_secret'], symbol=symbol):
             entry['log_queue'].put("❌ Cannot connect to Groww API")
             entry['running'] = False
             return False
@@ -4554,11 +4565,20 @@ def nse_ema_start():
     profile_id = params.pop('profile_id', None)
     sid = str(uuid.uuid4())[:8]
     symbol = params.get('symbol', 'NIFTY')
+
+    # Prevent duplicate — only one running NSE EMA per symbol per user
+    uid = current_user_id()
+    for sid_existing, e in nse_ema_strategies.items():
+        if e.get('user_id') == uid and e.get('running'):
+            existing_symbol = e.get('params', {}).get('symbol', 'NIFTY')
+            if existing_symbol == symbol:
+                return jsonify(error=f"Already running NSE EMA for {symbol} (sid: {sid_existing})"), 400
+
     entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
-             'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+             'running': True, 'params': params, 'user_id': uid, 'profile_id': profile_id}
     nse_ema_strategies[sid] = entry
     save_details = {**params, 'profile_id': profile_id}
-    track_strategy(sid, 'NSE EMA Spread', f"{symbol} EMA Credit Spread", current_user_id(), details=save_details)
+    track_strategy(sid, 'NSE EMA Spread', f"{symbol} EMA Credit Spread", uid, details=save_details)
     entry['thread'] = threading.Thread(target=run_nse_ema_strategy, args=(sid, params), daemon=True)
     entry['thread'].start()
     return jsonify(status="started", sid=sid)

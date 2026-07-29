@@ -195,9 +195,9 @@ const STRANGLE_FIELDS = [
 ];
 
 const NSE_STRANGLE_FIELDS = [
-  { key: 'symbol', label: 'Symbol', type: 'select', options: [{value:'NIFTY',label:'NIFTY'},{value:'BANKNIFTY',label:'BANKNIFTY'},{value:'FINNIFTY',label:'FINNIFTY'},{value:'MIDCPNIFTY',label:'MIDCPNIFTY'}], default: 'NIFTY' },
+  { key: 'symbol', label: 'Symbol', type: 'select', options: [{value:'NIFTY',label:'NIFTY'},{value:'BANKNIFTY',label:'BANKNIFTY'},{value:'FINNIFTY',label:'FINNIFTY'},{value:'MIDCPNIFTY',label:'MIDCPNIFTY'},{value:'SENSEX',label:'SENSEX'}], default: 'NIFTY' },
   { key: 'lots', label: 'Number of Lots', type: 'number', default: 1 },
-  { key: 'lot_size', label: 'Lot Size (override)', type: 'number', default: 65, hint: 'NIFTY=65, BANKNIFTY=30, FINNIFTY=65' },
+  { key: 'lot_size', label: 'Lot Size (override)', type: 'number', default: 65, hint: 'NIFTY=65, BANKNIFTY=30, FINNIFTY=65, SENSEX=20' },
   { key: 'target_premium', label: 'Target Premium (₹)', type: 'number', default: 100, hint: 'Premium per leg to sell' },
   { key: 'sl_pct', label: 'Stop Loss (%)', type: 'number', default: 200, hint: '200 = SL when premium doubles' },
   { key: 'trading_days', label: 'Trading Days', type: 'text', default: '0,1,2,3,4', hint: '0=Mon,1=Tue,2=Wed,3=Thu,4=Fri' },
@@ -209,7 +209,7 @@ const NSE_STRANGLE_FIELDS = [
 ];
 
 const NSE_DN_FIELDS = [
-  { key: 'symbol', label: 'Symbol', type: 'select', options: [{value:'NIFTY',label:'NIFTY'},{value:'BANKNIFTY',label:'BANKNIFTY'},{value:'FINNIFTY',label:'FINNIFTY'},{value:'MIDCPNIFTY',label:'MIDCPNIFTY'}], default: 'NIFTY' },
+  { key: 'symbol', label: 'Symbol', type: 'select', options: [{value:'NIFTY',label:'NIFTY'},{value:'BANKNIFTY',label:'BANKNIFTY'},{value:'FINNIFTY',label:'FINNIFTY'},{value:'MIDCPNIFTY',label:'MIDCPNIFTY'},{value:'SENSEX',label:'SENSEX'}], default: 'NIFTY' },
   { key: 'lots', label: 'Number of Lots', type: 'number', default: 1 },
   { key: 'lot_size', label: 'Lot Size (override)', type: 'number', default: 65, hint: 'NIFTY=65, BANKNIFTY=30' },
   { key: 'target_delta', label: 'Target Delta', type: 'number', step: '0.01', default: 0.20 },
@@ -222,7 +222,7 @@ const NSE_DN_FIELDS = [
 ];
 
 const NSE_EMA_SPREAD_FIELDS = [
-  { key: 'symbol', label: 'Symbol', type: 'select', options: [{value:'NIFTY',label:'NIFTY'},{value:'BANKNIFTY',label:'BANKNIFTY'},{value:'FINNIFTY',label:'FINNIFTY'},{value:'MIDCPNIFTY',label:'MIDCPNIFTY'}], default: 'NIFTY' },
+  { key: 'symbol', label: 'Symbol', type: 'select', options: [{value:'NIFTY',label:'NIFTY'},{value:'BANKNIFTY',label:'BANKNIFTY'},{value:'FINNIFTY',label:'FINNIFTY'},{value:'MIDCPNIFTY',label:'MIDCPNIFTY'},{value:'SENSEX',label:'SENSEX'}], default: 'NIFTY' },
   { key: 'lots', label: 'Number of Lots', type: 'number', default: 1 },
   { key: 'lot_size', label: 'Lot Size (override)', type: 'number', default: 65, hint: 'NIFTY=65, BANKNIFTY=30' },
   { key: 'ema_period', label: 'EMA Period', type: 'number', default: 10 },

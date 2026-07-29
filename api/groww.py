@@ -23,6 +23,14 @@ _CLIENT_TTL = 3600  # re-authenticate every 1 hour (Groww tokens expire)
 _chain_cache = {}  # {(symbol, expiry): {data, ts}}
 _CACHE_TTL = 15  # seconds
 
+# BSE symbols that need exchange='BSE' instead of 'NSE'
+_BSE_SYMBOLS = {'SENSEX', 'BANKEX'}
+
+
+def _get_exchange(symbol):
+    """Return the correct exchange for a symbol."""
+    return 'BSE' if symbol in _BSE_SYMBOLS else 'NSE'
+
 # Auth error indicators
 _AUTH_ERROR_KEYWORDS = ('authentication failed', 'expired', 'invalid', 'unauthorized', '401')
 
@@ -104,17 +112,22 @@ def _get_client(api_key=None, api_secret=None, force_refresh=False):
         return _client
 
 
-def check_connection(api_key=None, api_secret=None):
-    """Verify Groww API connectivity. Returns True if working."""
+def check_connection(api_key=None, api_secret=None, symbol=None):
+    """Verify Groww API connectivity. Returns True if working.
+    If symbol is provided, checks LTP for that specific asset (uses correct exchange for BSE symbols).
+    """
     try:
         client = _get_client(api_key, api_secret)
-        # Try a simple LTP call to verify connectivity
+        # Use the selected symbol if provided, default to NIFTY
+        check_sym = symbol or 'NIFTY'
+        exchange = _get_exchange(check_sym)
+        exchange_symbol = f'{exchange}_{check_sym}'
         resp = client.get_ltp(
             segment='CASH',
-            exchange_trading_symbols='NSE_NIFTY'
+            exchange_trading_symbols=exchange_symbol
         )
-        if resp and 'NSE_NIFTY' in resp:
-            logger.info(f"Groww connection OK. NIFTY LTP: {resp['NSE_NIFTY']}")
+        if resp and exchange_symbol in resp:
+            logger.info(f"Groww connection OK. {check_sym} LTP: {resp[exchange_symbol]}")
             return True
         return False
     except Exception as e:
@@ -128,6 +141,7 @@ def get_groww_expiries(symbol, year=None, month=None):
     Returns list of expiry dates in DD-MM-YYYY format (matching existing NSE format).
     Auto-retries with fresh authentication if the token has expired.
     """
+    exchange = _get_exchange(symbol)
     for attempt in range(2):  # max 1 retry after re-auth
         try:
             client = _get_client(force_refresh=(attempt > 0))
@@ -135,7 +149,7 @@ def get_groww_expiries(symbol, year=None, month=None):
             y = year or now.year
 
             # Only pass month if explicitly provided; otherwise fetch all expiries for the year
-            kwargs = {'exchange': 'NSE', 'underlying_symbol': symbol, 'year': y}
+            kwargs = {'exchange': exchange, 'underlying_symbol': symbol, 'year': y}
             if month:
                 kwargs['month'] = month
 
@@ -149,7 +163,7 @@ def get_groww_expiries(symbol, year=None, month=None):
             # If year is almost over and we don't have enough, also fetch next year
             if len(future) < 2 and not year and not month:
                 resp2 = client.get_expiries(
-                    exchange='NSE',
+                    exchange=exchange,
                     underlying_symbol=symbol,
                     year=y + 1
                 )
@@ -178,7 +192,7 @@ def get_groww_chain(symbol, expiry_date):
     """Fetch option chain from Groww API.
 
     Args:
-        symbol: Underlying symbol (NIFTY, BANKNIFTY, etc.)
+        symbol: Underlying symbol (NIFTY, BANKNIFTY, SENSEX, etc.)
         expiry_date: Date in DD-MM-YYYY format (project standard)
 
     Returns:
@@ -195,6 +209,7 @@ def get_groww_chain(symbol, expiry_date):
     if cached and time.time() - cached['ts'] < _CACHE_TTL:
         return cached['chain'], cached['spot'], cached['expiry']
 
+    exchange = _get_exchange(symbol)
     for attempt in range(2):  # max 1 retry after re-auth
         try:
             client = _get_client(force_refresh=(attempt > 0))
@@ -208,7 +223,7 @@ def get_groww_chain(symbol, expiry_date):
                 return None, None, None
 
             resp = client.get_option_chain(
-                exchange='NSE',
+                exchange=exchange,
                 underlying=symbol,
                 expiry_date=groww_expiry
             )
@@ -297,14 +312,16 @@ def get_groww_chain(symbol, expiry_date):
 
 def get_spot_price(symbol):
     """Get current spot/LTP for an underlying symbol."""
+    exchange = _get_exchange(symbol)
+    exchange_symbol = f'{exchange}_{symbol}'
     for attempt in range(2):
         try:
             client = _get_client(force_refresh=(attempt > 0))
             resp = client.get_ltp(
                 segment='CASH',
-                exchange_trading_symbols=f'NSE_{symbol}'
+                exchange_trading_symbols=exchange_symbol
             )
-            return resp.get(f'NSE_{symbol}', 0)
+            return resp.get(exchange_symbol, 0)
         except Exception as e:
             if attempt == 0 and _is_auth_error(e):
                 logger.warning(f"Groww token expired for get_spot({symbol}), re-authenticating...")

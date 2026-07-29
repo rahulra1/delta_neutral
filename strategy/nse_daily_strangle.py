@@ -40,6 +40,7 @@ NSE_LOT_SIZES = {
     'BANKNIFTY': 30,
     'FINNIFTY': 65,
     'MIDCPNIFTY': 50,
+    'SENSEX': 20,
 }
 
 # Default parameters

@@ -29,6 +29,7 @@ NSE_LOT_SIZES = {
     'BANKNIFTY': 30,
     'FINNIFTY': 65,
     'MIDCPNIFTY': 50,
+    'SENSEX': 20,
 }
 
 # Market hours
@@ -191,6 +192,7 @@ class NseEmaCreditSpread(BaseStrategy):
         self._running = False
         self.legs = []
         self._legs_lock = threading.Lock()
+        self._state_lock = threading.Lock()  # Protects cumulative_pnl, trade_log, _pnl_history
         self.cumulative_pnl = 0.0
         self.total_days_traded = 0
         self.trade_log = []
@@ -198,6 +200,7 @@ class NseEmaCreditSpread(BaseStrategy):
         self._snap_counter = 0
         self._consecutive_failures = 0
         self._max_consecutive_failures = 10
+        self._skip_today = None  # Set by resume logic to avoid duplicate day-trade
 
         # Credentials (captured at initialize)
         self._api_key = None
@@ -249,6 +252,17 @@ class NseEmaCreditSpread(BaseStrategy):
                 break
 
             now = datetime.now(IST)
+
+            # If resume already spawned a monitor thread for today's restored legs, skip this entry
+            if self._skip_today:
+                today_str = now.strftime('%Y-%m-%d')
+                if self._skip_today == today_str:
+                    print(f"[NSE EMA] Skipping {today_str} — restored legs already being monitored")
+                    self._skip_today = None
+                    continue
+                # Different day means the skip is stale, clear it
+                self._skip_today = None
+
             if now.weekday() not in self.trading_days and not _is_special_session(now):
                 print(f"[NSE EMA] Skipping {now.strftime('%A')} — not a trading day")
                 continue
@@ -481,6 +495,9 @@ class NseEmaCreditSpread(BaseStrategy):
         expiry = day_legs[0].get('expiry', '')
         cycle = 0
 
+        # Per-thread failure counter — NOT shared across concurrent day monitors
+        consecutive_failures = 0
+
         # Compute day label once (includes opened date)
         opened_date = ''
         for leg in day_legs:
@@ -503,16 +520,16 @@ class NseEmaCreditSpread(BaseStrategy):
             chain, spot, _ = _get_chain(self.symbol, expiry)
 
             if not chain:
-                self._consecutive_failures += 1
-                print(f"{day_label} ⚠ Price fetch failed ({self._consecutive_failures}/{self._max_consecutive_failures})")
-                if self._consecutive_failures >= self._max_consecutive_failures:
-                    print(f"{day_label} 🚨 EMERGENCY: {self._consecutive_failures} consecutive failures — closing legs")
+                consecutive_failures += 1
+                print(f"{day_label} ⚠ Price fetch failed ({consecutive_failures}/{self._max_consecutive_failures})")
+                if consecutive_failures >= self._max_consecutive_failures:
+                    print(f"{day_label} 🚨 EMERGENCY: {consecutive_failures} consecutive failures — closing legs")
                     self._close_day_legs(day_legs, day_label)
                     pnl = self._calc_spread_pnl(day_legs)
                     self._record_day(day_num, pnl, premium, 'data_failure', direction)
                     return
                 continue
-            self._consecutive_failures = 0
+            consecutive_failures = 0
 
             # Calculate spread P&L with per-leg details
             pnl = 0.0
@@ -536,14 +553,17 @@ class NseEmaCreditSpread(BaseStrategy):
             if not all_ok:
                 continue
 
-            # PnL history for UI chart
-            self._pnl_history.append((now.isoformat(), round(self.cumulative_pnl + pnl, 2)))
-            if len(self._pnl_history) > 500:
-                self._pnl_history = self._pnl_history[-500:]
+            # PnL history for UI chart (thread-safe)
+            with self._state_lock:
+                cum_pnl = self.cumulative_pnl
+                self._pnl_history.append((now.isoformat(), round(cum_pnl + pnl, 2)))
+                if len(self._pnl_history) > 500:
+                    self._pnl_history = self._pnl_history[-500:]
+                self._snap_counter += 1
+                snap = self._snap_counter
 
             # Save PnL snapshot to DB every 6 ticks
-            self._snap_counter += 1
-            if self._snap_counter % 6 == 0 and self._sid:
+            if snap % 6 == 0 and self._sid:
                 try:
                     from models import save_pnl_snapshot
                     user_id = getattr(self, '_user_id', None)
@@ -558,14 +578,14 @@ class NseEmaCreditSpread(BaseStrategy):
                         except Exception:
                             pass
                     if user_id:
-                        save_pnl_snapshot(user_id, self._sid, round(self.cumulative_pnl + pnl, 2))
+                        save_pnl_snapshot(user_id, self._sid, round(cum_pnl + pnl, 2))
                 except Exception:
                     pass
 
             # Log every tick with per-leg breakdown
             legs_str = ' | '.join(leg_details) if leg_details else ''
             pct = (pnl / premium * 100) if premium > 0 else 0
-            print(f"{day_label} PnL: ₹{pnl:+.2f} ({pct:+.1f}%) | Cum: ₹{self.cumulative_pnl:+.2f} | {legs_str}")
+            print(f"{day_label} PnL: ₹{pnl:+.2f} ({pct:+.1f}%) | Cum: ₹{cum_pnl:+.2f} | {legs_str}")
 
             # Check TP/SL
             if pnl >= target:
@@ -610,17 +630,19 @@ class NseEmaCreditSpread(BaseStrategy):
                     self.legs.remove(leg)
 
     def _record_day(self, day_num, pnl, premium, exit_reason, direction):
-        """Record trade result and update cumulative P&L."""
-        self.cumulative_pnl += pnl
-        self.trade_log.append({
-            'date': datetime.now(IST).strftime('%Y-%m-%d'),
-            'day': day_num,
-            'pnl': round(pnl, 2),
-            'premium': round(premium, 2),
-            'exit_reason': exit_reason,
-            'direction': direction,
-        })
-        print(f"[NSE EMA D{day_num}] Closed | PnL: ₹{pnl:+.2f} | Cumulative: ₹{self.cumulative_pnl:+.2f}")
+        """Record trade result and update cumulative P&L (thread-safe)."""
+        with self._state_lock:
+            self.cumulative_pnl += pnl
+            self.trade_log.append({
+                'date': datetime.now(IST).strftime('%Y-%m-%d'),
+                'day': day_num,
+                'pnl': round(pnl, 2),
+                'premium': round(premium, 2),
+                'exit_reason': exit_reason,
+                'direction': direction,
+            })
+            cum = self.cumulative_pnl
+        print(f"[NSE EMA D{day_num}] Closed | PnL: ₹{pnl:+.2f} | Cumulative: ₹{cum:+.2f}")
         self._persist_state()
 
     # ─── Close All ───────────────────────────────────────────────────────
@@ -652,7 +674,7 @@ class NseEmaCreditSpread(BaseStrategy):
 
     @property
     def pnl(self):
-        """Current total P&L (realized + unrealized from open legs)."""
+        """Current total P&L (realized + unrealized from open legs). Thread-safe."""
         open_pnl = 0.0
         with self._legs_lock:
             for leg in self.legs:
@@ -663,7 +685,8 @@ class NseEmaCreditSpread(BaseStrategy):
                     open_pnl += (leg['entry_price'] - mark) * self.quantity
                 else:
                     open_pnl += (mark - leg['entry_price']) * self.quantity
-        return self.cumulative_pnl + open_pnl
+        with self._state_lock:
+            return self.cumulative_pnl + open_pnl
 
     # ─── Helpers ─────────────────────────────────────────────────────────
 
@@ -744,7 +767,7 @@ class NseEmaCreditSpread(BaseStrategy):
 
     def _persist_state(self):
         """Save trade_log, cumulative_pnl, total_days_traded, and legs to DB.
-        This ensures data survives server restarts."""
+        This ensures data survives server restarts. Thread-safe."""
         try:
             from models import update_strategy_db
             # Find sid if not set
@@ -762,11 +785,13 @@ class NseEmaCreditSpread(BaseStrategy):
             if not sid:
                 return
 
-            # Merge base params with runtime state
-            details = {**self._base_params,
-                       'trade_log': self.trade_log,
-                       'cumulative_pnl': self.cumulative_pnl,
-                       'total_days_traded': self.total_days_traded}
+            # Read shared state under lock
+            with self._state_lock:
+                details = {**self._base_params,
+                           'trade_log': list(self.trade_log),
+                           'cumulative_pnl': self.cumulative_pnl,
+                           'total_days_traded': self.total_days_traded}
+                pnl_val = round(self.cumulative_pnl, 2)
 
             # Serialize current legs explicitly
             legs_data = []
@@ -789,7 +814,7 @@ class NseEmaCreditSpread(BaseStrategy):
             update_strategy_db(sid,
                                details=details,
                                legs=legs_data,
-                               pnl=round(self.cumulative_pnl, 2))
-            logger.debug(f"[NSE EMA] State persisted: {self.total_days_traded} days, ₹{self.cumulative_pnl:.2f}")
+                               pnl=pnl_val)
+            logger.debug(f"[NSE EMA] State persisted: {details['total_days_traded']} days, ₹{pnl_val:.2f}")
         except Exception as e:
             logger.warning(f"[NSE EMA] Failed to persist state: {e}")
