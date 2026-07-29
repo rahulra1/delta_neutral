@@ -2637,7 +2637,7 @@ def api_close_strategy(sid):
             closed = True
     # Fallback — close positions by reversing each leg
     if not closed and api_key:
-        details = all_tracked[sid].get('details', {})
+        details = all_tracked.get(sid, {}).get('details', {})
         placed_legs = details.get('legs', [])
         if isinstance(placed_legs, list) and placed_legs:
             failed = []
