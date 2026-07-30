@@ -114,21 +114,31 @@ def _get_client(api_key=None, api_secret=None, force_refresh=False):
 
 def check_connection(api_key=None, api_secret=None, symbol=None):
     """Verify Groww API connectivity. Returns True if working.
-    If symbol is provided, checks LTP for that specific asset (uses correct exchange for BSE symbols).
+    If symbol is provided, checks LTP for that specific asset first.
+    Falls back to NIFTY (NSE) if the symbol-specific check fails.
     """
     try:
         client = _get_client(api_key, api_secret)
-        # Use the selected symbol if provided, default to NIFTY
-        check_sym = symbol or 'NIFTY'
-        exchange = _get_exchange(check_sym)
-        exchange_symbol = f'{exchange}_{check_sym}'
-        resp = client.get_ltp(
-            segment='CASH',
-            exchange_trading_symbols=exchange_symbol
-        )
-        if resp and exchange_symbol in resp:
-            logger.info(f"Groww connection OK. {check_sym} LTP: {resp[exchange_symbol]}")
-            return True
+        # Try the selected symbol first, then fallback to NIFTY
+        symbols_to_try = []
+        if symbol:
+            symbols_to_try.append(symbol)
+        if symbol != 'NIFTY':
+            symbols_to_try.append('NIFTY')
+
+        for check_sym in symbols_to_try:
+            try:
+                exchange = _get_exchange(check_sym)
+                exchange_symbol = f'{exchange}_{check_sym}'
+                resp = client.get_ltp(
+                    segment='CASH',
+                    exchange_trading_symbols=exchange_symbol
+                )
+                if resp and exchange_symbol in resp:
+                    logger.info(f"Groww connection OK. {check_sym} LTP: {resp[exchange_symbol]}")
+                    return True
+            except Exception:
+                continue
         return False
     except Exception as e:
         logger.warning(f"Groww connection check failed: {e}")
@@ -379,7 +389,7 @@ def place_order(trading_symbol, quantity, transaction_type, order_type='MARKET',
     """Place an order through Groww.
 
     Args:
-        trading_symbol: Exchange trading symbol (e.g., NIFTY25JUL24500CE)
+        trading_symbol: Exchange trading symbol (e.g., NIFTY25JUL24500CE, SENSEX26JUL78000CE)
         quantity: Number of contracts
         transaction_type: 'BUY' or 'SELL'
         order_type: 'MARKET', 'LIMIT', 'SL', 'SL_M'
@@ -390,6 +400,9 @@ def place_order(trading_symbol, quantity, transaction_type, order_type='MARKET',
     Returns:
         dict with groww_order_id, order_status, remark
     """
+    # Determine exchange from trading symbol — BSE symbols start with SENSEX or BANKEX
+    exchange = 'BSE' if any(trading_symbol.startswith(s) for s in _BSE_SYMBOLS) else 'NSE'
+
     for attempt in range(2):
         try:
             client = _get_client(force_refresh=(attempt > 0))
@@ -397,7 +410,7 @@ def place_order(trading_symbol, quantity, transaction_type, order_type='MARKET',
                 trading_symbol=trading_symbol,
                 quantity=quantity,
                 validity='DAY',
-                exchange='NSE',
+                exchange=exchange,
                 segment='FNO',
                 product=product,
                 order_type=order_type,
