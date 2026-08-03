@@ -793,7 +793,7 @@ class NseEmaCreditSpread(BaseStrategy):
                            'total_days_traded': self.total_days_traded}
                 pnl_val = round(self.cumulative_pnl, 2)
 
-            # Serialize current legs explicitly
+            # Serialize current legs explicitly (include current_mark for PnL after restart)
             legs_data = []
             with self._legs_lock:
                 for leg in self.legs:
@@ -805,6 +805,8 @@ class NseEmaCreditSpread(BaseStrategy):
                         'delta': leg.get('delta', 0),
                         'strike': leg.get('strike', 0),
                         'entry_price': leg.get('entry_price', 0),
+                        'current_mark': leg.get('current_mark'),
+                        'current_pnl': leg.get('current_pnl'),
                         'size': leg.get('size', 0),
                         'day_num': leg.get('day_num', 0),
                         'expiry': leg.get('expiry', ''),
