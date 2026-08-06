@@ -4273,6 +4273,13 @@ def nse_strangle_stop():
         return jsonify(error="Not found"), 404
     if e.get('strategy'):
         try:
+            # Set credentials on this thread so close_all() can place orders
+            profile_id = e.get('profile_id')
+            if profile_id:
+                p = get_profile(int(profile_id), e['user_id'])
+                if p:
+                    from config import set_thread_credentials
+                    set_thread_credentials(p['api_key'], p['api_secret'], p.get('broker'))
             e['strategy']._running = False
             e['strategy'].close_all()
         except Exception as ex:
@@ -4440,6 +4447,13 @@ def nse_dn_stop():
         return jsonify(error="Not found"), 404
     if e.get('strategy'):
         try:
+            # Set credentials on this thread so close_all() can place orders
+            profile_id = e.get('profile_id')
+            if profile_id:
+                p = get_profile(int(profile_id), e['user_id'])
+                if p:
+                    from config import set_thread_credentials
+                    set_thread_credentials(p['api_key'], p['api_secret'], p.get('broker'))
             e['strategy']._running = False
             e['strategy'].close_all()
         except Exception as ex:
@@ -4645,6 +4659,13 @@ def nse_ema_stop():
         return jsonify(error="Not found"), 404
     if e.get('strategy'):
         try:
+            # Set credentials on this thread so close_all() can place orders
+            profile_id = e.get('profile_id')
+            if profile_id:
+                p = get_profile(int(profile_id), e['user_id'])
+                if p:
+                    from config import set_thread_credentials
+                    set_thread_credentials(p['api_key'], p['api_secret'], p.get('broker'))
             e['strategy']._running = False
             e['strategy'].close_all()
         except Exception as ex:
