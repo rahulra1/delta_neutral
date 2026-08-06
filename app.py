@@ -891,13 +891,51 @@ def _resume_db_strategies():
                         print(f"[NSE Strangle] Restored {len(s.trade_log)} days | Cum PnL: ₹{s.cumulative_pnl:+.2f}")
                     # Resume monitoring for open (non-stopped) legs
                     if legs:
-                        open_legs = [l for l in legs if not l.get('stopped', False)]
-                        if open_legs:
-                            import threading as _thr
-                            day_num = s.total_days_traded or 1
-                            _thr.Thread(target=s._monitor_day,
-                                        args=(open_legs, day_num), daemon=True).start()
-                            print(f"[NSE Strangle] Resumed monitoring {len(open_legs)} open leg(s)")
+                        import threading as _thr
+                        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                        _ist = _tz(_td(hours=5, minutes=30))
+                        now_ist = _dt.now(_ist)
+
+                        # If past exit time or market closed, close ALL legs immediately
+                        # (can't trust 'stopped' flag if server crashed mid-close)
+                        past_exit = (now_ist.hour > s.exit_hour or
+                                     (now_ist.hour == s.exit_hour and now_ist.minute >= s.exit_minute))
+                        market_closed = (now_ist.hour > 15 or
+                                         (now_ist.hour == 15 and now_ist.minute > 30) or
+                                         now_ist.hour < 9 or
+                                         (now_ist.hour == 9 and now_ist.minute < 15))
+
+                        if past_exit or market_closed:
+                            # Close any legs that aren't confirmed stopped
+                            unstopped = [l for l in legs if not l.get('stopped', False)]
+                            if unstopped:
+                                print(f"[NSE Strangle] Post-exit restart: closing {len(unstopped)} open leg(s)")
+                                try:
+                                    from api.groww import place_order
+                                    for leg in unstopped:
+                                        close_side = 'BUY' if leg.get('side', 'sell') == 'sell' else 'SELL'
+                                        resp = place_order(
+                                            trading_symbol=leg.get('trading_symbol', ''),
+                                            quantity=s.quantity,
+                                            transaction_type=close_side,
+                                            order_type='MARKET',
+                                            product='NRML')
+                                        leg['stopped'] = True
+                                        print(f"[NSE Strangle] Closed {leg.get('type','').upper()} {leg.get('strike','')} (post-exit)")
+                                except Exception as e:
+                                    logger.warning(f"[resume] NSE Strangle {sid} — post-exit close error: {e}")
+                            # Clear legs from strategy
+                            with s._legs_lock:
+                                s.legs.clear()
+                            s._persist_state()
+                        else:
+                            # Market is open and before exit time — resume monitoring
+                            open_legs = [l for l in legs if not l.get('stopped', False)]
+                            if open_legs:
+                                day_num = s.total_days_traded or 1
+                                _thr.Thread(target=s._monitor_day,
+                                            args=(open_legs, day_num), daemon=True).start()
+                                print(f"[NSE Strangle] Resumed monitoring {len(open_legs)} open leg(s)")
                     s.monitor()
                 except Exception as e:
                     logger.error(f"[resume] NSE Strangle {sid} error: {e}")
