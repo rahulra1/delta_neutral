@@ -1078,61 +1078,31 @@ def _resume_db_strategies():
                         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
                         _ist = _tz(_td(hours=5, minutes=30))
                         today_str = _dt.now(_ist).strftime('%Y-%m-%d')
-                        now_ist = _dt.now(_ist)
 
-                        # Group legs by day_num
+                        # Group legs by day_num so each day gets its own monitor thread
                         from collections import defaultdict
                         day_groups = defaultdict(list)
                         for leg in legs:
                             dn = leg.get('day_num', 0)
                             day_groups[dn].append(leg)
 
-                        # Discard stale legs from previous days (should have been closed at EOD)
-                        stale_legs = []
-                        valid_groups = {}
+                        # Spawn a separate monitor thread for each day group
                         for dn, day_legs in day_groups.items():
-                            opened_date = day_legs[0].get('opened_at', '')
-                            if opened_date and opened_date != today_str:
-                                # Leg from a previous day — it missed its EOD close (server was down)
-                                # Close it now as stale
-                                stale_legs.extend(day_legs)
-                                logger.info(f"[resume] NSE EMA {sid} — closing stale D{dn} legs from {opened_date}")
-                            else:
-                                valid_groups[dn] = day_legs
-
-                        # Close stale legs from previous days
-                        if stale_legs:
-                            try:
-                                from api.groww import place_order
-                                for leg in stale_legs:
-                                    close_side = 'BUY' if leg.get('side') == 'sell' else 'SELL'
-                                    place_order(
-                                        trading_symbol=leg.get('trading_symbol', ''),
-                                        quantity=s.quantity,
-                                        transaction_type=close_side, order_type='MARKET', product='NRML')
-                                    print(f"[NSE EMA] Closed stale leg: {leg.get('side','').upper()} {leg.get('strike','')} from {leg.get('opened_at','')}")
-                            except Exception as e:
-                                logger.warning(f"[resume] NSE EMA {sid} — error closing stale legs: {e}")
-                            # Remove stale legs from strategy
-                            with s._legs_lock:
-                                for leg in stale_legs:
-                                    if leg in s.legs:
-                                        s.legs.remove(leg)
-                            s._persist_state()
-
-                        # Spawn a separate monitor thread for each valid day group
-                        for dn, day_legs in valid_groups.items():
                             sell_legs = [l for l in day_legs if l.get('side') == 'sell']
                             buy_legs = [l for l in day_legs if l.get('side') == 'buy']
                             if sell_legs and buy_legs:
                                 premium = (sell_legs[0].get('entry_price', 0) - buy_legs[0].get('entry_price', 0)) * s.quantity
                                 direction = 'bear_call' if sell_legs[0].get('type') == 'call' else 'bull_put'
+                                opened_date = day_legs[0].get('opened_at', '')
                                 _thr.Thread(target=s._monitor_day_trade,
                                             args=(day_legs, premium, dn, direction), daemon=True).start()
-                                logger.info(f"[resume] NSE EMA {sid} — resumed D{dn} monitor ({len(day_legs)} legs)")
+                                logger.info(f"[resume] NSE EMA {sid} — resumed D{dn} monitor ({len(day_legs)} legs, opened {opened_date})")
 
                         # Skip today if any restored legs were opened today
-                        if valid_groups:
+                        # (prevents opening a duplicate trade for the same day)
+                        today_day_nums = [dn for dn, dl in day_groups.items()
+                                          if dl[0].get('opened_at', '') == today_str]
+                        if today_day_nums:
                             s._skip_today = today_str
                     s.monitor()
                 except Exception as e:
