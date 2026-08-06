@@ -511,10 +511,6 @@ class NseEmaCreditSpread(BaseStrategy):
             cycle += 1
             now = datetime.now(IST)
 
-            # Market closed — skip tick
-            if not self._is_market_open():
-                continue
-
             # Fetch current prices
             _get_expiries, _get_chain = _get_data_source()
             chain, spot, _ = _get_chain(self.symbol, expiry)

@@ -554,12 +554,6 @@ class NseDeltaNeutral(BaseStrategy):
                 self._close_strangle(tag, reason='weekly_exit')
                 break
 
-            # Market closed — pause monitoring, don't close positions
-            if not self._is_market_open():
-                if not self._wait_for_market():
-                    break
-                continue
-
             # Fetch current prices
             _get_expiries, _get_chain = _get_data_source()
             chain, spot, _ = _get_chain(self.symbol, self._expiry)

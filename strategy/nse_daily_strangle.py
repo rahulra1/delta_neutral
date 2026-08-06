@@ -221,10 +221,7 @@ class NseDailyStrangle(BaseStrategy):
         while self._running:
             now = datetime.now(IST)
 
-            # Market closed check (before 9:15 or after 15:30)
-            if now.hour < 9 or (now.hour == 9 and now.minute < 15):
-                time.sleep(30)
-                continue
+            # Market closed — close legs at EOD (intraday strategy)
             if now.hour > 15 or (now.hour == 15 and now.minute > 30):
                 print(f"{tag} ⏰ Market closed — closing surviving legs")
                 self._close_day_legs(day_legs, tag)
