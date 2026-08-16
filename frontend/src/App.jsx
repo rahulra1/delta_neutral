@@ -2,6 +2,7 @@ import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './context/AuthContext';
 import Sidebar from './components/Sidebar';
+import Footer from './components/Footer';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Strategy from './pages/Strategy';
@@ -42,6 +43,7 @@ export default function App() {
           <Route path="/admin" element={<Admin />} />
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>
+        <Footer />
       </main>
     </div>
   ) : (
