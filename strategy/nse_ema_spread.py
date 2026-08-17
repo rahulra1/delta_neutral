@@ -51,103 +51,6 @@ DEFAULT_SL_PCT = 1.50   # 150% of premium
 DEFAULT_MONITOR_INTERVAL = 15
 DEFAULT_TRADING_DAYS = [0, 1, 2, 3, 4]  # Mon-Fri
 
-# NSE holidays (dates when the exchange is closed)
-# Source: https://www.nseindia.com/resources/exchange-communication-holidays
-NSE_HOLIDAYS = {
-    # 2025
-    '26-02-2025',  # Mahashivratri
-    '14-03-2025',  # Holi
-    '31-03-2025',  # Id-Ul-Fitr (Ramadan)
-    '10-04-2025',  # Shri Mahavir Jayanti
-    '14-04-2025',  # Dr. Baba Saheb Ambedkar Jayanti
-    '18-04-2025',  # Good Friday
-    '01-05-2025',  # Maharashtra Day
-    '12-05-2025',  # Buddha Purnima
-    '07-06-2025',  # Id-Ul-Adha (Bakri Id)
-    '10-07-2025',  # Muharram
-    '15-08-2025',  # Independence Day
-    '27-08-2025',  # Janmashtami
-    '02-10-2025',  # Mahatma Gandhi Jayanti
-    '21-10-2025',  # Dussehra
-    '22-10-2025',  # Dussehra
-    '04-11-2025',  # Diwali (Laxmi Pujan)
-    '05-11-2025',  # Diwali (Balipratipada)
-    '05-12-2025',  # Guru Nanak Jayanti
-    '25-12-2025',  # Christmas
-    # 2026
-    '26-01-2026',  # Republic Day
-    '17-02-2026',  # Mahashivratri
-    '04-03-2026',  # Holi
-    '20-03-2026',  # Id-Ul-Fitr (Ramadan)
-    '25-03-2026',  # Holi (some years observed)
-    '02-04-2026',  # Shri Ram Navami
-    '06-04-2026',  # Shri Mahavir Jayanti
-    '03-04-2026',  # Good Friday
-    '14-04-2026',  # Dr. Baba Saheb Ambedkar Jayanti
-    '01-05-2026',  # Maharashtra Day
-    '25-05-2026',  # Buddha Purnima
-    '27-06-2026',  # Id-Ul-Adha (Bakri Id)
-    '08-07-2026',  # Muharram (Ashura)
-    '15-08-2026',  # Independence Day
-    '17-08-2026',  # Janmashtami
-    '07-09-2026',  # Milad-un-Nabi
-    '02-10-2026',  # Mahatma Gandhi Jayanti
-    '12-10-2026',  # Dussehra
-    '24-10-2026',  # Diwali (Laxmi Pujan)
-    '25-10-2026',  # Diwali (Balipratipada)
-    '24-11-2026',  # Guru Nanak Jayanti
-    '25-12-2026',  # Christmas
-    # 2027
-    '26-01-2027',  # Republic Day
-    '08-02-2027',  # Mahashivratri
-    '22-03-2027',  # Holi
-    '10-03-2027',  # Id-Ul-Fitr (Ramadan)
-    '14-04-2027',  # Dr. Baba Saheb Ambedkar Jayanti
-    '26-03-2027',  # Good Friday
-    '01-05-2027',  # Maharashtra Day
-    '13-05-2027',  # Buddha Purnima
-    '16-06-2027',  # Id-Ul-Adha (Bakri Id)
-    '15-08-2027',  # Independence Day
-    '06-08-2027',  # Janmashtami
-    '02-10-2027',  # Mahatma Gandhi Jayanti
-    '01-10-2027',  # Dussehra
-    '13-11-2027',  # Diwali (Laxmi Pujan)
-    '14-11-2027',  # Diwali (Balipratipada)
-    '14-11-2027',  # Guru Nanak Jayanti
-    '25-12-2027',  # Christmas
-}
-
-# Special Saturday trading sessions (Muhurat Trading, special sessions)
-# These are dates when NSE is open on a weekend (usually Saturday)
-# Format: 'DD-MM-YYYY': (open_hour, open_min, close_hour, close_min)
-NSE_SPECIAL_SESSIONS = {
-    # 2025 — Muhurat Trading (Diwali)
-    '01-11-2025': (18, 15, 19, 30),  # Muhurat Trading evening session
-    # 2026 — Muhurat Trading (Diwali)
-    '21-10-2026': (18, 15, 19, 30),  # Muhurat Trading evening session
-    # Add special Saturday sessions as NSE announces them
-    # Example format: '15-03-2025': (9, 15, 15, 30),  # Special Saturday session
-}
-
-
-def _is_nse_holiday(dt):
-    """Check if a given date is an NSE holiday (and NOT a special session)."""
-    date_str = dt.strftime('%d-%m-%Y')
-    if date_str in NSE_SPECIAL_SESSIONS:
-        return False  # Special session overrides holiday
-    return date_str in NSE_HOLIDAYS
-
-
-def _is_special_session(dt):
-    """Check if a given date has a special trading session."""
-    return dt.strftime('%d-%m-%Y') in NSE_SPECIAL_SESSIONS
-
-
-def _get_special_session_hours(dt):
-    """Get market hours for a special session. Returns (open_h, open_m, close_h, close_m) or None."""
-    return NSE_SPECIAL_SESSIONS.get(dt.strftime('%d-%m-%Y'))
-
-
 def _get_data_source():
     """Determine which data source to use based on thread-local broker setting."""
     try:
@@ -263,13 +166,7 @@ class NseEmaCreditSpread(BaseStrategy):
                 # Different day means the skip is stale, clear it
                 self._skip_today = None
 
-            if now.weekday() not in self.trading_days and not _is_special_session(now):
-                print(f"[NSE EMA] Skipping {now.strftime('%A')} — not a trading day")
-                continue
-
-            if _is_nse_holiday(now):
-                print(f"[NSE EMA] Skipping {now.strftime('%Y-%m-%d')} — NSE holiday")
-                continue
+            # Trading enabled for all days — weekend and NSE holiday checks removed.
 
             self.total_days_traded += 1
             day_num = self.total_days_traded
@@ -687,22 +584,8 @@ class NseEmaCreditSpread(BaseStrategy):
     # ─── Helpers ─────────────────────────────────────────────────────────
 
     def _is_market_open(self):
-        now = datetime.now(IST)
-        # Check for special session (Muhurat trading, special Saturdays)
-        special = _get_special_session_hours(now)
-        if special:
-            oh, om, ch, cm = special
-            session_open = now.replace(hour=oh, minute=om, second=0)
-            session_close = now.replace(hour=ch, minute=cm, second=0)
-            return session_open <= now <= session_close
-        # Normal day checks
-        if now.weekday() > 4:
-            return False
-        if _is_nse_holiday(now):
-            return False
-        market_open = now.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0)
-        market_close = now.replace(hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MINUTE, second=0)
-        return market_open <= now <= market_close
+        # Trades every day, all hours — always open.
+        return True
 
     def _get_price_from_chain(self, chain, leg):
         """Look up current mark price for a leg from chain data."""
@@ -716,44 +599,21 @@ class NseEmaCreditSpread(BaseStrategy):
         return None
 
     def _wait_for_next_entry(self):
-        """Wait until next trading day entry time. Skips weekends and NSE holidays,
-        but wakes up for special sessions (Muhurat trading, special Saturdays)."""
+        """Wait until next entry time. Trades every day — no weekend or
+        holiday skipping."""
         now = datetime.now(IST)
         entry_today = now.replace(hour=self.entry_hour, minute=self.entry_minute, second=0, microsecond=0)
 
-        # Check if today is a valid trading day
-        today_is_valid = (
-            (now.weekday() in self.trading_days and not _is_nse_holiday(now))
-            or _is_special_session(now)
-        )
-
-        if now < entry_today and today_is_valid:
+        if now < entry_today:
             target = entry_today
         else:
-            # Look ahead up to 14 days for the next valid session
+            # Every day trades — next entry is tomorrow at the entry time
             target = entry_today + timedelta(days=1)
-            attempts = 0
-            while attempts < 14:
-                is_valid = (
-                    (target.weekday() in self.trading_days and not _is_nse_holiday(target))
-                    or _is_special_session(target)
-                )
-                if is_valid:
-                    break
-                target += timedelta(days=1)
-                attempts += 1
-
-        # For special sessions, adjust entry time to session open
-        special = _get_special_session_hours(target)
-        if special:
-            oh, om, _, _ = special
-            target = target.replace(hour=oh, minute=om + 10, second=0)  # Enter 10 min after open
 
         wait = (target - now).total_seconds()
         if wait > 60:
             day_name = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][target.weekday()]
-            suffix = ' (Special Session)' if special else ''
-            print(f"[NSE EMA] Next entry: {target.strftime('%Y-%m-%d %H:%M')} IST ({day_name}{suffix}, {wait/3600:.1f}h)")
+            print(f"[NSE EMA] Next entry: {target.strftime('%Y-%m-%d %H:%M')} IST ({day_name}, {wait/3600:.1f}h)")
         self._interruptible_sleep(wait)
 
     def _interruptible_sleep(self, seconds):
