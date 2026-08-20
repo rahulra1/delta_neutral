@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from api.chain import get_expiries, get_option_chain_full
 from api.orders import place_order
 from api.pricing import get_current_price
+from api.delta_finder import find_target_premium_options
 from config import get_contract_value
 from strategy.base import BaseStrategy
 
@@ -99,14 +100,13 @@ class DailyStrangle(BaseStrategy):
             print(f"{tag} Chain fetch failed")
             return []
 
-        call_opt = self._find_nearest_premium(chain, 'call', spot)
-        put_opt = self._find_nearest_premium(chain, 'put', spot)
+        call_opt, put_opt = find_target_premium_options(chain, self.target_premium)
 
         if not call_opt or not put_opt:
             print(f"{tag} Could not find suitable options")
             return []
 
-        print(f"{tag} Spot: ${spot:.0f} | Call: {call_opt['strike']} @ ${call_opt['mark_price']:.2f} | Put: {put_opt['strike']} @ ${put_opt['mark_price']:.2f}")
+        print(f"{tag} Spot: ${spot:.0f} | Call: {call_opt['strike_price']} @ ${call_opt['mark_price']:.2f} | Put: {put_opt['strike_price']} @ ${put_opt['mark_price']:.2f}")
 
         day_legs = []
         for opt, opt_type in [(call_opt, 'call'), (put_opt, 'put')]:
@@ -116,7 +116,7 @@ class DailyStrangle(BaseStrategy):
                     'symbol': opt['symbol'],
                     'product_id': opt['product_id'],
                     'side': 'sell',
-                    'strike': opt['strike'],
+                    'strike': opt['strike_price'],
                     'type': opt_type,
                     'entry_price': opt['mark_price'],
                     'size': self.lot_size,
@@ -124,7 +124,7 @@ class DailyStrangle(BaseStrategy):
                     'stopped': False,
                 }
                 day_legs.append(leg)
-                print(f"{tag} ✓ SOLD {opt_type.upper()} {opt['strike']} @ ${opt['mark_price']:.2f} | SL: ${leg['sl_price']:.2f}")
+                print(f"{tag} ✓ SOLD {opt_type.upper()} {opt['strike_price']} @ ${opt['mark_price']:.2f} | SL: ${leg['sl_price']:.2f}")
             else:
                 print(f"{tag} ✗ Failed to sell {opt_type.upper()}")
 
@@ -292,7 +292,8 @@ class DailyStrangle(BaseStrategy):
             reentry_used[opt_type] = True
             return
 
-        new_opt = self._find_nearest_premium(chain, opt_type, spot)
+        best_call, best_put = find_target_premium_options(chain, self.target_premium)
+        new_opt = best_call if opt_type == 'call' else best_put
         if not new_opt:
             print(f"{tag} ✗ Re-entry failed: no suitable {opt_type.upper()} found")
             reentry_used[opt_type] = True
@@ -304,7 +305,7 @@ class DailyStrangle(BaseStrategy):
                 'symbol': new_opt['symbol'],
                 'product_id': new_opt['product_id'],
                 'side': 'sell',
-                'strike': new_opt['strike'],
+                'strike': new_opt['strike_price'],
                 'type': opt_type,
                 'entry_price': new_opt['mark_price'],
                 'size': self.lot_size,
@@ -316,7 +317,7 @@ class DailyStrangle(BaseStrategy):
             with self._legs_lock:
                 self.legs.append(new_leg)
             reentry_used[opt_type] = True
-            print(f"{tag} ✓ Re-entered {opt_type.upper()} {new_opt['strike']} @ ${new_opt['mark_price']:.2f} | SL: ${new_leg['sl_price']:.2f}")
+            print(f"{tag} ✓ Re-entered {opt_type.upper()} {new_opt['strike_price']} @ ${new_opt['mark_price']:.2f} | SL: ${new_leg['sl_price']:.2f}")
             self._persist_state()
         else:
             print(f"{tag} ✗ Re-entry order failed for {opt_type.upper()}")
@@ -331,26 +332,6 @@ class DailyStrangle(BaseStrategy):
             leg['exit_price'] = data['mark_price'] if data else leg['entry_price']
             place_order(leg['product_id'], leg['symbol'], leg['size'], 'buy')
             leg['stopped'] = True
-
-    def _find_nearest_premium(self, chain, opt_type, spot):
-        """Find OTM option closest to target premium."""
-        best = None
-        best_diff = float('inf')
-        for row in chain:
-            opt = row.get(opt_type)
-            if not opt or opt['mark_price'] <= 0:
-                continue
-            strike = float(row['strike'])
-            # OTM filter
-            if opt_type == 'call' and strike <= spot:
-                continue
-            if opt_type == 'put' and strike >= spot:
-                continue
-            diff = abs(opt['mark_price'] - self.target_premium)
-            if diff < best_diff:
-                best_diff = diff
-                best = opt
-        return best
 
     def _exit_reason(self, day_legs):
         sl_count = sum(1 for l in day_legs if l.get('exit_price', 0) >= l.get('sl_price', 0) * 0.99)
