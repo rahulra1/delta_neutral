@@ -124,6 +124,24 @@ class PortfolioStrangle(BaseStrategy):
 
         cv = get_contract_value(self.asset)
         day_legs_all = []  # list of (slot_legs, slot_info) tuples
+        # Concurrency guards so monitoring can start after the FIRST slot fills
+        # while later entry slots are still being placed.
+        day_legs_lock = threading.Lock()
+        entries_done = threading.Event()
+        monitor_thread = [None]  # boxed so inner scope can assign
+
+        def _start_monitor_if_needed():
+            if monitor_thread[0] is None:
+                mt = threading.Thread(
+                    target=self._monitor_all_slots,
+                    args=(tag, day_legs_all, day_num),
+                    kwargs={'day_legs_lock': day_legs_lock, 'entries_done': entries_done},
+                    daemon=True,
+                )
+                monitor_thread[0] = mt
+                print(f"\n{tag} Monitoring started (first legs live) until "
+                      f"{self.exit_hour}:{self.exit_minute:02d}...")
+                mt.start()
 
         # Place trades at each entry time
         for slot_idx, (entry_h, entry_m) in enumerate(self.entry_times):
@@ -137,17 +155,27 @@ class PortfolioStrangle(BaseStrategy):
 
             slot_legs = self._open_strangle_slot(slot_tag)
             if slot_legs:
-                day_legs_all.append({
-                    'legs': slot_legs,
-                    'slot': slot_idx + 1,
-                    'entry_time': f"{entry_h}:{entry_m:02d}",
-                    'recost_used': {leg['type']: False for leg in slot_legs},
-                    'sl_hit': {leg['type']: False for leg in slot_legs},
-                })
+                with day_legs_lock:
+                    day_legs_all.append({
+                        'legs': slot_legs,
+                        'slot': slot_idx + 1,
+                        'entry_time': f"{entry_h}:{entry_m:02d}",
+                        'recost_used': {leg['type']: False for leg in slot_legs},
+                        'sl_hit': {leg['type']: False for leg in slot_legs},
+                    })
+                # Begin monitoring as soon as the first slot's legs are executed
+                _start_monitor_if_needed()
 
-        # Monitor all slots until exit time
-        print(f"\n{tag} Monitoring {len(day_legs_all)} slots until {self.exit_hour}:{self.exit_minute:02d}...")
-        self._monitor_all_slots(tag, day_legs_all, day_num)
+        # Signal that no more entries will be added, so the monitor loop may
+        # honour its "all stopped / all recost done" early-exit.
+        entries_done.set()
+
+        if monitor_thread[0] is not None:
+            # Entries finished; wait for the monitor loop to complete the day.
+            monitor_thread[0].join()
+        else:
+            # No slots ever filled (all entries failed) — nothing to monitor.
+            print(f"\n{tag} No legs were executed; skipping monitoring.")
 
     def _open_strangle_slot(self, tag):
         """Sell OTM5 call + put for one time slot."""
@@ -196,9 +224,23 @@ class PortfolioStrangle(BaseStrategy):
             self._persist_state()
         return slot_legs
 
-    def _monitor_all_slots(self, tag, day_legs_all, day_num):
-        """Monitor all slots until exit time. Handle SL and recost."""
+    def _monitor_all_slots(self, tag, day_legs_all, day_num,
+                           day_legs_lock=None, entries_done=None):
+        """Monitor all slots until exit time. Handle SL and recost.
+
+        Runs concurrently with entry placement: monitoring begins as soon as the
+        first slot's legs are executed. `day_legs_lock` guards `day_legs_all`
+        while later slots are still being appended; `entries_done` (an Event)
+        signals that no further slots will be added, so the "all stopped / all
+        recost done" early-exit only applies once every entry has been placed.
+        """
         cv = get_contract_value(self.asset)
+
+        def _snapshot():
+            if day_legs_lock is not None:
+                with day_legs_lock:
+                    return list(day_legs_all)
+            return list(day_legs_all)
 
         while self._running:
             now = datetime.now(IST)
@@ -206,15 +248,16 @@ class PortfolioStrangle(BaseStrategy):
             # Exit time check
             if now.hour > self.exit_hour or (now.hour == self.exit_hour and now.minute >= self.exit_minute):
                 print(f"{tag} ⏰ Exit time — closing all surviving legs")
-                for slot in day_legs_all:
+                for slot in _snapshot():
                     self._close_slot_legs(slot['legs'])
                 break
 
             # Check each slot — SL, recost, and enrich legs in one pass
             tick_pnl = 0.0
             all_legs_ok = True
-            for slot in day_legs_all:
-                for leg in slot['legs']:
+            slots_now = _snapshot()
+            for slot in slots_now:
+                for leg in list(slot['legs']):
                     if leg.get('stopped', False):
                         # Include realized loss from stopped legs in tick_pnl
                         exit_p = leg.get('exit_price', leg['entry_price'])
@@ -258,26 +301,31 @@ class PortfolioStrangle(BaseStrategy):
                 self._consecutive_failures += 1
                 if self._consecutive_failures >= self._max_consecutive_failures:
                     print(f"{tag} 🚨 EMERGENCY: {self._consecutive_failures} consecutive failures — closing all")
-                    for slot in day_legs_all:
+                    for slot in _snapshot():
                         self._close_slot_legs(slot['legs'])
                     break
             else:
                 self._consecutive_failures = 0
 
-            # Check if everything is stopped (no point monitoring)
-            all_stopped = all(
-                all(l.get('stopped', False) for l in s['legs'])
-                for s in day_legs_all
-            )
-            # But don't exit early — recost might trigger
-            all_recost_done = all(
-                all(s['recost_used'].get(l['type'], True) or not s['sl_hit'].get(l['type'], False)
-                    for l in s['legs'])
-                for s in day_legs_all
-            )
-            if all_stopped and all_recost_done:
-                print(f"{tag} All legs stopped, all recosts done/unavailable")
-                break
+            # Early-exit only once ALL entries have been placed; otherwise a
+            # single stopped-out first slot would end monitoring before slots
+            # 2 and 3 are even entered.
+            entries_complete = entries_done is None or entries_done.is_set()
+            if entries_complete and slots_now:
+                # Check if everything is stopped (no point monitoring)
+                all_stopped = all(
+                    all(l.get('stopped', False) for l in s['legs'])
+                    for s in slots_now
+                )
+                # But don't exit early — recost might trigger
+                all_recost_done = all(
+                    all(s['recost_used'].get(l['type'], True) or not s['sl_hit'].get(l['type'], False)
+                        for l in s['legs'])
+                    for s in slots_now
+                )
+                if all_stopped and all_recost_done:
+                    print(f"{tag} All legs stopped, all recosts done/unavailable")
+                    break
 
             # PnL history for UI chart
             now_iso = datetime.now(IST).isoformat()
@@ -308,9 +356,10 @@ class PortfolioStrangle(BaseStrategy):
 
             time.sleep(self.monitor_interval)
 
-        # Calculate day PnL
+        # Calculate day PnL  (entries are complete by now; take a stable snapshot)
+        final_slots = _snapshot()
         day_pnl = 0.0
-        for slot in day_legs_all:
+        for slot in final_slots:
             for leg in slot['legs']:
                 exit_p = leg.get('exit_price')
                 if exit_p is None:
@@ -327,14 +376,14 @@ class PortfolioStrangle(BaseStrategy):
 
         # Remove day legs from shared legs
         with self._legs_lock:
-            for slot in day_legs_all:
+            for slot in final_slots:
                 for leg in slot['legs']:
                     if leg in self.legs:
                         self.legs.remove(leg)
 
         # Record trade
-        sl_count = sum(1 for s in day_legs_all for l in s['legs'] if s['sl_hit'].get(l['type']))
-        recost_count = sum(1 for s in day_legs_all if any(s['recost_used'].values()))
+        sl_count = sum(1 for s in final_slots for l in s['legs'] if s['sl_hit'].get(l['type']))
+        recost_count = sum(1 for s in final_slots if any(s['recost_used'].values()))
         self.trade_log.append({
             'date': datetime.now(IST).strftime('%Y-%m-%d'),
             'day': day_num,
