@@ -10,6 +10,7 @@ const ALL_STRATEGIES = [
   { key: 'oi_strategy', label: 'OI Strategy' },
   { key: 'weekly_dn', label: 'Weekly Delta Neutral' },
   { key: 'ema_spread', label: 'EMA Credit Spread' },
+  { key: 'ema_trend', label: 'EMA Trend Follower' },
   { key: 'iv_crush', label: 'IV Crush' },
   { key: 'call_ratio', label: 'Call Ratio Spread' },
   { key: 'rsi_div_mss', label: 'Div + MSS' },

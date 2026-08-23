@@ -113,6 +113,10 @@ const STRATEGIES = [
     desc: 'Daily EMA14 direction → bear call or bull put spread. 90% TP / 100% SL of premium. Runs daily at 6:30 PM.',
     features: ['EMA14 Direction', 'Credit Spread', 'Daily Auto-Trade', '90% TP / 100% SL'],
     rec: '⏱ Daily 6:30 PM · BTC options' },
+  { key: 'ema_trend', label: 'EMA Trend Follower', icon: '🚀', type: 'Futures',
+    desc: 'Long-only basket over the top-50 perpetuals by turnover. Buys coins bullish on the daily 20/50 EMA crossover ($100 each), exits when they turn bearish. Re-scans hourly.',
+    features: ['Top-50 by Volume', 'Daily 20/50 EMA', 'Long-Only Basket', 'Hourly Rescan'],
+    rec: '⏱ Hourly · Delta perpetuals · Trend momentum' },
 ];
 
 const DN_FIELDS = [
@@ -181,6 +185,15 @@ const EMA_SPREAD_FIELDS = [
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 5 },
   { key: 'entry_hour', label: 'Entry Hour (24h)', type: 'number', default: 18 },
   { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 30 },
+];
+
+const EMA_TREND_FIELDS = [
+  { key: 'top_n', label: 'Universe Size (top N by volume)', type: 'number', default: 50 },
+  { key: 'notional_usd', label: 'Notional per Coin ($)', type: 'number', default: 100 },
+  { key: 'ema_fast', label: 'Fast EMA', type: 'number', default: 20 },
+  { key: 'ema_slow', label: 'Slow EMA', type: 'number', default: 50 },
+  { key: 'ema_resolution', label: 'EMA Timeframe', type: 'text', default: '1d', hint: '1d = daily chart' },
+  { key: 'refresh_interval', label: 'Rescan Interval (s)', type: 'number', default: 3600, hint: '3600 = hourly' },
 ];
 
 const STRANGLE_FIELDS = [
@@ -1052,6 +1065,57 @@ export default function Strategy() {
                         <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${t.pnl}</td>
                         <td style={{ padding: '4px 8px' }}>${t.premium}</td>
                         <td style={{ padding: '4px 8px' }}>{t.exit_reason === 'target' ? '🎯' : t.exit_reason === 'stoploss' ? '🛑' : '⏹'}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )} />
+      )}
+      {activeTab === 'ema_trend' && (
+        <StrategyTemplate title="EMA Trend Follower" icon="🚀" type="Futures" description="Long-only basket over top-50 perpetuals by turnover. Buys coins bullish on the daily 20/50 EMA crossover ($100 each), exits when bearish. Rescans hourly." profiles={profiles}
+          configFields={EMA_TREND_FIELDS}
+          onStart={async (config) => { const { data } = await api.post('/ema-trend/start', config); return data; }}
+          onStop={async (sid) => { await api.post('/ema-trend/stop', { sid }); }}
+          statusEndpoint="/ema-trend/status" streamEndpoint="/ema-trend/stream"
+          renderStatus={(s) => (
+            <>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Session P&L</div><div className="value" style={{ color: (s.session_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.session_pnl||0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Cumulative P&L</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Open Positions</div><div className="value">{s.open_positions || 0}</div></div>
+                <div className="stat-card"><div className="label">Total Trades</div><div className="value">{s.total_trades || 0}</div></div>
+              </div>
+              {s.legs && s.legs.length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Open Longs</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Coin', 'Symbol', 'Size', 'Entry', 'Mark', 'P&L'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{s.legs.map((l, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>{l.coin || ''}</td>
+                        <td style={{ padding: '4px 8px' }}>{l.symbol}</td>
+                        <td style={{ padding: '4px 8px' }}>{l.size}</td>
+                        <td style={{ padding: '4px 8px' }}>${(l.entry_price || 0).toFixed(6)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>${(l.mark_price || 0).toFixed(6)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: (l.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(l.pnl || 0).toFixed(4)}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+              {(s.trade_log || []).length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Trade Log</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Time', 'Action', 'Symbol', 'Lots', 'Price', 'P&L'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{(s.trade_log || []).slice(-10).reverse().map((t, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}>{(t.ts || '').slice(0, 19).replace('T', ' ')}</td>
+                        <td style={{ padding: '4px 8px' }}><span className={`badge ${t.action === 'BUY' ? 'badge-green' : 'badge-red'}`}>{t.action}</span></td>
+                        <td style={{ padding: '4px 8px' }}>{t.symbol}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.lots}</td>
+                        <td style={{ padding: '4px 8px' }}>${(t.price || 0).toFixed(6)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: (t.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>{t.pnl != null ? `$${t.pnl}` : '—'}</td>
                       </tr>))}</tbody>
                   </table>
                 </div>

@@ -53,6 +53,7 @@ portfolio_strangle_strategies = {}
 hybrid_strategies = {}
 weekly_dn_strategies = {}
 ema_spread_strategies = {}
+ema_trend_strategies = {}
 pivot_st_strategies = {}
 nse_dn_strategies = {}
 nse_ema_strategies = {}
@@ -144,14 +145,14 @@ def _resume_db_strategies():
 
         if not legs:
             # Daily-recurring strategies don't need legs to resume — they open trades on schedule
-            if source not in ('EMA Spread', 'OI Strategy', 'Daily Strangle', 'Weekly DN',
+            if source not in ('EMA Spread', 'EMA Trend', 'OI Strategy', 'Daily Strangle', 'Weekly DN',
                               'Portfolio Strangle', 'Hybrid Switch', 'Pivot SuperTrend',
                               'NSE Strangle', 'NSE Delta Neutral', 'NSE EMA Spread'):
                 continue
 
         # Skip strategies where all legs have no product_id (invalid/empty data)
         valid_legs = [l for l in legs if l.get('product_id')]
-        if not valid_legs and source not in ('EMA Spread', 'OI Strategy', 'Daily Strangle',
+        if not valid_legs and source not in ('EMA Spread', 'EMA Trend', 'OI Strategy', 'Daily Strangle',
                                               'Weekly DN', 'Portfolio Strangle', 'Hybrid Switch',
                                               'Pivot SuperTrend', 'NSE Strangle',
                                               'NSE Delta Neutral', 'NSE EMA Spread'):
@@ -768,6 +769,69 @@ def _resume_db_strategies():
             entry['thread'] = t
             t.start()
             logger.info(f"[resume] Resumed EMA Spread {sid}")
+
+        # 9b. Restore EMA Trend Follower (long-only perp basket, hourly loop)
+        elif source == 'EMA Trend':
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
+                     'log_history': [], 'running': False, 'params': details,
+                     'user_id': user_id, 'profile_id': profile_id}
+            ema_trend_strategies[sid] = entry
+
+            def _resume_etf(sid=sid, entry=entry, details=details, user_id=user_id, legs=legs):
+                for attempt in range(5):
+                    if _setup_strategy_thread(entry):
+                        break
+                    logger.warning(f"[resume] EMA Trend {sid} — setup failed (attempt {attempt+1}/5), retrying in 30s")
+                    entry['running'] = False
+                    time.sleep(30)
+                else:
+                    logger.error(f"[resume] EMA Trend {sid} — setup failed after 5 attempts, will retry on next restart")
+                    return
+                try:
+                    from strategy.ema_trend_follower import EmaTrendFollower
+                    s = EmaTrendFollower(
+                        top_n=int(details.get('top_n', 50)),
+                        notional_usd=float(details.get('notional_usd', 100)),
+                        ema_fast=int(details.get('ema_fast', 20)),
+                        ema_slow=int(details.get('ema_slow', 50)),
+                        ema_resolution=details.get('ema_resolution', '1d'),
+                        refresh_interval=int(details.get('refresh_interval', 3600)),
+                        dry_run=bool(details.get('dry_run', False)),
+                    )
+                    entry['strategy'] = s
+                    s._log_queue = entry['log_queue']
+                    s._log_history = entry['log_history']
+                    s._sid = sid
+                    import config as _cfg
+                    s._api_key = _cfg.get_api_key()
+                    s._api_secret = _cfg.get_api_secret()
+                    s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
+                    s._user_id = user_id
+                    entry['running'] = True
+                    s.restore_state(details=details, legs=legs)
+                    s.initialize()
+                    if s.trade_log:
+                        print(f"[EMA Trend] Restored {len(s.legs)} position(s) | Cum PnL: ${s.cumulative_pnl:+.4f}")
+                    s.monitor()
+                except Exception as e:
+                    logger.error(f"[resume] EMA Trend {sid} error: {e}")
+                finally:
+                    strategy = entry.get('strategy')
+                    if strategy and not strategy._running:
+                        pnl = round(getattr(strategy, 'cumulative_pnl', 0), 4)
+                        record_end(sid, pnl, 0)
+                        update_tracked(sid, status='completed', pnl=round(pnl, 2),
+                                       exit_reason='intentional_close')
+                    elif not strategy:
+                        logger.warning(f"[resume] EMA Trend {sid} — thread exited without strategy object, keeping status 'running'")
+                    else:
+                        logger.warning(f"[resume] EMA Trend {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
+                    _teardown_strategy_thread(entry)
+
+            t = threading.Thread(target=_resume_etf, daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed EMA Trend {sid}")
 
         # 10. Resume Daily Strangle
         elif source == 'Daily Strangle':
@@ -1749,16 +1813,40 @@ def _setup_strategy_thread(entry):
         from api.groww import check_connection
         # Use the strategy's symbol for connection check (correct exchange for BSE symbols)
         symbol = (entry.get('params') or {}).get('symbol', None)
-        if not check_connection(p['api_key'], p['api_secret'], symbol=symbol):
+        if not _check_conn_with_retry(
+                lambda: check_connection(p['api_key'], p['api_secret'], symbol=symbol),
+                entry, label='Groww API'):
             entry['log_queue'].put("❌ Cannot connect to Groww API")
             entry['running'] = False
             return False
     else:
-        if not check_api_connection():
+        if not _check_conn_with_retry(check_api_connection, entry, label='API'):
             entry['log_queue'].put("❌ Cannot connect to API")
             entry['running'] = False
             return False
     return True
+
+
+def _check_conn_with_retry(check_fn, entry, label='API', attempts=3, base_delay=2):
+    """Run a connection-check callable with retry/backoff to ride out transient
+    DNS/network blips. Returns True as soon as a check succeeds, False if all
+    attempts fail."""
+    for attempt in range(1, attempts + 1):
+        try:
+            if check_fn():
+                return True
+        except Exception as e:
+            logger.warning(f"[setup] {label} connection check raised on attempt "
+                           f"{attempt}/{attempts}: {e}")
+        if attempt < attempts:
+            wait = base_delay * (2 ** (attempt - 1))
+            try:
+                entry['log_queue'].put(
+                    f"⚠ {label} connection check failed (attempt {attempt}/{attempts}) — retrying in {wait}s")
+            except Exception:
+                pass
+            time.sleep(wait)
+    return False
 
 
 def _teardown_strategy_thread(entry):
@@ -1979,6 +2067,15 @@ def dashboard_live_pnl():
                             total_live_pnl += pnl
                             active_pnls.append({'sid': sid, 'name': 'EMA Spread', 'pnl': pnl})
 
+                    for sid, e in ema_trend_strategies.items():
+                        if e.get('user_id') != uid or not e.get('running'):
+                            continue
+                        s = e.get('strategy')
+                        if s:
+                            pnl = round(s.pnl, 4)
+                            total_live_pnl += pnl
+                            active_pnls.append({'sid': sid, 'name': 'EMA Trend', 'pnl': pnl})
+
                     for sid, e in pivot_st_strategies.items():
                         if e.get('user_id') != uid or not e.get('running'):
                             continue
@@ -2163,6 +2260,11 @@ def api_dashboard():
                     s = ema_spread_strategies[sid]['strategy']
                     t['pnl'] = round(s.pnl, 4)
                     t['cumulative_pnl'] = round(s.cumulative_pnl, 4)
+                # Check EMA Trend
+                elif sid in ema_trend_strategies and ema_trend_strategies[sid].get('strategy'):
+                    s = ema_trend_strategies[sid]['strategy']
+                    t['pnl'] = round(s.pnl, 4)
+                    t['cumulative_pnl'] = round(s.cumulative_pnl, 4)
                 # Check Daily Strangle
                 elif sid in strangle_strategies and strangle_strategies[sid].get('strategy'):
                     s = strangle_strategies[sid]['strategy']
@@ -2211,6 +2313,7 @@ def api_dashboard():
         running_count += sum(1 for sid, e in oi_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in weekly_dn_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in ema_spread_strategies.items() if e.get('user_id') == uid and e.get('running'))
+        running_count += sum(1 for sid, e in ema_trend_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in strangle_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in nse_strangle_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in nse_dn_strategies.items() if e.get('user_id') == uid and e.get('running'))
@@ -2349,6 +2452,13 @@ def api_all_strategies():
                         continue
                 elif sid in ema_spread_strategies and ema_spread_strategies[sid].get('strategy'):
                     s = ema_spread_strategies[sid]['strategy']
+                    entry['pnl'] = round(s.pnl, 4)
+                    if not s._running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.pnl, 4))
+                        continue
+                elif sid in ema_trend_strategies and ema_trend_strategies[sid].get('strategy'):
+                    s = ema_trend_strategies[sid]['strategy']
                     entry['pnl'] = round(s.pnl, 4)
                     if not s._running:
                         entry['status'] = 'completed'
@@ -2556,6 +2666,8 @@ def api_close_strategy(sid):
             profile_id = weekly_dn_strategies[sid].get('profile_id')
         elif sid in ema_spread_strategies:
             profile_id = ema_spread_strategies[sid].get('profile_id')
+        elif sid in ema_trend_strategies:
+            profile_id = ema_trend_strategies[sid].get('profile_id')
         elif sid in nse_ema_strategies:
             profile_id = nse_ema_strategies[sid].get('profile_id')
         elif sid in nse_dn_strategies:
@@ -2622,6 +2734,15 @@ def api_close_strategy(sid):
                 ecs['strategy'].close_all()
             except Exception as e:
                 logger.error(f"[close] EMA Spread {sid} close_all error: {e}")
+        closed = True
+    # EMA Trend
+    if not closed and sid in ema_trend_strategies:
+        etf = ema_trend_strategies[sid]
+        if etf.get('strategy'):
+            try:
+                etf['strategy'].close_all()
+            except Exception as e:
+                logger.error(f"[close] EMA Trend {sid} close_all error: {e}")
         closed = True
     # NSE EMA Spread
     if not closed and sid in nse_ema_strategies:
@@ -2763,6 +2884,8 @@ def api_close_all_strategies():
                 profile_id = weekly_dn_strategies[sid].get('profile_id')
             elif sid in ema_spread_strategies:
                 profile_id = ema_spread_strategies[sid].get('profile_id')
+            elif sid in ema_trend_strategies:
+                profile_id = ema_trend_strategies[sid].get('profile_id')
             elif sid in nse_ema_strategies:
                 profile_id = nse_ema_strategies[sid].get('profile_id')
             elif sid in nse_dn_strategies:
@@ -2813,6 +2936,11 @@ def api_close_all_strategies():
             ecs = ema_spread_strategies[sid]
             if ecs.get('strategy'):
                 ecs['strategy'].close_all()
+            closed = True
+        if not closed and sid in ema_trend_strategies:
+            etf = ema_trend_strategies[sid]
+            if etf.get('strategy'):
+                etf['strategy'].close_all()
             closed = True
         if not closed and sid in nse_ema_strategies:
             nes = nse_ema_strategies[sid]
@@ -2966,6 +3094,27 @@ def api_strategy_detail(sid):
                     'current_pnl': round(leg.get('current_pnl', 0), 4),
                     'delta': leg.get('delta', 0)})
             # Use in-memory pnl_history for the chart
+            if hasattr(strat, '_pnl_history') and strat._pnl_history:
+                pnl_history = list(strat._pnl_history[-500:])
+        elif sid in ema_trend_strategies and ema_trend_strategies[sid].get('strategy'):
+            etf = ema_trend_strategies[sid]
+            strat = etf['strategy']
+            entry['pnl'] = round(strat.pnl, 4)
+            entry['running'] = etf.get('running', False)
+            logs = etf.get('log_history', [])
+            entry['trade_log'] = strat.trade_log[-20:]
+            entry['days_traded'] = strat.total_trades
+            entry['cumulative_pnl'] = round(strat.cumulative_pnl, 4)
+            from api.pricing import get_futures_price as _gfp
+            for leg in strat.legs:
+                _px = _gfp(leg['symbol'])
+                _mark = _px['mark_price'] if _px and _px.get('mark_price') else leg['entry_price']
+                _lp = (_mark - leg['entry_price']) * leg['size'] * leg.get('contract_value', 0)
+                live_legs.append({'symbol': leg['symbol'], 'type': 'long', 'strike': leg.get('coin', ''),
+                    'side': leg.get('side', 'buy'), 'size': leg['size'], 'entry_price': round(leg['entry_price'], 6),
+                    'current_mark': round(_mark, 6),
+                    'current_pnl': round(_lp, 4),
+                    'delta': 0})
             if hasattr(strat, '_pnl_history') and strat._pnl_history:
                 pnl_history = list(strat._pnl_history[-500:])
         elif sid in strangle_strategies and strangle_strategies[sid].get('strategy'):
@@ -3473,6 +3622,8 @@ def api_pnl_series():
                 t['pnl'] = round(portfolio_strangle_strategies[sid]['strategy'].pnl, 4)
             elif sid in ema_spread_strategies and ema_spread_strategies[sid].get('strategy'):
                 t['pnl'] = round(ema_spread_strategies[sid]['strategy'].pnl, 4)
+            elif sid in ema_trend_strategies and ema_trend_strategies[sid].get('strategy'):
+                t['pnl'] = round(ema_trend_strategies[sid]['strategy'].pnl, 4)
             elif sid in pivot_st_strategies and pivot_st_strategies[sid].get('strategy'):
                 t['pnl'] = round(pivot_st_strategies[sid]['strategy'].pnl, 4)
             elif sid in hybrid_strategies and hybrid_strategies[sid].get('strategy'):
@@ -5584,6 +5735,169 @@ def ema_spread_status(sid):
     )
 
 
+# ── EMA Trend Follower Strategy Routes ──
+
+
+def run_ema_trend(sid, params):
+    entry = ema_trend_strategies[sid]
+    uid = entry['user_id']
+    if not _setup_strategy_thread(entry):
+        entry['log_queue'].put("__STOPPED__")
+        return
+
+    try:
+        from strategy.ema_trend_follower import EmaTrendFollower
+        s = EmaTrendFollower(
+            top_n=int(params.get('top_n', 50)),
+            notional_usd=float(params.get('notional_usd', 100)),
+            ema_fast=int(params.get('ema_fast', 20)),
+            ema_slow=int(params.get('ema_slow', 50)),
+            ema_resolution=params.get('ema_resolution', '1d'),
+            refresh_interval=int(params.get('refresh_interval', 3600)),
+            dry_run=bool(params.get('dry_run', False)),
+        )
+        s._log_queue = entry['log_queue']
+        s._log_history = entry['log_history']
+        s._sid = sid
+        import config as _cfg
+        s._api_key = _cfg.get_api_key()
+        s._api_secret = _cfg.get_api_secret()
+        s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
+        s._user_id = uid
+        entry['strategy'] = s
+        entry['running'] = True
+        record_start(sid, params, user_id=uid)
+        if not s.initialize():
+            entry['log_queue'].put("✗ Init failed")
+            entry['running'] = False
+            entry['log_queue'].put("__STOPPED__")
+            return
+
+        # Wrap sleep for periodic PnL snapshots (mirrors EMA Spread)
+        import strategy.ema_trend_follower as _etf_mod
+        _orig_sleep = _etf_mod.time.sleep
+        _tick = [0]
+        def _snap_sleep(secs):
+            _orig_sleep(secs)
+            _tick[0] += 1
+            try:
+                save_pnl_snapshot(uid, sid, round(s.pnl, 4))
+            except Exception:
+                pass
+        _etf_mod.time.sleep = _snap_sleep
+        try:
+            s.monitor()
+        finally:
+            _etf_mod.time.sleep = _orig_sleep
+    except Exception as e:
+        entry['log_queue'].put(f"❌ Error: {e}")
+    finally:
+        strategy = entry.get('strategy')
+        if strategy and not strategy._running:
+            pnl = round(strategy.cumulative_pnl, 4)
+            record_end(sid, pnl, getattr(strategy, 'total_trades', 0))
+            update_tracked(sid, status='completed', pnl=round(pnl, 2),
+                           exit_reason='intentional_close')
+        elif not strategy:
+            logger.warning(f"[deploy] EMA Trend {sid} — thread exited without strategy object, keeping status 'running'")
+        else:
+            logger.warning(f"[deploy] EMA Trend {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
+        _teardown_strategy_thread(entry)
+
+
+@app.route('/api/ema-trend/start', methods=['POST'])
+@login_required
+def ema_trend_start():
+    params = request.json
+    profile_id = params.pop('profile_id', None)
+    api_key, api_secret, _, broker = get_profile_creds(profile_id)
+    if not api_key:
+        return jsonify(error="No API profile selected"), 400
+    sid = str(uuid.uuid4())[:8]
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
+             'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    ema_trend_strategies[sid] = entry
+    track_strategy(sid, 'EMA Trend', f"Top-{params.get('top_n', 50)} EMA Trend Follower", current_user_id(), details={**params, 'profile_id': profile_id})
+    entry['thread'] = threading.Thread(target=run_ema_trend, args=(sid, params), daemon=True)
+    entry['thread'].start()
+    return jsonify(status="started", sid=sid)
+
+
+@app.route('/api/ema-trend/stop', methods=['POST'])
+@login_required
+def ema_trend_stop():
+    sid = request.json.get('sid')
+    e = ema_trend_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error="Not found"), 404
+    if e.get('strategy'):
+        try:
+            from config import set_thread_credentials
+            profile_id = e.get('profile_id')
+            if profile_id:
+                api_key, api_secret, _, broker = get_profile_creds(profile_id)
+                if api_key:
+                    set_thread_credentials(api_key, api_secret, broker)
+            e['strategy'].close_all()
+        except Exception as ex:
+            logger.error(f"[ema_trend_stop] {sid} error: {ex}")
+    return jsonify(status="stopping")
+
+
+@app.route('/api/ema-trend/stream/<sid>')
+@login_required
+def ema_trend_stream(sid):
+    e = ema_trend_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
+    q = e['log_queue']
+    def generate():
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                if msg == "__STOPPED__":
+                    yield f"event: stopped\ndata: done\n\n"
+                    break
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield f": heartbeat\n\n"
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/ema-trend/status/<sid>')
+@login_required
+def ema_trend_status(sid):
+    e = ema_trend_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(running=False)
+    s = e.get('strategy')
+    if not e['running'] or not s:
+        return jsonify(running=False)
+    from api.pricing import get_futures_price as _gfp
+    enriched_legs = []
+    for l in s.legs:
+        _px = _gfp(l['symbol'])
+        _mark = _px['mark_price'] if _px and _px.get('mark_price') else l['entry_price']
+        _lp = (_mark - l['entry_price']) * l['size'] * l.get('contract_value', 0)
+        enriched_legs.append({
+            'symbol': l['symbol'], 'coin': l.get('coin', ''), 'type': 'long',
+            'side': l.get('side', 'buy'), 'size': l['size'],
+            'entry_price': round(l['entry_price'], 6),
+            'mark_price': round(_mark, 6), 'pnl': round(_lp, 4),
+            'product_id': l.get('product_id'),
+        })
+    return jsonify(
+        running=True,
+        cumulative_pnl=round(s.cumulative_pnl, 4),
+        session_pnl=round(s.pnl, 4),
+        open_positions=len(s.legs),
+        total_trades=s.total_trades,
+        trade_log=s.trade_log[-10:],
+        legs=enriched_legs,
+    )
+
+
 # ── Option Chain Routes ──
 
 DELTA_ASSETS = {'BTC', 'ETH'}
@@ -6268,7 +6582,7 @@ def api_tracker_logs(sid):
         pnl = round(strat.total_pnl, 2) if strat else 0
         return jsonify(sid=sid, logs=logs[-last:], running=e.get('running', False), pnl=pnl, status='running' if e.get('running') else 'completed')
     # Check new strategy dicts
-    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies):
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_trend_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies):
         e = dct.get(sid)
         if e and e.get('user_id') == current_user_id():
             logs = list(e.get('log_history', []))
@@ -6306,7 +6620,7 @@ def api_tracker_close(sid):
         e['strategy'].close_all_positions()
         return jsonify(status='closed')
     # New strategy dicts
-    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies):
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_trend_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies):
         e = dct.get(sid)
         if e and e.get('user_id') == current_user_id() and e.get('strategy'):
             e['strategy'].close_all()
