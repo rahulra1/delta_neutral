@@ -229,7 +229,8 @@ class EmaTrendFollower(BaseStrategy):
                     self._user_id, product_id, symbol,
                     type='futures', strike='0', side='buy',
                     size=lots, entry_price=filled_price, asset=coin or symbol,
-                    source='EMA Trend', strategy_sid=self._sid or '')
+                    source='EMA Trend', strategy_sid=self._sid or '',
+                    contract_value=contract_value)
         except Exception as e:
             logger.debug("[EMA Trend] position_tracker.open failed for %s: %s", symbol, e)
         self.trade_log.append({
@@ -391,7 +392,8 @@ class EmaTrendFollower(BaseStrategy):
                         type='futures', strike='0', side='buy',
                         size=l['size'], entry_price=l['entry_price'],
                         asset=l.get('coin') or l['symbol'],
-                        source='EMA Trend', strategy_sid=self._sid or '')
+                        source='EMA Trend', strategy_sid=self._sid or '',
+                        contract_value=l.get('contract_value'))
         except Exception as e:
             logger.debug("[EMA Trend] tracker re-register on restore failed: %s", e)
         logger.info("[EMA Trend] Restored %d position(s) | Cum PnL $%.2f",

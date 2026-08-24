@@ -17,6 +17,10 @@ export default function PositionCard({ position: p, sym = '$', onClose, compact 
   const mark = p.current_mark || p.mark_price || p.mark || entry;
   const pnl = p.current_pnl || p.pnl || p.payoff || 0;
   const chg = entry ? ((mark - entry) / entry * 100) : 0;
+  // Side-aware colour: for a long (buy) a price rise is favourable (green);
+  // for a short (sell) a price fall is favourable. Neutral when flat.
+  const chgFavorable = side === 'sell' ? chg < 0 : chg > 0;
+  const chgColor = chg === 0 ? 'var(--muted)' : (chgFavorable ? 'var(--green)' : 'var(--red)');
 
   if (compact) {
     return (
@@ -55,7 +59,7 @@ export default function PositionCard({ position: p, sym = '$', onClose, compact 
       <Row label="Mark" value={
         <span style={{ fontWeight: 700 }}>
           {sym}{mark.toFixed(2)}
-          <span style={{ fontSize: 9, marginLeft: 4, color: chg >= 0 ? 'var(--red)' : 'var(--green)' }}>
+          <span style={{ fontSize: 9, marginLeft: 4, color: chgColor }}>
             ({chg >= 0 ? '+' : ''}{chg.toFixed(2)}%)
           </span>
         </span>
@@ -122,16 +126,24 @@ export function PositionTable({ positions = [], sym = '$', onClose }) {
             const mark = p.current_mark || p.mark_price || p.mark || entry;
             const pnl = p.current_pnl || p.pnl || p.payoff || 0;
             const chg = entry ? ((mark - entry) / entry * 100) : 0;
+            const side = (p.side || '').toLowerCase();
+            // Side-aware: long favours up-moves (green), short favours down-moves.
+            const chgFavorable = side === 'sell' ? chg < 0 : chg > 0;
+            const chgColor = chg === 0 ? 'var(--muted)' : (chgFavorable ? 'var(--green)' : 'var(--red)');
+            // Perpetual futures have no strike; only show a numeric strike for options.
+            const strikeNum = Number(p.strike);
+            const strikeCell = (p.strike && !Number.isNaN(strikeNum) && strikeNum > 0)
+              ? strikeNum.toLocaleString() : '—';
             return (
               <tr key={p.product_id || i} style={{ borderBottom: '1px solid var(--border)' }}>
                 <td style={{ padding: '6px 8px' }}><SideBadge side={(p.side || '').toLowerCase()} /></td>
                 <td style={{ padding: '6px 8px', fontWeight: 600, fontSize: '.8rem' }}>{p.symbol}</td>
                 <td style={{ padding: '6px 8px' }}>{(p.type || '').toUpperCase()}</td>
-                <td style={{ padding: '6px 8px' }}>{p.strike ? Number(p.strike).toLocaleString() : '—'}</td>
+                <td style={{ padding: '6px 8px' }}>{strikeCell}</td>
                 <td style={{ padding: '6px 8px' }}>{p.size || 0}</td>
                 <td style={{ padding: '6px 8px' }}>{sym}{entry.toFixed(2)}</td>
                 <td style={{ padding: '6px 8px', fontWeight: 700 }}>{sym}{mark.toFixed(2)}</td>
-                <td style={{ padding: '6px 8px', color: chg >= 0 ? 'var(--red)' : 'var(--green)', fontWeight: 600, fontSize: '.75rem' }}>{chg >= 0 ? '+' : ''}{chg.toFixed(2)}%</td>
+                <td style={{ padding: '6px 8px', color: chgColor, fontWeight: 600, fontSize: '.75rem' }}>{chg >= 0 ? '+' : ''}{chg.toFixed(2)}%</td>
                 <td style={{ padding: '6px 8px', fontWeight: 700, color: pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>{sym}{pnl.toFixed(2)}</td>
                 <td style={{ padding: '6px 8px' }}>{onClose && <button className="btn btn-red" onClick={() => onClose(p)} style={{ padding: '2px 10px', fontSize: '.72rem' }}>Close</button>}</td>
               </tr>

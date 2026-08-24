@@ -13,10 +13,12 @@ class Position:
     """A single open position."""
     __slots__ = ['product_id', 'symbol', 'type', 'strike', 'side', 'size',
                  'entry_price', 'current_mark', 'current_pnl', 'asset',
-                 'source', 'strategy_sid', 'opened_at', '_user_id', '_track_id']
+                 'source', 'strategy_sid', 'opened_at', '_user_id', '_track_id',
+                 'contract_value']
 
     def __init__(self, product_id, symbol, type='', strike='', side='sell',
-                 size=0, entry_price=0, asset='BTC', source='', strategy_sid=''):
+                 size=0, entry_price=0, asset='BTC', source='', strategy_sid='',
+                 contract_value=None):
         self.product_id = product_id
         self.symbol = symbol
         self.type = type
@@ -29,11 +31,15 @@ class Position:
         self.asset = asset
         self.source = source
         self.strategy_sid = strategy_sid
+        # Explicit per-contract value (units of underlying per contract). When
+        # provided (e.g. perpetuals where it varies per coin), it overrides the
+        # per-asset lookup which only knows BTC/ETH.
+        self.contract_value = float(contract_value) if contract_value else None
         self.opened_at = datetime.now().isoformat()
 
     def update_price(self, mark):
         self.current_mark = float(mark)
-        cv = get_contract_value(self.asset)
+        cv = self.contract_value if self.contract_value else get_contract_value(self.asset)
         self.current_pnl = round(compute_leg_pnl(self.entry_price, self.current_mark, self.size, self.side, cv), 2)
 
     def to_dict(self):
@@ -46,6 +52,7 @@ class Position:
             'current_pnl': self.current_pnl,
             'asset': self.asset, 'source': self.source,
             'strategy_sid': self.strategy_sid,
+            'contract_value': self.contract_value,
             'opened_at': self.opened_at,
         }
 
@@ -82,9 +89,20 @@ class PositionTracker:
         positions = self.get_user_positions(user_id)
         for pos in positions:
             try:
-                data = get_current_price(pos.product_id, pos.asset)
-                if data and data.get('mark_price'):
-                    pos.update_price(data['mark_price'])
+                mark = None
+                # Perpetual futures: use the futures ticker endpoint.
+                if pos.type == 'futures' or (pos.symbol or '').endswith('USD'):
+                    from api.pricing import get_futures_price
+                    fdata = get_futures_price(pos.symbol)
+                    if fdata and fdata.get('mark_price'):
+                        mark = fdata['mark_price']
+                # Options / fallback: use the greeks ticker endpoint.
+                if mark is None:
+                    data = get_current_price(pos.product_id, pos.asset)
+                    if data and data.get('mark_price'):
+                        mark = data['mark_price']
+                if mark is not None:
+                    pos.update_price(mark)
             except Exception:
                 pass
         return positions
