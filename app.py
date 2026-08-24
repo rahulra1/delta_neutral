@@ -3099,6 +3099,18 @@ def api_strategy_detail(sid):
         elif sid in ema_trend_strategies and ema_trend_strategies[sid].get('strategy'):
             etf = ema_trend_strategies[sid]
             strat = etf['strategy']
+            # Price against the SAME broker the strategy trades on. Without this
+            # the request thread falls back to the default (testnet) broker,
+            # whose ticker board lacks production-only coins — leaving those
+            # legs frozen at entry with $0 PnL. Set this BEFORE computing pnl.
+            try:
+                from config import set_thread_credentials, set_thread_broker
+                if getattr(strat, '_api_key', None):
+                    set_thread_credentials(strat._api_key, strat._api_secret, getattr(strat, '_broker', None))
+                elif getattr(strat, '_broker', None):
+                    set_thread_broker(strat._broker)
+            except Exception:
+                pass
             entry['pnl'] = round(strat.pnl, 4)
             entry['running'] = etf.get('running', False)
             logs = etf.get('log_history', [])
@@ -5875,6 +5887,16 @@ def ema_trend_status(sid):
     s = e.get('strategy')
     if not e['running'] or not s:
         return jsonify(running=False)
+    # Price against the strategy's own broker (not the request default/testnet).
+    try:
+        from config import set_thread_credentials
+        if getattr(s, '_api_key', None):
+            set_thread_credentials(s._api_key, s._api_secret, getattr(s, '_broker', None))
+        elif getattr(s, '_broker', None):
+            from config import set_thread_broker
+            set_thread_broker(s._broker)
+    except Exception:
+        pass
     from api.pricing import get_futures_prices_bulk as _gfpb
     _marks = _gfpb([l['symbol'] for l in s.legs])
     enriched_legs = []
