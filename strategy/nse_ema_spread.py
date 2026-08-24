@@ -353,27 +353,82 @@ class NseEmaCreditSpread(BaseStrategy):
         return candidates[0]
 
     def _place_spread_orders(self, sell_opt, buy_opt, tag):
-        """Place live orders via Groww for the spread."""
+        """Place live orders via Groww for the spread.
+
+        Confirms each leg is actually EXECUTED by the broker before treating the
+        spread as open. On weekends/holidays (market closed) a market order is
+        submitted but never fills — previously we recorded the position and began
+        monitoring a fill that never happened. Now we only return True when BOTH
+        legs are broker-confirmed filled, and we unwind a one-sided fill.
+        """
         try:
-            from api.groww import place_order
+            from api.groww import place_order, confirm_order_filled
+
+            # 1) SELL leg
             sell_resp = place_order(
                 trading_symbol=sell_opt.get('trading_symbol', ''),
                 quantity=self.quantity,
                 transaction_type='SELL', order_type='MARKET', product='NRML')
-            if sell_resp.get('error'):
-                print(f"{tag} ✗ Sell order failed: {sell_resp['error']}")
+            if not isinstance(sell_resp, dict) or sell_resp.get('error'):
+                print(f"{tag} ✗ Sell order failed: {sell_resp.get('error') if isinstance(sell_resp, dict) else sell_resp}")
                 return False
+            sell_oid = sell_resp.get('groww_order_id') or sell_resp.get('growwOrderId')
+            sell_filled, sell_status = confirm_order_filled(sell_oid)
+            if not sell_filled:
+                print(f"{tag} ✗ Sell order not filled (status={sell_status}) — no position opened")
+                # Best-effort cancel in case it is still pending.
+                self._safe_cancel(sell_oid, tag)
+                return False
+            print(f"{tag} ✓ Sell leg confirmed filled (status={sell_status})")
+
+            # 2) BUY leg
             buy_resp = place_order(
                 trading_symbol=buy_opt.get('trading_symbol', ''),
                 quantity=self.quantity,
                 transaction_type='BUY', order_type='MARKET', product='NRML')
-            if buy_resp.get('error'):
-                print(f"{tag} ✗ Buy order failed: {buy_resp['error']}")
+            if not isinstance(buy_resp, dict) or buy_resp.get('error'):
+                print(f"{tag} ✗ Buy order failed: {buy_resp.get('error') if isinstance(buy_resp, dict) else buy_resp} — unwinding filled sell leg")
+                self._unwind_leg(sell_opt, 'BUY', tag)  # buy back the short we sold
                 return False
+            buy_oid = buy_resp.get('groww_order_id') or buy_resp.get('growwOrderId')
+            buy_filled, buy_status = confirm_order_filled(buy_oid)
+            if not buy_filled:
+                print(f"{tag} ✗ Buy order not filled (status={buy_status}) — unwinding filled sell leg")
+                self._safe_cancel(buy_oid, tag)
+                self._unwind_leg(sell_opt, 'BUY', tag)
+                return False
+            print(f"{tag} ✓ Buy leg confirmed filled (status={buy_status})")
+
             return True
         except Exception as e:
             print(f"{tag} ✗ Order error: {e}")
             return False
+
+    def _safe_cancel(self, groww_order_id, tag):
+        """Best-effort cancel of a possibly-pending order."""
+        if not groww_order_id:
+            return
+        try:
+            from api.groww import cancel_order
+            cancel_order(groww_order_id)
+        except Exception as e:
+            print(f"{tag} ⚠ Could not cancel order {groww_order_id}: {e}")
+
+    def _unwind_leg(self, opt, transaction_type, tag):
+        """Close a single filled leg (used when the spread only half-fills) to
+        avoid leaving a naked position."""
+        try:
+            from api.groww import place_order
+            resp = place_order(
+                trading_symbol=opt.get('trading_symbol', ''),
+                quantity=self.quantity,
+                transaction_type=transaction_type, order_type='MARKET', product='NRML')
+            if isinstance(resp, dict) and resp.get('error'):
+                print(f"{tag} 🚨 Failed to unwind leg {opt.get('trading_symbol','')}: {resp['error']} — MANUAL INTERVENTION NEEDED")
+            else:
+                print(f"{tag} ✓ Unwound one-sided leg {opt.get('trading_symbol','')}")
+        except Exception as e:
+            print(f"{tag} 🚨 Exception unwinding leg {opt.get('trading_symbol','')}: {e} — MANUAL INTERVENTION NEEDED")
 
     # ─── Day Trade Monitor ───────────────────────────────────────────────
 

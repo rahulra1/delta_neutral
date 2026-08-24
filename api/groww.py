@@ -460,6 +460,50 @@ def get_order_status(groww_order_id):
         return {'error': str(e)}
 
 
+# Order status buckets (Groww StocksOrderStatus enum).
+_FILLED_STATUSES = {'EXECUTED', 'COMPLETED'}
+_FAILED_STATUSES = {'REJECTED', 'FAILED', 'CANCELLED'}
+# NEW, ACKED, APPROVED, TRIGGER_PENDING, DELIVERY_AWAITED, *_REQUESTED -> still pending
+
+
+def _extract_status(resp):
+    """Pull the order_status string out of a place/status response dict."""
+    if not isinstance(resp, dict):
+        return None
+    return (resp.get('order_status') or resp.get('orderStatus')
+            or resp.get('status'))
+
+
+def confirm_order_filled(groww_order_id, timeout=20, poll_interval=2):
+    """Poll Groww until an order reaches a terminal state.
+
+    Returns (filled: bool, status: str). `filled` is True only when the broker
+    confirms EXECUTED/COMPLETED. On REJECTED/FAILED/CANCELLED or timeout it
+    returns False, so callers must NOT record a position or start monitoring.
+    """
+    import time as _time
+    if not groww_order_id:
+        return False, 'no_order_id'
+    deadline = _time.time() + timeout
+    last_status = 'UNKNOWN'
+    while _time.time() < deadline:
+        resp = get_order_status(groww_order_id)
+        if isinstance(resp, dict) and resp.get('error'):
+            last_status = f"error:{resp['error']}"
+            _time.sleep(poll_interval)
+            continue
+        status = _extract_status(resp)
+        if status:
+            last_status = status
+            up = status.upper()
+            if up in _FILLED_STATUSES:
+                return True, up
+            if up in _FAILED_STATUSES:
+                return False, up
+        _time.sleep(poll_interval)
+    return False, f'timeout:{last_status}'
+
+
 def get_positions():
     """Get open positions from Groww."""
     try:
