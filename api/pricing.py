@@ -69,3 +69,45 @@ def get_futures_price(symbol='BTCUSD'):
     except Exception as e:
         logger.error(f"Error fetching futures price for {symbol}: {e}")
         return None
+
+
+def get_futures_prices_bulk(symbols=None, contract_type='perpetual_futures'):
+    """Fetch marks for many perpetual symbols in ONE request.
+
+    Hitting /v2/tickers/<symbol> once per position doesn't scale — pricing 15-20
+    legs means 15-20 sequential HTTP calls in a single web request, and the later
+    ones start failing (rate limits / connection resets), leaving those legs stuck
+    at entry price. This fetches the whole perpetual ticker board in one call and
+    returns {symbol: {'mark_price': float, 'delta': 0}}.
+
+    Results are written into the same per-symbol cache used by get_futures_price,
+    so subsequent get_futures_price calls are served from cache.
+    """
+    now = time.time()
+    path = '/v2/tickers'
+    query_string = f'?contract_types={contract_type}'
+    headers = get_headers('GET', path, query_string)
+    out = {}
+    try:
+        response = requests.get(f'{config.BASE_URL}{path}{query_string}',
+                                headers=headers, timeout=(3, 27))
+        response.raise_for_status()
+        result = response.json()
+        if not result.get('success'):
+            return out
+        wanted = set(symbols) if symbols else None
+        with _cache_lock:
+            for ticker in result.get('result', []):
+                sym = ticker.get('symbol')
+                mp = ticker.get('mark_price')
+                if not sym or mp is None:
+                    continue
+                if wanted is not None and sym not in wanted:
+                    continue
+                data = {'mark_price': float(mp), 'delta': 0}
+                out[sym] = data
+                _cache[f'futures_{sym}'] = {'data': data, 'ts': now}
+        return out
+    except Exception as e:
+        logger.error(f"Error fetching bulk futures prices: {e}")
+        return out

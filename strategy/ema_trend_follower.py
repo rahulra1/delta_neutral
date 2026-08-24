@@ -133,10 +133,15 @@ class EmaTrendFollower(BaseStrategy):
         open_pnl = 0.0
         with self._legs_lock:
             legs_copy = list(self.legs)
+        # Price all legs in ONE bulk call — pricing each leg individually means
+        # many sequential HTTP calls, and the later ones fail (rate limits /
+        # connection resets), leaving those legs valued at entry (PnL 0).
+        from api.pricing import get_futures_prices_bulk
+        marks = get_futures_prices_bulk([l['symbol'] for l in legs_copy])
         for leg in legs_copy:
-            px = get_futures_price(leg['symbol'])
-            if px and px.get('mark_price'):
-                open_pnl += (px['mark_price'] - leg['entry_price']) * leg['size'] * leg['contract_value']
+            md = marks.get(leg['symbol'])
+            if md and md.get('mark_price'):
+                open_pnl += (md['mark_price'] - leg['entry_price']) * leg['size'] * leg['contract_value']
         return self.cumulative_pnl + open_pnl
 
     # ---- Core logic --------------------------------------------------------

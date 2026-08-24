@@ -3105,10 +3105,11 @@ def api_strategy_detail(sid):
             entry['trade_log'] = strat.trade_log[-20:]
             entry['days_traded'] = strat.total_trades
             entry['cumulative_pnl'] = round(strat.cumulative_pnl, 4)
-            from api.pricing import get_futures_price as _gfp
+            from api.pricing import get_futures_prices_bulk as _gfpb
+            _marks = _gfpb([leg['symbol'] for leg in strat.legs])
             for leg in strat.legs:
-                _px = _gfp(leg['symbol'])
-                _mark = _px['mark_price'] if _px and _px.get('mark_price') else leg['entry_price']
+                _md = _marks.get(leg['symbol'])
+                _mark = _md['mark_price'] if _md and _md.get('mark_price') else leg['entry_price']
                 _lp = (_mark - leg['entry_price']) * leg['size'] * leg.get('contract_value', 0)
                 live_legs.append({'symbol': leg['symbol'], 'type': 'long', 'strike': leg.get('coin', ''),
                     'side': leg.get('side', 'buy'), 'size': leg['size'], 'entry_price': round(leg['entry_price'], 6),
@@ -5874,11 +5875,12 @@ def ema_trend_status(sid):
     s = e.get('strategy')
     if not e['running'] or not s:
         return jsonify(running=False)
-    from api.pricing import get_futures_price as _gfp
+    from api.pricing import get_futures_prices_bulk as _gfpb
+    _marks = _gfpb([l['symbol'] for l in s.legs])
     enriched_legs = []
     for l in s.legs:
-        _px = _gfp(l['symbol'])
-        _mark = _px['mark_price'] if _px and _px.get('mark_price') else l['entry_price']
+        _md = _marks.get(l['symbol'])
+        _mark = _md['mark_price'] if _md and _md.get('mark_price') else l['entry_price']
         _lp = (_mark - l['entry_price']) * l['size'] * l.get('contract_value', 0)
         enriched_legs.append({
             'symbol': l['symbol'], 'coin': l.get('coin', ''), 'type': 'long',
