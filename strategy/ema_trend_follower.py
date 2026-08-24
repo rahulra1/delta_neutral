@@ -370,14 +370,25 @@ class EmaTrendFollower(BaseStrategy):
         self.trade_log = details.get('trade_log', []) or []
         restored = []
         for l in (legs or []):
+            cv = float(l.get('contract_value', 0) or 0)
+            sym = l.get('symbol', '')
+            # Self-heal legs persisted before contract_value was tracked (cv=0):
+            # re-fetch it from the exchange so P&L/lot math stays correct.
+            if cv <= 0 and sym:
+                try:
+                    _, fetched_cv = self._product_meta(sym)
+                    if fetched_cv and fetched_cv > 0:
+                        cv = fetched_cv
+                except Exception:
+                    pass
             restored.append({
-                'symbol': l.get('symbol', ''),
+                'symbol': sym,
                 'product_id': l.get('product_id'),
                 'coin': l.get('coin', ''),
                 'side': l.get('side', 'buy'),
                 'size': int(l.get('size', 0) or 0),
                 'entry_price': float(l.get('entry_price', 0) or 0),
-                'contract_value': float(l.get('contract_value', 0) or 0),
+                'contract_value': cv,
                 'opened_at': l.get('opened_at', ''),
             })
         with self._legs_lock:
