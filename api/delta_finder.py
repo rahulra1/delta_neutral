@@ -3,9 +3,12 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Delta-based scoring weights (normalized min-max approach)
-W_DELTA_CLOSENESS = 0.50   # Distance from target delta (most critical)
-W_DELTA_VOLUME = 0.25      # Immediate liquidity — ensures quick entry/exit
-W_DELTA_OI = 0.25          # Structural liquidity — ensures market depth
+# Closeness dominates so that a materially closer-delta strike cannot be
+# outvoted by liquidity alone (prevents sell/buy legs collapsing onto the same
+# strike on thin chains — see EMA credit spread "same strike, no trade" issue).
+W_DELTA_CLOSENESS = 0.80   # Distance from target delta (most critical)
+W_DELTA_VOLUME = 0.10      # Immediate liquidity — ensures quick entry/exit
+W_DELTA_OI = 0.10          # Structural liquidity — ensures market depth
 
 
 def _score_by_delta(candidates, target_delta, is_put=False):
@@ -17,7 +20,7 @@ def _score_by_delta(candidates, target_delta, is_put=False):
         Volume Score   (V_i) = (volume_i - min_vol) / (max_vol - min_vol)
         OI Score       (O_i) = (oi_i - min_oi) / (max_oi - min_oi)
 
-        Final Score = C_i × 0.50 + V_i × 0.25 + O_i × 0.25
+        Final Score = C_i × 0.80 + V_i × 0.10 + O_i × 0.10
 
     Score closest to 1.0 wins.
     """
@@ -68,7 +71,7 @@ def _score_by_delta(candidates, target_delta, is_put=False):
 def find_target_delta_options(option_chain, target_delta, tolerance):
     """
     Find the best call and put options near target_delta (e.g. 0.20),
-    scored by: Closeness (50%) + Volume (25%) + OI (25%) using min-max normalization.
+    scored by: Closeness (80%) + Volume (10%) + OI (10%) using min-max normalization.
 
     The strike scoring closest to 1.0 is the winner.
 
@@ -175,7 +178,7 @@ def find_target_delta_options(option_chain, target_delta, tolerance):
     eligible_calls = [c for c in calls if min_delta <= c['delta'] <= max_delta]
     eligible_puts = [p for p in puts if min_delta <= abs(p['delta']) <= max_delta]
 
-    # Score using normalized formula: Closeness 50% + Volume 25% + OI 25%
+    # Score using normalized formula: Closeness 80% + Volume 10% + OI 10%
     scored_calls = _score_by_delta(eligible_calls, target_delta, is_put=False)
     scored_puts = _score_by_delta(eligible_puts, target_delta, is_put=True)
 
@@ -245,7 +248,7 @@ def _score_by_premium(candidates, target_premium):
         Volume Score   (V_i) = (volume_i - min_vol) / (max_vol - min_vol)
         OI Score       (O_i) = (oi_i - min_oi) / (max_oi - min_oi)
 
-        Final Score = C_i × 0.50 + V_i × 0.25 + O_i × 0.25
+        Final Score = C_i × 0.80 + V_i × 0.10 + O_i × 0.10
 
     Score closest to 1.0 wins.
     """
