@@ -166,17 +166,23 @@ class NseDailyStrangle(BaseStrategy):
         try:
             from api.groww import place_order
             for opt, opt_type in [(call_opt, 'call'), (put_opt, 'put')]:
+                # Use the 'symbol' field as the tradable symbol for Groww.
+                sym = opt.get('symbol', '')
+                if not sym:
+                    print(f"{tag} ✗ SELL {opt_type.upper()} aborted: empty symbol "
+                          f"for strike {opt.get('strike_price')}")
+                    return []
                 resp = place_order(
-                    trading_symbol=opt.get('trading_symbol', ''),
+                    trading_symbol=sym,
                     quantity=self.quantity,
                     transaction_type='SELL',
                     order_type='MARKET',
                     product='NRML',
                 )
                 if resp.get('error'):
-                    print(f"{tag} ✗ SELL {opt_type.upper()} order failed: {resp['error']}")
+                    print(f"{tag} ✗ SELL {opt_type.upper()} order failed for '{sym}': {resp['error']}")
                     return []
-                print(f"{tag} ✓ Live SELL {opt_type.upper()} {opt['strike_price']} placed")
+                print(f"{tag} ✓ Live SELL {opt_type.upper()} {opt['strike_price']} placed ({sym})")
         except Exception as e:
             print(f"{tag} ✗ Order error: {e}")
             return []
@@ -279,7 +285,7 @@ class NseDailyStrangle(BaseStrategy):
                     try:
                         from api.groww import place_order
                         place_order(
-                            trading_symbol=leg.get('trading_symbol', ''),
+                            trading_symbol=leg.get('symbol', ''),
                             quantity=self.quantity,
                             transaction_type='BUY',
                             order_type='MARKET',
@@ -374,7 +380,7 @@ class NseDailyStrangle(BaseStrategy):
         try:
             from api.groww import place_order
             resp = place_order(
-                trading_symbol=new_opt.get('trading_symbol', ''),
+                trading_symbol=new_opt.get('symbol', ''),
                 quantity=self.quantity,
                 transaction_type='SELL',
                 order_type='MARKET',
@@ -437,7 +443,7 @@ class NseDailyStrangle(BaseStrategy):
                     try:
                         from api.groww import place_order
                         resp = place_order(
-                            trading_symbol=leg.get('trading_symbol', ''),
+                            trading_symbol=leg.get('symbol', ''),
                             quantity=self.quantity,
                             transaction_type='BUY',
                             order_type='MARKET',
@@ -459,7 +465,7 @@ class NseDailyStrangle(BaseStrategy):
                 try:
                     from api.groww import place_order
                     place_order(
-                        trading_symbol=leg.get('trading_symbol', ''),
+                        trading_symbol=leg.get('symbol', ''),
                         quantity=self.quantity,
                         transaction_type='BUY',
                         order_type='MARKET',
@@ -489,7 +495,7 @@ class NseDailyStrangle(BaseStrategy):
                     if leg.get('stopped', False):
                         continue
                     place_order(
-                        trading_symbol=leg.get('trading_symbol', ''),
+                        trading_symbol=leg.get('symbol', ''),
                         quantity=self.quantity,
                         transaction_type='BUY',
                         order_type='MARKET',
