@@ -44,13 +44,22 @@ EMA_RESOLUTION = '1d'
 REFRESH_INTERVAL = 3600          # hourly
 MONITOR_INTERVAL = 3600
 
+# Per-position risk exits and re-entry cooldown.
+TP_PCT = 0.05                    # +5% from entry -> take profit
+SL_PCT = 0.02                    # -2% from entry -> stop loss
+REENTRY_COOLDOWN_HOURS = 24      # after a TP/SL exit, block re-entry this long
+PRICE_CHECK_INTERVAL = 60        # seconds between TP/SL price checks
+
 
 class EmaTrendFollower(BaseStrategy):
     """Long-only daily-EMA-crossover trend follower over a top-turnover basket."""
 
     def __init__(self, top_n=TOP_N, notional_usd=POSITION_NOTIONAL_USD,
                  ema_fast=EMA_FAST, ema_slow=EMA_SLOW, ema_resolution=EMA_RESOLUTION,
-                 refresh_interval=REFRESH_INTERVAL, dry_run=True):
+                 refresh_interval=REFRESH_INTERVAL, dry_run=True,
+                 tp_pct=TP_PCT, sl_pct=SL_PCT,
+                 reentry_cooldown_hours=REENTRY_COOLDOWN_HOURS,
+                 price_check_interval=PRICE_CHECK_INTERVAL):
         self.top_n = top_n
         self.notional_usd = notional_usd
         self.ema_fast = ema_fast
@@ -59,6 +68,10 @@ class EmaTrendFollower(BaseStrategy):
         self.refresh_interval = refresh_interval
         self.monitor_interval = refresh_interval
         self.dry_run = dry_run
+        self.tp_pct = tp_pct
+        self.sl_pct = sl_pct
+        self.reentry_cooldown_hours = reentry_cooldown_hours
+        self.price_check_interval = price_check_interval
 
         # positions kept as a list of "legs" so they serialize like other
         # strategies. Each leg:
@@ -71,6 +84,11 @@ class EmaTrendFollower(BaseStrategy):
         self.total_trades = 0
         self.trade_log = []
         self._running = False
+
+        # {symbol: ISO8601 datetime until which re-entry is blocked}. Set when a
+        # position exits via TP or SL. Persisted so cooldowns survive restarts.
+        self._cooldowns = {}
+        self._cooldowns_lock = threading.Lock()
 
         # App-integration hooks (set externally after creation, like ECS)
         self._sid = None
@@ -92,6 +110,10 @@ class EmaTrendFollower(BaseStrategy):
             'ema_resolution': ema_resolution,
             'refresh_interval': refresh_interval,
             'dry_run': dry_run,
+            'tp_pct': tp_pct,
+            'sl_pct': sl_pct,
+            'reentry_cooldown_hours': reentry_cooldown_hours,
+            'price_check_interval': price_check_interval,
         }
 
     # ---- BaseStrategy interface -------------------------------------------
@@ -102,6 +124,9 @@ class EmaTrendFollower(BaseStrategy):
         print(f"[EMA Trend] Signal: {self.ema_fast}/{self.ema_slow} EMA on "
               f"{self.ema_resolution} | ${self.notional_usd}/coin | "
               f"Refresh {self.refresh_interval}s | Long-only")
+        print(f"[EMA Trend] Risk: TP +{self.tp_pct*100:.1f}% / SL -{self.sl_pct*100:.1f}% "
+              f"| Re-entry cooldown {self.reentry_cooldown_hours}h "
+              f"| Price check {self.price_check_interval}s")
         with self._legs_lock:
             if self.legs:
                 print(f"[EMA Trend] Resumed with {len(self.legs)} position(s): "
@@ -109,14 +134,86 @@ class EmaTrendFollower(BaseStrategy):
         return True
 
     def monitor(self):
-        """Blocking loop: re-evaluate the universe every refresh_interval."""
+        """Blocking loop: re-evaluate the universe every refresh_interval.
+
+        A separate daemon thread runs the faster TP/SL price checks so a -2% stop
+        or +5% target is acted on within price_check_interval seconds rather than
+        waiting for the hourly universe refresh.
+        """
         self._apply_thread_context()
+        risk_thread = threading.Thread(target=self._risk_loop, daemon=True)
+        risk_thread.start()
         while self._running:
             try:
                 self.evaluate_once()
             except Exception as e:
                 logger.error("[EMA Trend] Evaluation cycle failed: %s", e)
             self._interruptible_sleep(self.refresh_interval)
+
+    def _risk_loop(self):
+        """Fast loop: check held positions against TP/SL thresholds."""
+        self._apply_thread_context()
+        while self._running:
+            self._interruptible_sleep(self.price_check_interval)
+            if not self._running:
+                break
+            try:
+                self._check_tp_sl()
+            except Exception as e:
+                logger.error("[EMA Trend] TP/SL check failed: %s", e)
+
+    def _check_tp_sl(self):
+        """Close any held position whose price move hit +tp_pct or -sl_pct.
+
+        On a TP/SL exit, the coin is put on a re-entry cooldown so it will not be
+        re-bought until reentry_cooldown_hours have elapsed.
+        """
+        with self._legs_lock:
+            legs_copy = list(self.legs)
+        if not legs_copy:
+            return
+        from api.pricing import get_futures_prices_bulk
+        marks = get_futures_prices_bulk([l['symbol'] for l in legs_copy])
+        for leg in legs_copy:
+            md = marks.get(leg['symbol'])
+            if not md or not md.get('mark_price'):
+                continue
+            entry = leg['entry_price']
+            if entry <= 0:
+                continue
+            change = (md['mark_price'] - entry) / entry
+            if change >= self.tp_pct:
+                self._exit(leg['symbol'], reason='take_profit')
+                self._set_cooldown(leg['symbol'])
+            elif change <= -self.sl_pct:
+                self._exit(leg['symbol'], reason='stop_loss')
+                self._set_cooldown(leg['symbol'])
+
+    def _set_cooldown(self, symbol):
+        """Block re-entry of `symbol` for reentry_cooldown_hours."""
+        until = datetime.now(IST) + timedelta(hours=self.reentry_cooldown_hours)
+        with self._cooldowns_lock:
+            self._cooldowns[symbol] = until.isoformat()
+        print(f"[EMA Trend] {symbol} on re-entry cooldown until "
+              f"{until.strftime('%Y-%m-%d %H:%M')} IST")
+        self._persist_state()
+
+    def _in_cooldown(self, symbol):
+        """True if `symbol` is still within its re-entry cooldown window."""
+        with self._cooldowns_lock:
+            until_iso = self._cooldowns.get(symbol)
+        if not until_iso:
+            return False
+        try:
+            until = datetime.fromisoformat(until_iso)
+        except (ValueError, TypeError):
+            return False
+        if datetime.now(IST) >= until:
+            # Expired — clean it up.
+            with self._cooldowns_lock:
+                self._cooldowns.pop(symbol, None)
+            return False
+        return True
 
     def close_all(self):
         """Close every open position (used on shutdown)."""
@@ -172,6 +269,8 @@ class EmaTrendFollower(BaseStrategy):
             held_set = {l['symbol'] for l in self.legs}
         for sym, meta in universe.items():
             if sym in held_set:
+                continue
+            if self._in_cooldown(sym):
                 continue
             sig = ema_crossover_direction(sym, resolution=self.ema_resolution,
                                           fast=self.ema_fast, slow=self.ema_slow)
@@ -356,10 +455,13 @@ class EmaTrendFollower(BaseStrategy):
                     'opened_at': l.get('opened_at', ''),
                 } for l in self.legs]
                 cum = self.cumulative_pnl
+            with self._cooldowns_lock:
+                cooldowns_data = dict(self._cooldowns)
             details = {**self._base_params,
                        'trade_log': self.trade_log[-500:],
                        'cumulative_pnl': cum,
-                       'total_trades': self.total_trades}
+                       'total_trades': self.total_trades,
+                       'cooldowns': cooldowns_data}
             update_strategy_db(sid, details=details, legs=legs_data,
                                pnl=round(cum, 4))
             logger.debug("[EMA Trend] State persisted: %d legs, $%.2f",
@@ -373,6 +475,17 @@ class EmaTrendFollower(BaseStrategy):
         self.cumulative_pnl = float(details.get('cumulative_pnl', 0) or 0)
         self.total_trades = int(details.get('total_trades', 0) or 0)
         self.trade_log = details.get('trade_log', []) or []
+        # Restore re-entry cooldowns, dropping any that have already expired.
+        restored_cd = {}
+        now = datetime.now(IST)
+        for sym, until_iso in (details.get('cooldowns', {}) or {}).items():
+            try:
+                if datetime.fromisoformat(until_iso) > now:
+                    restored_cd[sym] = until_iso
+            except (ValueError, TypeError):
+                continue
+        with self._cooldowns_lock:
+            self._cooldowns = restored_cd
         restored = []
         for l in (legs or []):
             cv = float(l.get('contract_value', 0) or 0)
