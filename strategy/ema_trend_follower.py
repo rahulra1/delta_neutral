@@ -1,6 +1,6 @@
 """EMA Trend Follower — long-only momentum basket on Delta Exchange perpetuals.
 
-Universe : Top-N coins by 24h USD turnover (perpetual futures), refreshed hourly.
+Universe : Top-N coins by 24h price change (perpetual futures), refreshed hourly.
 Signal   : Daily 20/50 EMA crossover.
              EMA20 > EMA50  -> BULLISH
              EMA20 < EMA50  -> BEARISH
@@ -29,7 +29,7 @@ import config
 from api.orders import place_order
 from api.pricing import get_futures_price
 from api.position_tracker import position_tracker
-from api.top_coins import get_top_coins_by_volume, ema_crossover_direction
+from api.top_coins import get_top_coins_by_change, ema_crossover_direction
 from strategy.base import BaseStrategy
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,7 @@ POSITION_NOTIONAL_USD = 100
 EMA_FAST = 20
 EMA_SLOW = 50
 EMA_RESOLUTION = '1d'
+CHANGE_DIRECTION = 'gainers'     # rank universe by 24h price change: gainers/losers/abs
 REFRESH_INTERVAL = 3600          # hourly
 MONITOR_INTERVAL = 3600
 
@@ -59,7 +60,8 @@ class EmaTrendFollower(BaseStrategy):
                  refresh_interval=REFRESH_INTERVAL, dry_run=True,
                  tp_pct=TP_PCT, sl_pct=SL_PCT,
                  reentry_cooldown_hours=REENTRY_COOLDOWN_HOURS,
-                 price_check_interval=PRICE_CHECK_INTERVAL):
+                 price_check_interval=PRICE_CHECK_INTERVAL,
+                 change_direction=CHANGE_DIRECTION):
         self.top_n = top_n
         self.notional_usd = notional_usd
         self.ema_fast = ema_fast
@@ -72,6 +74,7 @@ class EmaTrendFollower(BaseStrategy):
         self.sl_pct = sl_pct
         self.reentry_cooldown_hours = reentry_cooldown_hours
         self.price_check_interval = price_check_interval
+        self.change_direction = change_direction
 
         # positions kept as a list of "legs" so they serialize like other
         # strategies. Each leg:
@@ -114,13 +117,14 @@ class EmaTrendFollower(BaseStrategy):
             'sl_pct': sl_pct,
             'reentry_cooldown_hours': reentry_cooldown_hours,
             'price_check_interval': price_check_interval,
+            'change_direction': change_direction,
         }
 
     # ---- BaseStrategy interface -------------------------------------------
     def initialize(self):
         self._running = True
         mode = 'DRY-RUN' if self.dry_run else 'LIVE'
-        print(f"[EMA Trend] Started [{mode}] | Universe: top {self.top_n} by turnover")
+        print(f"[EMA Trend] Started [{mode}] | Universe: top {self.top_n} by 24h change ({self.change_direction})")
         print(f"[EMA Trend] Signal: {self.ema_fast}/{self.ema_slow} EMA on "
               f"{self.ema_resolution} | ${self.notional_usd}/coin | "
               f"Refresh {self.refresh_interval}s | Long-only")
@@ -245,7 +249,7 @@ class EmaTrendFollower(BaseStrategy):
     def evaluate_once(self):
         """One full pass: refresh universe, score signals, enter/exit."""
         ts = datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')
-        top = get_top_coins_by_volume(limit=self.top_n)
+        top = get_top_coins_by_change(limit=self.top_n, direction=self.change_direction)
         if not top:
             logger.warning("[EMA Trend] Top-coin fetch empty — skipping cycle")
             self._consecutive_failures += 1
