@@ -355,6 +355,13 @@ class NseEmaCreditSpread(BaseStrategy):
     def _place_spread_orders(self, sell_opt, buy_opt, tag):
         """Place live orders via Groww for the spread.
 
+        LEG ORDERING — the protective BUY (long) leg is placed FIRST, then the
+        SELL (short) leg. This is required for margin-benefit spreads: if the
+        naked short is submitted first, the broker charges full naked-short SPAN
+        + exposure margin (large) and rejects it for insufficient funds. Once the
+        long hedge is in the account, the broker recognizes the defined-risk
+        spread and charges only the (much smaller) spread margin on the short leg.
+
         Confirms each leg is actually EXECUTED by the broker before treating the
         spread as open. On weekends/holidays (market closed) a market order is
         submitted but never fills — previously we recorded the position and began
@@ -364,40 +371,41 @@ class NseEmaCreditSpread(BaseStrategy):
         try:
             from api.groww import place_order, confirm_order_filled
 
-            # 1) SELL leg
-            sell_resp = place_order(
-                trading_symbol=sell_opt.get('trading_symbol', ''),
-                quantity=self.quantity,
-                transaction_type='SELL', order_type='MARKET', product='NRML')
-            if not isinstance(sell_resp, dict) or sell_resp.get('error'):
-                print(f"{tag} ✗ Sell order failed: {sell_resp.get('error') if isinstance(sell_resp, dict) else sell_resp}")
-                return False
-            sell_oid = sell_resp.get('groww_order_id') or sell_resp.get('growwOrderId')
-            sell_filled, sell_status = confirm_order_filled(sell_oid)
-            if not sell_filled:
-                print(f"{tag} ✗ Sell order not filled (status={sell_status}) — no position opened")
-                # Best-effort cancel in case it is still pending.
-                self._safe_cancel(sell_oid, tag)
-                return False
-            print(f"{tag} ✓ Sell leg confirmed filled (status={sell_status})")
-
-            # 2) BUY leg
+            # 1) BUY (hedge) leg FIRST — establishes the long protection so the
+            #    short leg qualifies for spread margin instead of naked margin.
             buy_resp = place_order(
                 trading_symbol=buy_opt.get('trading_symbol', ''),
                 quantity=self.quantity,
                 transaction_type='BUY', order_type='MARKET', product='NRML')
             if not isinstance(buy_resp, dict) or buy_resp.get('error'):
-                print(f"{tag} ✗ Buy order failed: {buy_resp.get('error') if isinstance(buy_resp, dict) else buy_resp} — unwinding filled sell leg")
-                self._unwind_leg(sell_opt, 'BUY', tag)  # buy back the short we sold
+                print(f"{tag} ✗ Buy order failed: {buy_resp.get('error') if isinstance(buy_resp, dict) else buy_resp}")
                 return False
             buy_oid = buy_resp.get('groww_order_id') or buy_resp.get('growwOrderId')
             buy_filled, buy_status = confirm_order_filled(buy_oid)
             if not buy_filled:
-                print(f"{tag} ✗ Buy order not filled (status={buy_status}) — unwinding filled sell leg")
+                print(f"{tag} ✗ Buy order not filled (status={buy_status}) — no position opened")
+                # Best-effort cancel in case it is still pending.
                 self._safe_cancel(buy_oid, tag)
-                self._unwind_leg(sell_opt, 'BUY', tag)
                 return False
-            print(f"{tag} ✓ Buy leg confirmed filled (status={buy_status})")
+            print(f"{tag} ✓ Buy (hedge) leg confirmed filled (status={buy_status})")
+
+            # 2) SELL (short) leg SECOND — now covered by the hedge above.
+            sell_resp = place_order(
+                trading_symbol=sell_opt.get('trading_symbol', ''),
+                quantity=self.quantity,
+                transaction_type='SELL', order_type='MARKET', product='NRML')
+            if not isinstance(sell_resp, dict) or sell_resp.get('error'):
+                print(f"{tag} ✗ Sell order failed: {sell_resp.get('error') if isinstance(sell_resp, dict) else sell_resp} — unwinding filled buy leg")
+                self._unwind_leg(buy_opt, 'SELL', tag)  # sell back the hedge we bought
+                return False
+            sell_oid = sell_resp.get('groww_order_id') or sell_resp.get('growwOrderId')
+            sell_filled, sell_status = confirm_order_filled(sell_oid)
+            if not sell_filled:
+                print(f"{tag} ✗ Sell order not filled (status={sell_status}) — unwinding filled buy leg")
+                self._safe_cancel(sell_oid, tag)
+                self._unwind_leg(buy_opt, 'SELL', tag)
+                return False
+            print(f"{tag} ✓ Sell leg confirmed filled (status={sell_status})")
 
             return True
         except Exception as e:
