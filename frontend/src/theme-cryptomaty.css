@@ -1,0 +1,427 @@
+/* ============================================================================
+   Cryptomaty-style theme — OFF-WHITE (light) with emerald/teal accent.
+   Layered ON TOP of index.css — imported after it in main.jsx.
+   To revert: remove the import of this file in main.jsx.
+   ============================================================================ */
+
+:root {
+  /* Core surfaces (light, off-white) */
+  --bg: #f4f6f8;             /* app background (off-white) */
+  --surface-1: #ffffff;      /* sidebar / bars */
+  --surface-2: #ffffff;      /* cards */
+  --surface-3: #eef1f5;      /* insets / hover */
+  --card: var(--surface-2);
+
+  /* Lines & text */
+  --border: #e3e8ef;
+  --border-soft: #eceff3;
+  --text: #0f1a2a;
+  --text-dim: #46536b;
+  --muted: #8a94a6;
+
+  /* Brand accent — emerald/teal */
+  --accent: #16c78435;
+  --accent-solid: #12b981;   /* primary accent (slightly deeper for light bg) */
+  --accent-2: #0891b2;       /* secondary (cyan) for gradients */
+  --accent-strong: #0ea472;
+
+  /* Semantic */
+  --green: #0ea472;
+  --red: #e5384f;
+  --purple: #6366f1;
+  --amber: #d97706;
+
+  --light-green: rgba(16, 185, 129, 0.10);
+  --light-red: rgba(229, 56, 79, 0.10);
+
+  /* Shadows for light UI */
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.05);
+  --shadow-md: 0 8px 24px rgba(16, 24, 40, 0.10);
+  --glow: 0 0 0 1px rgba(18, 185, 129, 0.30), 0 4px 18px rgba(18, 185, 129, 0.18);
+}
+
+body {
+  background:
+    radial-gradient(900px 500px at 85% -10%, rgba(8, 145, 178, 0.05), transparent 60%),
+    radial-gradient(1000px 600px at -10% 10%, rgba(18, 185, 129, 0.05), transparent 55%),
+    var(--bg);
+  color: var(--text);
+}
+
+/* ---- Sidebar ---- */
+.sidebar {
+  background: var(--surface-1);
+  border-right: 1px solid var(--border);
+  box-shadow: 1px 0 3px rgba(16, 24, 40, 0.03);
+}
+.sidebar-brand {
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 16px 12px;
+}
+.sidebar-brand-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  min-width: 0;
+}
+.sidebar-toggle {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-3);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+.sidebar-toggle:hover {
+  border-color: var(--accent-solid);
+  color: var(--accent-solid);
+  background: #fff;
+}
+.sidebar.collapsed .sidebar-brand {
+  flex-direction: column;
+  gap: 8px;
+}
+.sidebar-logo,
+.sidebar-title {
+  background: linear-gradient(135deg, var(--accent-solid), var(--accent-2));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.sidebar-link { color: var(--text-dim); font-weight: 500; border-radius: 10px; }
+.sidebar-link:hover { background: var(--surface-3); color: var(--text); }
+.sidebar-link.active {
+  background: linear-gradient(135deg, rgba(18, 185, 129, 0.14), rgba(8, 145, 178, 0.10));
+  color: var(--accent-strong);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px rgba(18, 185, 129, 0.28);
+  position: relative;
+}
+.sidebar-link.active::before {
+  content: '';
+  position: absolute; left: 0; top: 8px; bottom: 8px;
+  width: 3px; border-radius: 0 3px 3px 0;
+  background: var(--accent-solid);
+}
+.sidebar-footer { border-top: 1px solid var(--border); }
+.sidebar-credits { background: rgba(240, 185, 11, 0.12); color: var(--amber); }
+.sidebar-avatar {
+  background: linear-gradient(135deg, var(--accent-solid), var(--accent-2));
+  color: #04121a;
+}
+
+/* ---- Cards & panels ---- */
+.card {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+}
+.card:hover { box-shadow: var(--shadow-md); border-color: #d3dae4; }
+
+/* ---- Stat / metric tiles (Cryptomaty dashboard tiles) ---- */
+.stat-card,
+.stat,
+.stat-item,
+.d-card,
+.a-card,
+.sb-card,
+.profile-card,
+.step,
+.broker-card,
+.leg {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.stat-card:hover { box-shadow: var(--shadow-md); transform: translateY(-2px); border-color: #d3dae4; }
+.stat-card .value,
+.stat .val,
+.stat-item .val { color: var(--text); }
+
+/* ---- Buttons ---- */
+.btn { box-shadow: var(--shadow); }
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent-solid), var(--accent-strong));
+  color: #04121a;
+  font-weight: 700;
+}
+.btn-primary:hover { box-shadow: var(--glow); }
+.btn-green { background: var(--green); color: #04121a; }
+.btn-red { background: var(--red); color: #fff; }
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.btn-outline:hover { border-color: var(--accent-solid); color: var(--text); box-shadow: none; }
+
+/* ---- Forms ---- */
+.field input, .field select,
+.sb-field input, .sb-field select,
+.a-input, .at-sel, .at-bottom-controls input {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.field input:focus, .field select:focus,
+.sb-field input:focus, .sb-field select:focus {
+  border-color: var(--accent-solid);
+  box-shadow: 0 0 0 3px rgba(22, 199, 132, 0.18);
+}
+
+/* ---- Values / badges ---- */
+.val-green { color: var(--green); }
+.val-red { color: var(--red); }
+.badge-green { background: var(--light-green); color: var(--green); }
+.badge-red { background: var(--light-red); color: var(--red); }
+.badge-yellow { background: rgba(240, 185, 11, 0.12); color: var(--amber); }
+.source-dn { background: rgba(124, 140, 255, 0.15); color: var(--purple); }
+.source-oc { background: rgba(240, 185, 11, 0.15); color: var(--amber); }
+
+/* ---- Strategy rows ---- */
+.strat-row {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+}
+.strat-row:hover { border-color: var(--accent-solid); box-shadow: var(--shadow); }
+
+/* ---- Tables ---- */
+.perf-table th, .a-table th {
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.perf-table td, .a-table td { border-bottom: 1px solid var(--border-soft); }
+.perf-table tr:hover { background: var(--surface-3); }
+
+/* ---- Trade terminal panels (.at-*) → dark ---- */
+.at-layout { background: var(--bg); }
+.at-left, .at-right, .at-header, .at-tabs,
+.at-bottom-bar, .at-right-header { background: var(--surface-1); border-color: var(--border); }
+.at-right { background: var(--surface-1); }
+.at-left { border-right: 1px solid var(--border); }
+.at-expiry-row { background: var(--surface-2); border-color: var(--border); }
+.at-spot { background: var(--surface-3); color: var(--text); }
+.at-sel { background: var(--surface-1); border-color: var(--border); color: var(--text); }
+.at-tabs span { color: var(--muted); }
+.at-tabs span.active { color: var(--accent-solid); border-bottom-color: var(--accent-solid); }
+.at-tabs span:hover { color: var(--text); }
+.at-expiry { color: var(--muted); }
+.at-expiry.active { color: var(--accent-solid); border-bottom-color: var(--accent-solid); }
+.at-chain th { background: var(--surface-2); color: var(--muted); border-bottom: 1px solid var(--border); }
+.at-chain td { border-bottom: 1px solid var(--border-soft); color: var(--text); }
+.at-chain tr:hover td { background: var(--surface-3) !important; }
+.at-strike-hd, .at-strike-cell { background: var(--surface-2) !important; border-color: var(--border); }
+.at-strike-num { color: var(--text); }
+.at-call .at-ltp, .at-put .at-ltp, .at-ltp { color: var(--text); }
+.at-scenario, .at-monitor, .at-greeks-table td { background: var(--surface-2); border-color: var(--border); }
+.at-scenario-title { color: var(--accent-solid); }
+.at-sc-value, .at-greeks-row b { color: var(--text); }
+.at-greeks-table th { color: var(--muted); border-bottom: 1px solid var(--border); }
+.at-btn.outline { background: var(--surface-1); border-color: var(--border); color: var(--text-dim); }
+.at-btn.outline:hover { border-color: var(--accent-solid); color: var(--accent-solid); }
+
+/* ---- Option chain v2 headers (were bright light) ---- */
+.oc2-th { background: var(--surface-2); color: var(--muted); border-bottom: 1px solid var(--border); }
+.oc2-th.c { background: rgba(22, 199, 132, 0.06); }
+.oc2-th.p { background: rgba(246, 70, 93, 0.06); }
+.oc2-th.strike-h { background: var(--surface-3); border-color: var(--border); }
+.oc2-td { border-bottom: 1px solid var(--border-soft); color: var(--text); }
+.oc2-td.strike { background: var(--surface-2) !important; border-color: var(--border); }
+.oc2-strike-num { color: var(--text); }
+.oc2-ltp { color: var(--text); }
+.oc2-row:hover .oc2-td { background: var(--surface-3) !important; }
+
+/* Legacy chain */
+.chain-wrap { border-color: var(--border); }
+.chain-wrap th { background: var(--surface-2); color: var(--muted); border-color: var(--border); }
+.chain-wrap td { border-bottom: 1px solid var(--border-soft); }
+.chain-wrap tr:hover td { background: var(--surface-3); }
+.strike-col { background: var(--surface-3); color: var(--text); border-color: var(--border); }
+.expiry-tab { background: var(--surface-2); border-color: var(--border); color: var(--muted); }
+.expiry-tab.active { background: var(--accent-solid); color: #04121a; border-color: var(--accent-solid); }
+
+/* ---- Login / landing page → align to teal accent ---- */
+.hero {
+  background: linear-gradient(135deg, #060a12 0%, #0d1524 50%, #060a12 100%);
+}
+.hero::before {
+  background: radial-gradient(circle, rgba(22, 199, 132, 0.16), transparent 70%);
+}
+.hero::after {
+  background: radial-gradient(circle, rgba(15, 165, 233, 0.12), transparent 70%);
+}
+.hero-left h1 .gradient {
+  background: linear-gradient(135deg, #16c784, #0fa5e9);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.login-card {
+  background: rgba(20, 27, 43, 0.7);
+  border: 1px solid rgba(22, 199, 132, 0.18);
+}
+.login-card .tab.active {
+  background: linear-gradient(135deg, var(--accent-solid), var(--accent-strong));
+  color: #04121a;
+  box-shadow: 0 4px 12px rgba(22, 199, 132, 0.4);
+}
+.login-card .field input:focus {
+  border-color: var(--accent-solid);
+  box-shadow: 0 0 0 3px rgba(22, 199, 132, 0.2);
+}
+.btn-primary-lg {
+  background: linear-gradient(135deg, var(--accent-solid), var(--accent-strong));
+  color: #04121a;
+  box-shadow: 0 4px 16px rgba(22, 199, 132, 0.35);
+}
+.btn-primary-lg:hover {
+  box-shadow: 0 6px 24px rgba(22, 199, 132, 0.5);
+}
+
+/* ---- Footer ---- */
+.app-footer { background: var(--surface-1); border-top: 1px solid var(--border); box-shadow: none; }
+
+
+/* ---- Toast ---- */
+.toast { background: var(--green); color: #04121a; }
+.toast.error { background: var(--red); color: #fff; }
+
+/* ---- Scrollbars (light) ---- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #c7cfdb transparent;
+}
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb { background: #c7cfdb; border-radius: 6px; }
+*::-webkit-scrollbar-thumb:hover { background: #aeb8c9; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* ============================================================================
+   POLISH LAYER — cohesive UI refinements (additive, reversible).
+   ============================================================================ */
+
+html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+body { font-feature-settings: "cv11", "ss01"; letter-spacing: -0.01em; }
+
+/* Content max-width + breathing room already via .container; add page rhythm */
+.container { padding: 28px 24px; }
+.page-title {
+  font-size: 1.55rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin-bottom: 22px;
+}
+
+/* ---- Cards: softer radius, layered depth, smooth transitions ---- */
+.card, .stat-card, .d-card, .a-card, .sb-card, .broker-card, .leg, .step {
+  border-radius: 16px;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+.card { padding: 22px; }
+
+/* ---- Stat tiles: accent top edge reveal on hover + tighter numerals ---- */
+.stat-card { position: relative; overflow: hidden; }
+.stat-card::after {
+  content: '';
+  position: absolute; left: 0; right: 0; top: 0; height: 3px;
+  background: linear-gradient(90deg, var(--accent-solid), var(--accent-2));
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.25s ease;
+}
+.stat-card:hover::after { transform: scaleX(1); }
+.stat-card .value, .stat .val, .stat-item .val {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.stat-card .label { text-transform: uppercase; letter-spacing: 0.4px; font-size: 0.72rem; }
+
+/* ---- Buttons: smoother motion, refined weights ---- */
+.btn {
+  border-radius: 10px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  transition: transform 0.14s ease, box-shadow 0.18s ease, opacity 0.18s ease, background 0.18s ease;
+}
+.btn:hover { transform: translateY(-1px); }
+.btn:active { transform: translateY(0); }
+.btn-primary { box-shadow: 0 2px 8px rgba(18, 185, 129, 0.25); }
+.btn-primary:hover { box-shadow: 0 6px 18px rgba(18, 185, 129, 0.35); }
+.btn-outline { background: var(--surface-1); }
+.btn-outline:hover { background: var(--surface-3); }
+
+/* ---- Inputs: comfortable height, clear focus ---- */
+.field input, .field select,
+.sb-field input, .sb-field select, .a-input {
+  border-radius: 10px;
+  padding: 10px 12px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.field label, .sb-field label {
+  letter-spacing: 0.4px;
+  font-size: 0.72rem;
+}
+
+/* ---- Badges / pills ---- */
+.badge, .source-badge, .status-badge, .badge-admin {
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-weight: 600;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+}
+
+/* ---- Tables: sticky headers, soft zebra, smooth row hover ---- */
+.perf-table thead th, .a-table th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--surface-2);
+  backdrop-filter: blur(6px);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 0.68rem;
+}
+.perf-table tbody tr, .a-table tbody tr { transition: background 0.12s ease; }
+.perf-table tbody tr:nth-child(even) { background: rgba(16, 24, 40, 0.015); }
+.perf-table tbody tr:hover { background: var(--surface-3); }
+
+/* ---- Strategy rows: lift + accent border on hover ---- */
+.strat-row {
+  border-radius: 12px;
+  transition: transform 0.15s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+.strat-row:hover { transform: translateX(2px); box-shadow: var(--shadow-md); }
+
+/* ---- Sidebar: refined spacing, active pill polish ---- */
+.sidebar-nav { padding: 10px 10px; }
+.sidebar-link { margin-bottom: 3px; padding: 10px 12px; transition: background 0.14s ease, color 0.14s ease; }
+.sidebar-brand-main .sidebar-title { letter-spacing: -0.02em; }
+
+/* ---- Subtle page entrance ---- */
+.app-main > * { animation: kf-fade-in 0.32s ease both; }
+@keyframes kf-fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ---- Focus-visible accessibility ring ---- */
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 2px;
+}
+
+/* ---- Reduced motion respect ---- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

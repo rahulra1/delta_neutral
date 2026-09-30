@@ -26,17 +26,27 @@ export default function Sidebar() {
   if (user?.is_admin) items.push({ to: '/admin', icon: '🛡', label: 'Admin' });
 
   return (
-    <div className="sidebar" style={{ width: collapsed ? 60 : 200 }}>
-      {/* Brand */}
-      <div className="sidebar-brand" onClick={() => nav('/')}>
-        <span className="sidebar-logo">⚡</span>
-        {!collapsed && <span className="sidebar-title">AlgoX</span>}
+    <div className={`sidebar ${collapsed ? 'collapsed' : ''}`} style={{ width: collapsed ? 64 : 200 }}>
+      {/* Brand + collapse toggle */}
+      <div className="sidebar-brand">
+        <div className="sidebar-brand-main" onClick={() => nav('/')}>
+          <span className="sidebar-logo">⚡</span>
+          {!collapsed && <span className="sidebar-title">AlgoX</span>}
+        </div>
+        <button
+          className="sidebar-toggle"
+          onClick={() => setCollapsed(c => !c)}
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          {collapsed ? '»' : '«'}
+        </button>
       </div>
 
       {/* Nav */}
       <nav className="sidebar-nav">
         {items.map(item => (
-          <NavLink key={item.to} to={item.to} end={item.to === '/'} className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}>
+          <NavLink key={item.to} to={item.to} end={item.to === '/'} title={item.label} className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}>
             <span className="sidebar-icon">{item.icon}</span>
             {!collapsed && <span className="sidebar-label">{item.label}</span>}
           </NavLink>
