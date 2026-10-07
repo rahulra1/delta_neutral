@@ -111,14 +111,38 @@ class EMACreditSpread(BaseStrategy):
         self._running = False
         with self._legs_lock:
             legs_copy = list(self.legs)
-        for leg in legs_copy:
-            try:
+
+        # Only remove a leg once its close order SUCCEEDS. Retry a few times for
+        # transient API errors; any leg that still won't close is KEPT in
+        # self.legs (and persisted) so it is never silently dropped.
+        max_close_attempts = 3
+        for attempt in range(1, max_close_attempts + 1):
+            if not legs_copy:
+                break
+            remaining = []
+            for leg in legs_copy:
                 close_side = 'buy' if leg['side'] == 'sell' else 'sell'
-                place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
-            except Exception as e:
-                logger.warning(f"[EMA Spread] Failed to close leg {leg.get('symbol')}: {e}")
-        with self._legs_lock:
-            self.legs.clear()
+                try:
+                    result = place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
+                except Exception as e:
+                    result = None
+                    logger.warning(f"[EMA Spread] Failed to close leg {leg.get('symbol')}: {e}")
+                if result:
+                    with self._legs_lock:
+                        if leg in self.legs:
+                            self.legs.remove(leg)
+                else:
+                    remaining.append(leg)
+            legs_copy = remaining
+            if legs_copy and attempt < max_close_attempts:
+                logger.warning(f"[EMA Spread] {len(legs_copy)} leg(s) failed to close "
+                               f"(attempt {attempt}/{max_close_attempts}) — retrying")
+                time.sleep(2 ** attempt)
+
+        if legs_copy:
+            logger.error(f"[EMA Spread] ✗ {len(legs_copy)} leg(s) could NOT be closed after "
+                         f"{max_close_attempts} attempts — leaving them under tracking: "
+                         f"{[l.get('symbol') for l in legs_copy]}")
         try:
             self._persist_state()
         except Exception:
@@ -267,7 +291,13 @@ class EMACreditSpread(BaseStrategy):
                 print(f"{day_label} ⚠ Price fetch failed ({self._consecutive_failures}/{self._max_consecutive_failures})")
                 if self._consecutive_failures >= self._max_consecutive_failures:
                     print(f"{day_label} 🚨 EMERGENCY: {self._consecutive_failures} consecutive failures — closing legs")
-                    self._close_day_legs(day_legs)
+                    still_open = self._close_day_legs(day_legs)
+                    if still_open:
+                        # Could not close every leg — DO NOT finalize or exit.
+                        # Keep these legs under monitoring and retry next cycle.
+                        print(f"{day_label} ⚠ {len(still_open)} leg(s) still open after close attempt — "
+                              f"continuing to monitor and retry")
+                        continue
                     self._record_day(day_num, pnl, premium, 'api_failure', direction)
                     return
                 continue
@@ -306,22 +336,49 @@ class EMACreditSpread(BaseStrategy):
 
             if pnl >= target:
                 print(f"{day_label} 🎯 TP hit: ${pnl:.4f}")
-                self._close_day_legs(day_legs)
+                still_open = self._close_day_legs(day_legs)
+                if still_open:
+                    print(f"{day_label} ⚠ TP close incomplete — {len(still_open)} leg(s) still open; "
+                          f"keeping under monitoring and retrying")
+                    continue
                 self._record_day(day_num, pnl, premium, 'target', direction)
                 return
             if pnl <= -sl:
                 print(f"{day_label} 🛑 SL hit: ${pnl:.4f}")
-                self._close_day_legs(day_legs)
+                still_open = self._close_day_legs(day_legs)
+                if still_open:
+                    print(f"{day_label} ⚠ SL close incomplete — {len(still_open)} leg(s) still open; "
+                          f"keeping under monitoring and retrying")
+                    continue
                 self._record_day(day_num, pnl, premium, 'stoploss', direction)
                 return
 
     def _close_day_legs(self, day_legs):
-        for leg in day_legs:
+        """Attempt to close each leg. A leg is only removed from monitoring
+        (self.legs and the day_legs list) once its close order SUCCEEDS.
+        Returns the list of legs that failed to close so the caller can keep
+        monitoring/retrying them."""
+        still_open = []
+        for leg in list(day_legs):
             close_side = 'buy' if leg['side'] == 'sell' else 'sell'
-            place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
-            with self._legs_lock:
-                if leg in self.legs:
-                    self.legs.remove(leg)
+            try:
+                result = place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
+            except Exception as e:
+                result = None
+                logger.warning(f"[EMA Spread] Close order raised for {leg.get('symbol')}: {e}")
+
+            if result:
+                # Close confirmed — safe to stop monitoring this leg
+                with self._legs_lock:
+                    if leg in self.legs:
+                        self.legs.remove(leg)
+                if leg in day_legs:
+                    day_legs.remove(leg)
+            else:
+                # Close failed — KEEP the leg under monitoring, do not remove
+                logger.warning(f"[EMA Spread] ✗ Close FAILED for {leg.get('symbol')} — keeping under monitoring")
+                still_open.append(leg)
+        return still_open
 
     def _record_day(self, day_num, pnl, premium, exit_reason, direction):
         self.cumulative_pnl += pnl
