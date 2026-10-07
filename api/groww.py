@@ -22,6 +22,29 @@ _CLIENT_TTL = 3600  # re-authenticate every 1 hour (Groww tokens expire)
 # Cache
 _chain_cache = {}  # {(symbol, expiry): {data, ts}}
 _CACHE_TTL = 15  # seconds
+# How long a cached chain may still be SERVED (as stale) when a refresh fails,
+# instead of returning None and tripping downstream api_failure closes (fix #4).
+_CHAIN_STALE_TTL = 180  # seconds
+_chain_cache_lock = threading.Lock()   # guards _chain_cache reads/writes (fix #2)
+
+# Per-(symbol, expiry) single-flight locks so concurrent cache-misses wait for
+# ONE refresh instead of stampeding the Groww API (fix #1).
+_chain_refresh_locks = {}
+_chain_refresh_locks_guard = threading.Lock()
+# Per-key exponential backoff after failures (fix #3).
+_chain_backoff = {}   # cache_key -> {'fail_count': int, 'next_try': ts}
+_CHAIN_BACKOFF_BASE = 2.0
+_CHAIN_BACKOFF_MAX = 60.0
+
+
+def _get_chain_refresh_lock(cache_key):
+    with _chain_refresh_locks_guard:
+        lock = _chain_refresh_locks.get(cache_key)
+        if lock is None:
+            lock = threading.Lock()
+            _chain_refresh_locks[cache_key] = lock
+            _chain_backoff[cache_key] = {'fail_count': 0, 'next_try': 0.0}
+        return lock
 
 # BSE symbols that need exchange='BSE' instead of 'NSE'
 _BSE_SYMBOLS = {'SENSEX', 'BANKEX'}
@@ -212,13 +235,74 @@ def get_groww_chain(symbol, expiry_date):
         expiry: expiry date string
 
     Auto-retries with fresh authentication if the token has expired.
-    """
-    # Check cache
-    cache_key = (symbol, expiry_date)
-    cached = _chain_cache.get(cache_key)
-    if cached and time.time() - cached['ts'] < _CACHE_TTL:
-        return cached['chain'], cached['spot'], cached['expiry']
 
+    Resilience (mirrors api/pricing.py):
+      - Fresh cache hit (<_CACHE_TTL) returns immediately.
+      - On a miss, a SINGLE shared refresh runs per (symbol, expiry) under a lock;
+        concurrent callers wait for it instead of stampeding the API (fix #1, #2).
+      - After failures, a per-key exponential backoff skips the network (fix #3).
+      - If a refresh can't succeed, a recent-but-stale cached chain (<_CHAIN_STALE_TTL)
+        is served rather than (None, None, None) so transient outages don't trip
+        downstream emergency closes (fix #4).
+    """
+    cache_key = (symbol, expiry_date)
+
+    # 1) Fresh cache hit — serve immediately (locked read, fix #2).
+    now = time.time()
+    with _chain_cache_lock:
+        cached = _chain_cache.get(cache_key)
+        if cached and now - cached['ts'] < _CACHE_TTL:
+            return cached['chain'], cached['spot'], cached['expiry']
+
+    # 2) Single-flight: only one thread refreshes a given (symbol, expiry) (fix #1).
+    lock = _get_chain_refresh_lock(cache_key)
+    with lock:
+        # Re-check — another thread may have refreshed while we waited.
+        now = time.time()
+        with _chain_cache_lock:
+            cached = _chain_cache.get(cache_key)
+            if cached and now - cached['ts'] < _CACHE_TTL:
+                return cached['chain'], cached['spot'], cached['expiry']
+
+        # Respect backoff window — don't hammer a struggling API (fix #3).
+        backoff = _chain_backoff[cache_key]
+        if now < backoff['next_try']:
+            fresh = None  # skip network this cycle
+        else:
+            fresh = _fetch_and_parse_chain(symbol, expiry_date)
+
+        if fresh is not None:
+            chain, spot, expiry = fresh
+            with _chain_cache_lock:
+                _chain_cache[cache_key] = {'chain': chain, 'spot': spot,
+                                           'expiry': expiry, 'ts': time.time()}
+            backoff['fail_count'] = 0
+            backoff['next_try'] = 0.0
+            return chain, spot, expiry
+
+        # Refresh failed (or skipped by backoff). Grow backoff if we actually tried.
+        if now >= backoff['next_try']:
+            backoff['fail_count'] += 1
+            delay = min(_CHAIN_BACKOFF_BASE * (2 ** (backoff['fail_count'] - 1)), _CHAIN_BACKOFF_MAX)
+            backoff['next_try'] = time.time() + delay
+            logger.warning(f"Groww chain refresh failed for {symbol} {expiry_date} "
+                           f"(fail#{backoff['fail_count']}, backoff {delay:.0f}s)")
+
+    # 3) Serve stale cache during an outage rather than None (fix #4).
+    now = time.time()
+    with _chain_cache_lock:
+        cached = _chain_cache.get(cache_key)
+    if cached and now - cached['ts'] < _CHAIN_STALE_TTL:
+        logger.warning(f"Serving STALE Groww chain for {symbol} {expiry_date} "
+                       f"(age {now - cached['ts']:.0f}s) — refresh unavailable")
+        return cached['chain'], cached['spot'], cached['expiry']
+    return None, None, None
+
+
+def _fetch_and_parse_chain(symbol, expiry_date):
+    """Fetch and parse the Groww option chain for (symbol, expiry_date).
+    Returns (chain, spot, expiry) on success, or None on any failure. Keeps the
+    original fetch/parse logic (including one re-auth retry on token expiry)."""
     exchange = _get_exchange(symbol)
     for attempt in range(2):  # max 1 retry after re-auth
         try:
@@ -230,7 +314,7 @@ def get_groww_chain(symbol, expiry_date):
                 groww_expiry = exp_dt.strftime('%Y-%m-%d')
             except Exception:
                 logger.error(f"Invalid expiry format: {expiry_date}")
-                return None, None, None
+                return None
 
             resp = client.get_option_chain(
                 exchange=exchange,
@@ -240,14 +324,14 @@ def get_groww_chain(symbol, expiry_date):
 
             if not resp:
                 logger.warning(f"Groww: empty option chain response for {symbol} {expiry_date}")
-                return None, None, None
+                return None
 
             spot = resp.get('underlying_ltp', 0)
             strikes_data = resp.get('strikes', {})
 
             if not strikes_data:
                 logger.warning(f"Groww: no strikes for {symbol} expiry {expiry_date}")
-                return None, spot, None
+                return None
 
             # Convert to project-standard chain format
             chain = []
@@ -307,9 +391,6 @@ def get_groww_chain(symbol, expiry_date):
             # Sort by strike
             chain.sort(key=lambda r: float(r['strike']))
 
-            # Cache
-            _chain_cache[cache_key] = {'chain': chain, 'spot': spot, 'expiry': expiry_date, 'ts': time.time()}
-
             return chain, spot, expiry_date
 
         except Exception as e:
@@ -317,8 +398,10 @@ def get_groww_chain(symbol, expiry_date):
                 logger.warning(f"Groww token expired for get_option_chain({symbol}), re-authenticating...")
                 continue
             logger.error(f"Groww get_option_chain error for {symbol} {expiry_date}: {e}")
-            return None, None, None
+            return None
 
+    # Both attempts exhausted (e.g., repeated auth errors) — treat as failure.
+    return None
 
 def get_spot_price(symbol):
     """Get current spot/LTP for an underlying symbol."""
