@@ -2,6 +2,37 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Liquidity gate — strikes with no real market (OI=0 AND volume=0) are dropped
+# BEFORE scoring. Groww's chain can include far-OTM strikes with a stale/
+# theoretical ltp>0 but zero OI/volume; those pass the mark_price>0 check yet
+# cannot be filled, so an order on them fails. Scoring only soft-penalizes OI/
+# volume (10% each) vs closeness (80%), so a far illiquid strike could still win
+# without this hard gate.
+MIN_OI = 1          # require at least this much open interest OR volume
+MIN_VOLUME = 1
+
+
+def _filter_liquid(candidates, label='options'):
+    """Drop candidates with no tradable market (OI < MIN_OI AND volume < MIN_VOLUME).
+
+    If the filter would remove everything (genuinely thin chain), returns the
+    original list and logs a warning so we still attempt rather than trade nothing.
+    """
+    if not candidates:
+        return candidates
+    liquid = [c for c in candidates
+              if (c.get('oi', 0) or 0) >= MIN_OI or (c.get('volume', 0) or 0) >= MIN_VOLUME]
+    if not liquid:
+        logger.warning(
+            f"⚠ All {len(candidates)} {label} have zero OI and volume — chain is "
+            f"illiquid; proceeding with unfiltered set (order may still fail)."
+        )
+        return candidates
+    if len(liquid) < len(candidates):
+        logger.info(f"Liquidity gate: {len(candidates) - len(liquid)} illiquid "
+                    f"{label} dropped, {len(liquid)} remain")
+    return liquid
+
 # Delta-based scoring weights (normalized min-max approach)
 # Closeness dominates so that a materially closer-delta strike cannot be
 # outvoted by liquidity alone (prevents sell/buy legs collapsing onto the same
@@ -177,6 +208,11 @@ def find_target_delta_options(option_chain, target_delta, tolerance):
 
     eligible_calls = [c for c in calls if min_delta <= c['delta'] <= max_delta]
     eligible_puts = [p for p in puts if min_delta <= abs(p['delta']) <= max_delta]
+
+    # Hard liquidity gate: remove non-tradable (zero OI AND zero volume) strikes
+    # before scoring so a far-OTM illiquid strike cannot win on delta-closeness.
+    eligible_calls = _filter_liquid(eligible_calls, 'calls')
+    eligible_puts = _filter_liquid(eligible_puts, 'puts')
 
     # Score using normalized formula: Closeness 80% + Volume 10% + OI 10%
     scored_calls = _score_by_delta(eligible_calls, target_delta, is_put=False)
@@ -435,6 +471,8 @@ def find_target_premium_options(option_chain, target_premium, premium_tolerance_
             )
 
     # Score using normalized formula: Closeness 50% + Volume 25% + OI 25%
+    eligible_calls = _filter_liquid(eligible_calls, 'calls')
+    eligible_puts = _filter_liquid(eligible_puts, 'puts')
     scored_calls = _score_by_premium(eligible_calls, target_premium)
     scored_puts = _score_by_premium(eligible_puts, target_premium)
 
