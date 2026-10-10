@@ -113,6 +113,10 @@ const STRATEGIES = [
     desc: 'Daily EMA14 direction → bear call or bull put spread. 90% TP / 100% SL of premium. Runs daily at 6:30 PM.',
     features: ['EMA14 Direction', 'Credit Spread', 'Daily Auto-Trade', '90% TP / 100% SL'],
     rec: '⏱ Daily 6:30 PM · BTC options' },
+  { key: 'ema_spread_v2', label: 'EMA Credit Spread V2', icon: '📉✌️', type: 'Options',
+    desc: 'EMA14 credit spread with two-tier partial exits. Books half at TP1/SL1; the remaining half then exits on TP2 or SL2. Defaults: TP1 50% / TP2 90% · SL1 90% / SL2 150%.',
+    features: ['EMA14 Direction', 'Two-Tier TP/SL', '50/50 Scale-Out', 'TP2 / SL2 on remainder'],
+    rec: '⏱ Daily 6:30 PM · BTC options · De-risked exits' },
   { key: 'ema_trend', label: 'EMA Trend Follower', icon: '🚀', type: 'Futures',
     desc: 'Long-only basket over the top-50 perpetuals by turnover. Buys coins bullish on the daily 20/50 EMA crossover ($100 each), exits when they turn bearish. Re-scans hourly.',
     features: ['Top-50 by Volume', 'Daily 20/50 EMA', 'Long-Only Basket', 'Hourly Rescan'],
@@ -181,6 +185,21 @@ const EMA_SPREAD_FIELDS = [
   { key: 'ema_period', label: 'EMA Period', type: 'number', default: 14 },
   { key: 'tp_pct', label: 'Target Profit (% of premium)', type: 'number', default: 90 },
   { key: 'sl_pct', label: 'Stop Loss (% of premium)', type: 'number', default: 100 },
+  { key: 'min_expiry_days', label: 'Min Expiry Days', type: 'number', default: 8 },
+  { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 5 },
+  { key: 'entry_hour', label: 'Entry Hour (24h)', type: 'number', default: 18 },
+  { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 30 },
+];
+
+const EMA_SPREAD_V2_FIELDS = [
+  { key: 'lot_size', label: 'Lot Size', type: 'number', default: 100 },
+  { key: 'sell_delta', label: 'Sell Delta', type: 'number', step: '0.01', default: 0.20 },
+  { key: 'buy_delta', label: 'Buy Delta', type: 'number', step: '0.01', default: 0.10 },
+  { key: 'ema_period', label: 'EMA Period', type: 'number', default: 14 },
+  { key: 'tp1_pct', label: 'TP1 — close half (% of full premium)', type: 'number', default: 50, hint: 'Books half the position at this profit level' },
+  { key: 'tp2_pct', label: 'TP2 — close rest (% of remaining half)', type: 'number', default: 90, hint: 'Remaining half exits at this % of its own premium (also the recovery exit after SL1)' },
+  { key: 'sl1_pct', label: 'SL1 — close half (% of full premium)', type: 'number', default: 90, hint: 'Cuts half the position at this loss level' },
+  { key: 'sl2_pct', label: 'SL2 — close rest (% of remaining half)', type: 'number', default: 150, hint: 'Remaining half exits at this % of its own premium (hard floor after either TP1 or SL1)' },
   { key: 'min_expiry_days', label: 'Min Expiry Days', type: 'number', default: 8 },
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 5 },
   { key: 'entry_hour', label: 'Entry Hour (24h)', type: 'number', default: 18 },
@@ -1027,6 +1046,57 @@ export default function Strategy() {
           onStart={async (config) => { const { data } = await api.post('/ema-spread/start', config); return data; }}
           onStop={async (sid) => { await api.post('/ema-spread/stop', { sid }); }}
           statusEndpoint="/ema-spread/status" streamEndpoint="/ema-spread/stream"
+          renderStatus={(s) => (
+            <>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Session P&L</div><div className="value" style={{ color: (s.session_pnl||s.today_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.session_pnl||s.today_pnl||0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Cumulative P&L</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(s.cumulative_pnl||0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Net Premium</div><div className="value">${(s.net_premium||0).toFixed(4)}</div></div>
+                <div className="stat-card"><div className="label">Days Traded</div><div className="value">{s.days_traded || 0}</div></div>
+              </div>
+              {s.legs && s.legs.length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Current Legs</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Side', 'Type', 'Strike', 'Delta', 'Entry', 'Mark', 'P&L'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{s.legs.map((l, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}><span className={`badge ${l.side === 'buy' ? 'badge-green' : 'badge-red'}`}>{l.side.toUpperCase()}</span></td>
+                        <td style={{ padding: '4px 8px' }}>{l.type.toUpperCase()}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>{l.strike}</td>
+                        <td style={{ padding: '4px 8px' }}>{l.delta.toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px' }}>${l.entry_price.toFixed(4)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>${(l.mark_price || 0).toFixed(4)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: (l.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>${(l.pnl || 0).toFixed(4)}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+              {(s.trade_log || []).length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Trade Log</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Date', 'Direction', 'P&L', 'Premium', 'Exit'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{(s.trade_log || []).slice(-10).reverse().map((t, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}>{t.date}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.direction === 'bear_call' ? '🐻 Bear Call' : '🐂 Bull Put'}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${t.pnl}</td>
+                        <td style={{ padding: '4px 8px' }}>${t.premium}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.exit_reason === 'target' ? '🎯' : t.exit_reason === 'stoploss' ? '🛑' : '⏹'}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )} />
+      )}
+      {activeTab === 'ema_spread_v2' && (
+        <StrategyTemplate title="EMA Credit Spread V2" icon="📉✌️" type="Options" description="EMA14 credit spread with two-tier partial exits. Books half at TP1/SL1, remainder at TP2/SL2. Runs at 6:30 PM IST." profiles={profiles}
+          configFields={EMA_SPREAD_V2_FIELDS}
+          onStart={async (config) => { const { data } = await api.post('/ema-spread-v2/start', config); return data; }}
+          onStop={async (sid) => { await api.post('/ema-spread-v2/stop', { sid }); }}
+          statusEndpoint="/ema-spread-v2/status" streamEndpoint="/ema-spread-v2/stream"
           renderStatus={(s) => (
             <>
               <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
