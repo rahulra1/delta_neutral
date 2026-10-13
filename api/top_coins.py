@@ -79,7 +79,9 @@ def get_top_coins_by_change(limit=15, contract_type='perpetual_futures', directi
 
     Returns:
         List of dicts sorted by the chosen ranking, each with:
-        rank, coin, symbol, change_24h (signed %), mark_price. [] on failure.
+        rank, coin, symbol, change_24h (signed %), mark_price,
+        oi_value_usd, oi_change_usd_6h, oi_change_6h_pct (signed %).
+        [] on failure.
     """
     path = '/v2/tickers'
     query_string = f'?contract_types={contract_type}'
@@ -94,11 +96,20 @@ def get_top_coins_by_change(limit=15, contract_type='perpetual_futures', directi
 
         coins = []
         for t in data.get('result', []):
+            oi_usd = _f(t.get('oi_value_usd'))
+            oi_chg = _f(t.get('oi_change_usd_6h'))
+            # Delta exposes only an absolute 6h OI USD change; derive the %
+            # against the OI level 6h ago (current - change).
+            prev_oi = oi_usd - oi_chg
+            oi_chg_pct = (oi_chg / prev_oi * 100) if prev_oi else 0.0
             coins.append({
                 'symbol': t.get('symbol', ''),
                 'coin': t.get('underlying_asset_symbol', ''),
                 'change_24h': _f(t.get('mark_change_24h')),
                 'mark_price': _f(t.get('mark_price')),
+                'oi_value_usd': oi_usd,
+                'oi_change_usd_6h': oi_chg,
+                'oi_change_6h_pct': oi_chg_pct,
             })
 
         if direction == 'gainers':

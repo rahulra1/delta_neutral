@@ -995,6 +995,7 @@ def _resume_db_strategies():
                         dry_run=bool(details.get('dry_run', False)),
                         tp_pct=float(details.get('tp_pct', 0.10)),
                         sl_pct=float(details.get('sl_pct', 0.05)),
+                        min_oi_change_pct=float(details.get('min_oi_change_pct', 10.0)),
                         price_check_interval=int(details.get('price_check_interval', 60)),
                     )
                     entry['strategy'] = s
@@ -6382,6 +6383,7 @@ def run_dual_momentum(sid, params):
             dry_run=bool(params.get('dry_run', False)),
             tp_pct=float(params.get('tp_pct', 0.10)),
             sl_pct=float(params.get('sl_pct', 0.05)),
+            min_oi_change_pct=float(params.get('min_oi_change_pct', 10.0)),
             price_check_interval=int(params.get('price_check_interval', 60)),
         )
         s._log_queue = entry['log_queue']

@@ -224,6 +224,7 @@ const DUAL_MOMENTUM_FIELDS = [
   { key: 'notional_usd', label: 'Notional per Coin ($)', type: 'number', default: 10 },
   { key: 'tp_pct', label: 'Take Profit (fraction)', type: 'number', step: '0.01', default: 0.10, hint: '0.10 = +10% in trade\'s favour' },
   { key: 'sl_pct', label: 'Stop Loss (fraction)', type: 'number', step: '0.01', default: 0.05, hint: '0.05 = -5% against trade' },
+  { key: 'min_oi_change_pct', label: 'Min 6h OI Change (%)', type: 'number', step: '0.1', default: 10, hint: 'Only trade coins whose 6h open interest rose more than this %' },
   { key: 'price_check_interval', label: 'TP/SL Check Interval (s)', type: 'number', default: 60 },
   { key: 'rotate_on_runs', label: 'Rotate Delisted', type: 'text', default: 'all', hint: "'all' = every run (6AM & 6PM), 'evening' = 6PM only" },
 ];

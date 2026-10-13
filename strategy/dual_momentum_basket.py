@@ -46,6 +46,7 @@ POSITION_NOTIONAL_USD = 10        # fixed USD invested per coin
 RUN_HOURS_IST = (6, 18)          # scheduled rebalance times, IST hour-of-day
 TP_PCT = 0.10                    # +10% in the trade's favour -> take profit
 SL_PCT = 0.05                    # -5% against the trade       -> stop loss
+MIN_OI_CHANGE_PCT = 10.0         # only trade coins whose 6h OI change > +10%
 PRICE_CHECK_INTERVAL = 60        # seconds between TP/SL price checks
 SCHEDULE_CHECK_INTERVAL = 30     # seconds between schedule-time checks
 
@@ -56,6 +57,7 @@ class DualMomentumBasket(BaseStrategy):
     def __init__(self, top_n=TOP_N, notional_usd=POSITION_NOTIONAL_USD,
                  run_hours=RUN_HOURS_IST, rotate_on_runs='all', dry_run=True,
                  tp_pct=TP_PCT, sl_pct=SL_PCT,
+                 min_oi_change_pct=MIN_OI_CHANGE_PCT,
                  price_check_interval=PRICE_CHECK_INTERVAL):
         self.top_n = top_n
         self.notional_usd = notional_usd
@@ -63,6 +65,7 @@ class DualMomentumBasket(BaseStrategy):
         self.run_hours = tuple(sorted({int(h) % 24 for h in run_hours}))
         self.tp_pct = tp_pct
         self.sl_pct = sl_pct
+        self.min_oi_change_pct = min_oi_change_pct
         self.price_check_interval = price_check_interval
         # 'all'  -> rotate (close delisted) on every scheduled run (6 AM & 6 PM)
         # 'evening' -> only on the last run hour of the day
@@ -106,6 +109,7 @@ class DualMomentumBasket(BaseStrategy):
             'run_hours': list(self.run_hours),
             'tp_pct': tp_pct,
             'sl_pct': sl_pct,
+            'min_oi_change_pct': min_oi_change_pct,
             'price_check_interval': price_check_interval,
             'rotate_on_runs': rotate_on_runs,
             'dry_run': dry_run,
@@ -123,6 +127,8 @@ class DualMomentumBasket(BaseStrategy):
               f"SL -{self.sl_pct*100:.1f}% (side-aware) | "
               f"Price check {self.price_check_interval}s | "
               f"Rotate: {self.rotate_on_runs}")
+        print(f"[Dual Momentum] Entry filter: 6h OI change > "
+              f"+{self.min_oi_change_pct:.1f}%")
         with self._legs_lock:
             if self.legs:
                 desc = ', '.join(f"{l['side'][0].upper()}:{l['symbol']}" for l in self.legs)
@@ -243,18 +249,34 @@ class DualMomentumBasket(BaseStrategy):
                 if not valid:
                     self._exit(sym, reason='delisted from basket')
 
-        # 2) ENTRY pass — open longs for gainers, shorts for losers.
+        # 2) ENTRY pass — open longs for gainers, shorts for losers, but only
+        #    for coins whose 6h open-interest change exceeds the threshold
+        #    (rising OI = fresh positioning confirming the move).
         with self._legs_lock:
             held = {(l['symbol'], l['side']) for l in self.legs}
         for sym, meta in gain_syms.items():
-            if (sym, 'buy') not in held:
+            if (sym, 'buy') not in held and self._oi_confirms(sym, meta):
                 self._enter(sym, meta.get('coin', ''), 'buy', meta.get('change_24h'))
         for sym, meta in lose_syms.items():
-            if (sym, 'sell') not in held:
+            if (sym, 'sell') not in held and self._oi_confirms(sym, meta):
                 self._enter(sym, meta.get('coin', ''), 'sell', meta.get('change_24h'))
 
         self._persist_state()
         self._print_summary()
+
+    def _oi_confirms(self, symbol, meta):
+        """True if the coin's 6h OI change exceeds min_oi_change_pct.
+
+        Rising open interest means new positions are being opened behind the
+        price move (genuine buildup) rather than an existing position unwinding.
+        A non-positive or threshold-missing OI change skips the entry.
+        """
+        oi_pct = meta.get('oi_change_6h_pct', 0.0)
+        if oi_pct > self.min_oi_change_pct:
+            return True
+        print(f"[Dual Momentum] Skip {symbol} — 6h OI change {oi_pct:+.2f}% "
+              f"<= {self.min_oi_change_pct:.1f}% threshold")
+        return False
 
     def _rotation_enabled_now(self):
         if self.rotate_on_runs == 'all':
