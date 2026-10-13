@@ -55,6 +55,7 @@ weekly_dn_strategies = {}
 ema_spread_strategies = {}
 ema_spread_v2_strategies = {}
 ema_trend_strategies = {}
+dual_momentum_strategies = {}
 pivot_st_strategies = {}
 nse_dn_strategies = {}
 nse_ema_strategies = {}
@@ -966,6 +967,70 @@ def _resume_db_strategies():
             entry['thread'] = t
             t.start()
             logger.info(f"[resume] Resumed EMA Trend {sid}")
+
+        # 9c. Restore Dual Momentum Basket (twice-daily long/short basket)
+        elif source == 'Dual Momentum':
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
+                     'log_history': [], 'running': False, 'params': details,
+                     'user_id': user_id, 'profile_id': profile_id}
+            dual_momentum_strategies[sid] = entry
+
+            def _resume_dmb(sid=sid, entry=entry, details=details, user_id=user_id, legs=legs):
+                for attempt in range(5):
+                    if _setup_strategy_thread(entry):
+                        break
+                    logger.warning(f"[resume] Dual Momentum {sid} — setup failed (attempt {attempt+1}/5), retrying in 30s")
+                    entry['running'] = False
+                    time.sleep(30)
+                else:
+                    logger.error(f"[resume] Dual Momentum {sid} — setup failed after 5 attempts, will retry on next restart")
+                    return
+                try:
+                    from strategy.dual_momentum_basket import DualMomentumBasket
+                    s = DualMomentumBasket(
+                        top_n=int(details.get('top_n', 10)),
+                        notional_usd=float(details.get('notional_usd', 10)),
+                        run_hours=tuple(details.get('run_hours', (6, 18))),
+                        rotate_on_runs=details.get('rotate_on_runs', 'all'),
+                        dry_run=bool(details.get('dry_run', False)),
+                        tp_pct=float(details.get('tp_pct', 0.10)),
+                        sl_pct=float(details.get('sl_pct', 0.05)),
+                        price_check_interval=int(details.get('price_check_interval', 60)),
+                    )
+                    entry['strategy'] = s
+                    s._log_queue = entry['log_queue']
+                    s._log_history = entry['log_history']
+                    s._sid = sid
+                    import config as _cfg
+                    s._api_key = _cfg.get_api_key()
+                    s._api_secret = _cfg.get_api_secret()
+                    s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
+                    s._user_id = user_id
+                    entry['running'] = True
+                    s.restore_state(details=details, legs=legs)
+                    s.initialize()
+                    if s.trade_log:
+                        print(f"[Dual Momentum] Restored {len(s.legs)} position(s) | Cum PnL: ${s.cumulative_pnl:+.4f}")
+                    s.monitor()
+                except Exception as e:
+                    logger.error(f"[resume] Dual Momentum {sid} error: {e}")
+                finally:
+                    strategy = entry.get('strategy')
+                    if strategy and not strategy._running:
+                        pnl = round(getattr(strategy, 'cumulative_pnl', 0), 4)
+                        record_end(sid, pnl, 0)
+                        update_tracked(sid, status='completed', pnl=round(pnl, 2),
+                                       exit_reason='intentional_close')
+                    elif not strategy:
+                        logger.warning(f"[resume] Dual Momentum {sid} — thread exited without strategy object, keeping status 'running'")
+                    else:
+                        logger.warning(f"[resume] Dual Momentum {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
+                    _teardown_strategy_thread(entry)
+
+            t = threading.Thread(target=_resume_dmb, daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed Dual Momentum {sid}")
 
         # 10. Resume Daily Strangle
         elif source == 'Daily Strangle':
@@ -2219,6 +2284,15 @@ def dashboard_live_pnl():
                             total_live_pnl += pnl
                             active_pnls.append({'sid': sid, 'name': 'EMA Trend', 'pnl': pnl})
 
+                    for sid, e in dual_momentum_strategies.items():
+                        if e.get('user_id') != uid or not e.get('running'):
+                            continue
+                        s = e.get('strategy')
+                        if s:
+                            pnl = round(s.pnl, 4)
+                            total_live_pnl += pnl
+                            active_pnls.append({'sid': sid, 'name': 'Dual Momentum', 'pnl': pnl})
+
                     for sid, e in pivot_st_strategies.items():
                         if e.get('user_id') != uid or not e.get('running'):
                             continue
@@ -2411,6 +2485,11 @@ def api_dashboard():
                 # Check EMA Trend
                 elif sid in ema_trend_strategies and ema_trend_strategies[sid].get('strategy'):
                     s = ema_trend_strategies[sid]['strategy']
+                    t['pnl'] = round(s.pnl, 4)
+                    t['cumulative_pnl'] = round(s.cumulative_pnl, 4)
+                # Check Dual Momentum
+                elif sid in dual_momentum_strategies and dual_momentum_strategies[sid].get('strategy'):
+                    s = dual_momentum_strategies[sid]['strategy']
                     t['pnl'] = round(s.pnl, 4)
                     t['cumulative_pnl'] = round(s.cumulative_pnl, 4)
                 # Check Daily Strangle
@@ -6267,6 +6346,181 @@ def ema_trend_status(sid):
         _lp = (_mark - l['entry_price']) * l['size'] * l.get('contract_value', 0)
         enriched_legs.append({
             'symbol': l['symbol'], 'coin': l.get('coin', ''), 'type': 'long',
+            'side': l.get('side', 'buy'), 'size': l['size'],
+            'entry_price': round(l['entry_price'], 6),
+            'mark_price': round(_mark, 6), 'pnl': round(_lp, 4),
+            'product_id': l.get('product_id'),
+        })
+    return jsonify(
+        running=True,
+        cumulative_pnl=round(s.cumulative_pnl, 4),
+        session_pnl=round(s.pnl, 4),
+        open_positions=len(s.legs),
+        total_trades=s.total_trades,
+        trade_log=s.trade_log[-10:],
+        legs=enriched_legs,
+    )
+
+
+# ── Dual Momentum Basket Strategy Routes ──
+
+
+def run_dual_momentum(sid, params):
+    entry = dual_momentum_strategies[sid]
+    uid = entry['user_id']
+    if not _setup_strategy_thread(entry):
+        entry['log_queue'].put("__STOPPED__")
+        return
+
+    try:
+        from strategy.dual_momentum_basket import DualMomentumBasket
+        s = DualMomentumBasket(
+            top_n=int(params.get('top_n', 10)),
+            notional_usd=float(params.get('notional_usd', 10)),
+            run_hours=tuple(params.get('run_hours', (6, 18))),
+            rotate_on_runs=params.get('rotate_on_runs', 'all'),
+            dry_run=bool(params.get('dry_run', False)),
+            tp_pct=float(params.get('tp_pct', 0.10)),
+            sl_pct=float(params.get('sl_pct', 0.05)),
+            price_check_interval=int(params.get('price_check_interval', 60)),
+        )
+        s._log_queue = entry['log_queue']
+        s._log_history = entry['log_history']
+        s._sid = sid
+        import config as _cfg
+        s._api_key = _cfg.get_api_key()
+        s._api_secret = _cfg.get_api_secret()
+        s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
+        s._user_id = uid
+        entry['strategy'] = s
+        entry['running'] = True
+        record_start(sid, params, user_id=uid)
+        if not s.initialize():
+            entry['log_queue'].put("✗ Init failed")
+            entry['running'] = False
+            entry['log_queue'].put("__STOPPED__")
+            return
+
+        # Wrap sleep for periodic PnL snapshots (mirrors EMA Trend)
+        import strategy.dual_momentum_basket as _dmb_mod
+        _orig_sleep = _dmb_mod.time.sleep
+        def _snap_sleep(secs):
+            _orig_sleep(secs)
+            try:
+                save_pnl_snapshot(uid, sid, round(s.pnl, 4))
+            except Exception:
+                pass
+        _dmb_mod.time.sleep = _snap_sleep
+        try:
+            s.monitor()
+        finally:
+            _dmb_mod.time.sleep = _orig_sleep
+    except Exception as e:
+        entry['log_queue'].put(f"❌ Error: {e}")
+    finally:
+        strategy = entry.get('strategy')
+        if strategy and not strategy._running:
+            pnl = round(strategy.cumulative_pnl, 4)
+            record_end(sid, pnl, getattr(strategy, 'total_trades', 0))
+            update_tracked(sid, status='completed', pnl=round(pnl, 2),
+                           exit_reason='intentional_close')
+        elif not strategy:
+            logger.warning(f"[deploy] Dual Momentum {sid} — thread exited without strategy object, keeping status 'running'")
+        else:
+            logger.warning(f"[deploy] Dual Momentum {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
+        _teardown_strategy_thread(entry)
+
+
+@app.route('/api/dual-momentum/start', methods=['POST'])
+@login_required
+def dual_momentum_start():
+    params = request.json
+    profile_id = params.pop('profile_id', None)
+    api_key, api_secret, _, broker = get_profile_creds(profile_id)
+    if not api_key:
+        return jsonify(error="No API profile selected"), 400
+    sid = str(uuid.uuid4())[:8]
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
+             'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    dual_momentum_strategies[sid] = entry
+    track_strategy(sid, 'Dual Momentum', f"Top-{params.get('top_n', 10)} Dual Momentum Basket", current_user_id(), details={**params, 'profile_id': profile_id})
+    entry['thread'] = threading.Thread(target=run_dual_momentum, args=(sid, params), daemon=True)
+    entry['thread'].start()
+    return jsonify(status="started", sid=sid)
+
+
+@app.route('/api/dual-momentum/stop', methods=['POST'])
+@login_required
+def dual_momentum_stop():
+    sid = request.json.get('sid')
+    e = dual_momentum_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error="Not found"), 404
+    if e.get('strategy'):
+        try:
+            from config import set_thread_credentials
+            profile_id = e.get('profile_id')
+            if profile_id:
+                api_key, api_secret, _, broker = get_profile_creds(profile_id)
+                if api_key:
+                    set_thread_credentials(api_key, api_secret, broker)
+            e['strategy'].close_all()
+        except Exception as ex:
+            logger.error(f"[dual_momentum_stop] {sid} error: {ex}")
+    return jsonify(status="stopping")
+
+
+@app.route('/api/dual-momentum/stream/<sid>')
+@login_required
+def dual_momentum_stream(sid):
+    e = dual_momentum_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
+    q = e['log_queue']
+    def generate():
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                if msg == "__STOPPED__":
+                    yield f"event: stopped\ndata: done\n\n"
+                    break
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield f": heartbeat\n\n"
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/dual-momentum/status/<sid>')
+@login_required
+def dual_momentum_status(sid):
+    e = dual_momentum_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(running=False)
+    s = e.get('strategy')
+    if not e['running'] or not s:
+        return jsonify(running=False)
+    # Price against the strategy's own broker (not the request default/testnet).
+    try:
+        from config import set_thread_credentials
+        if getattr(s, '_api_key', None):
+            set_thread_credentials(s._api_key, s._api_secret, getattr(s, '_broker', None))
+        elif getattr(s, '_broker', None):
+            from config import set_thread_broker
+            set_thread_broker(s._broker)
+    except Exception:
+        pass
+    from api.pricing import get_futures_prices_bulk as _gfpb
+    _marks = _gfpb([l['symbol'] for l in s.legs])
+    enriched_legs = []
+    for l in s.legs:
+        _md = _marks.get(l['symbol'])
+        _mark = _md['mark_price'] if _md and _md.get('mark_price') else l['entry_price']
+        _sign = 1 if l.get('side', 'buy') == 'buy' else -1
+        _lp = _sign * (_mark - l['entry_price']) * l['size'] * l.get('contract_value', 0)
+        enriched_legs.append({
+            'symbol': l['symbol'], 'coin': l.get('coin', ''),
+            'type': 'long' if l.get('side', 'buy') == 'buy' else 'short',
             'side': l.get('side', 'buy'), 'size': l['size'],
             'entry_price': round(l['entry_price'], 6),
             'mark_price': round(_mark, 6), 'pnl': round(_lp, 4),
