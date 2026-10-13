@@ -2905,6 +2905,8 @@ def api_close_strategy(sid):
             profile_id = ema_spread_v2_strategies[sid].get('profile_id')
         elif sid in ema_trend_strategies:
             profile_id = ema_trend_strategies[sid].get('profile_id')
+        elif sid in dual_momentum_strategies:
+            profile_id = dual_momentum_strategies[sid].get('profile_id')
         elif sid in nse_ema_strategies:
             profile_id = nse_ema_strategies[sid].get('profile_id')
         elif sid in nse_dn_strategies:
@@ -2989,6 +2991,15 @@ def api_close_strategy(sid):
                 etf['strategy'].close_all()
             except Exception as e:
                 logger.error(f"[close] EMA Trend {sid} close_all error: {e}")
+        closed = True
+    # Dual Momentum
+    if not closed and sid in dual_momentum_strategies:
+        dmb = dual_momentum_strategies[sid]
+        if dmb.get('strategy'):
+            try:
+                dmb['strategy'].close_all()
+            except Exception as e:
+                logger.error(f"[close] Dual Momentum {sid} close_all error: {e}")
         closed = True
     # NSE EMA Spread
     if not closed and sid in nse_ema_strategies:
@@ -3134,6 +3145,8 @@ def api_close_all_strategies():
                 profile_id = ema_spread_v2_strategies[sid].get('profile_id')
             elif sid in ema_trend_strategies:
                 profile_id = ema_trend_strategies[sid].get('profile_id')
+            elif sid in dual_momentum_strategies:
+                profile_id = dual_momentum_strategies[sid].get('profile_id')
             elif sid in nse_ema_strategies:
                 profile_id = nse_ema_strategies[sid].get('profile_id')
             elif sid in nse_dn_strategies:
@@ -3194,6 +3207,11 @@ def api_close_all_strategies():
             etf = ema_trend_strategies[sid]
             if etf.get('strategy'):
                 etf['strategy'].close_all()
+            closed = True
+        if not closed and sid in dual_momentum_strategies:
+            dmb = dual_momentum_strategies[sid]
+            if dmb.get('strategy'):
+                dmb['strategy'].close_all()
             closed = True
         if not closed and sid in nse_ema_strategies:
             nes = nse_ema_strategies[sid]
