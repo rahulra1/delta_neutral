@@ -2543,6 +2543,7 @@ def api_dashboard():
         running_count += sum(1 for sid, e in ema_spread_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in ema_spread_v2_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in ema_trend_strategies.items() if e.get('user_id') == uid and e.get('running'))
+        running_count += sum(1 for sid, e in dual_momentum_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in strangle_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in nse_strangle_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in nse_dn_strategies.items() if e.get('user_id') == uid and e.get('running'))
@@ -3416,6 +3417,40 @@ def api_strategy_detail(sid):
                     'delta': 0})
             if hasattr(strat, '_pnl_history') and strat._pnl_history:
                 pnl_history = list(strat._pnl_history[-500:])
+        elif sid in dual_momentum_strategies and dual_momentum_strategies[sid].get('strategy'):
+            dmb = dual_momentum_strategies[sid]
+            strat = dmb['strategy']
+            # Price against the SAME broker the strategy trades on (see EMA Trend note above).
+            try:
+                from config import set_thread_credentials, set_thread_broker
+                if getattr(strat, '_api_key', None):
+                    set_thread_credentials(strat._api_key, strat._api_secret, getattr(strat, '_broker', None))
+                elif getattr(strat, '_broker', None):
+                    set_thread_broker(strat._broker)
+            except Exception:
+                pass
+            entry['pnl'] = round(strat.pnl, 4)
+            entry['running'] = dmb.get('running', False)
+            logs = dmb.get('log_history', [])
+            entry['trade_log'] = strat.trade_log[-20:]
+            entry['days_traded'] = strat.total_trades
+            entry['cumulative_pnl'] = round(strat.cumulative_pnl, 4)
+            from api.pricing import get_futures_prices_bulk as _gfpb
+            _marks = _gfpb([leg['symbol'] for leg in strat.legs])
+            for leg in strat.legs:
+                _md = _marks.get(leg['symbol'])
+                _mark = _md['mark_price'] if _md and _md.get('mark_price') else leg['entry_price']
+                _sign = 1 if leg.get('side', 'buy') == 'buy' else -1
+                _lp = _sign * (_mark - leg['entry_price']) * leg['size'] * leg.get('contract_value', 0)
+                live_legs.append({'symbol': leg['symbol'],
+                    'type': 'long' if leg.get('side', 'buy') == 'buy' else 'short',
+                    'strike': leg.get('coin', ''),
+                    'side': leg.get('side', 'buy'), 'size': leg['size'], 'entry_price': round(leg['entry_price'], 6),
+                    'current_mark': round(_mark, 6),
+                    'current_pnl': round(_lp, 4),
+                    'delta': 0})
+            if hasattr(strat, '_pnl_history') and strat._pnl_history:
+                pnl_history = list(strat._pnl_history[-500:])
         elif sid in strangle_strategies and strangle_strategies[sid].get('strategy'):
             st = strangle_strategies[sid]
             strat = st['strategy']
@@ -3925,6 +3960,8 @@ def api_pnl_series():
                 t['pnl'] = round(ema_spread_v2_strategies[sid]['strategy'].pnl, 4)
             elif sid in ema_trend_strategies and ema_trend_strategies[sid].get('strategy'):
                 t['pnl'] = round(ema_trend_strategies[sid]['strategy'].pnl, 4)
+            elif sid in dual_momentum_strategies and dual_momentum_strategies[sid].get('strategy'):
+                t['pnl'] = round(dual_momentum_strategies[sid]['strategy'].pnl, 4)
             elif sid in pivot_st_strategies and pivot_st_strategies[sid].get('strategy'):
                 t['pnl'] = round(pivot_st_strategies[sid]['strategy'].pnl, 4)
             elif sid in hybrid_strategies and hybrid_strategies[sid].get('strategy'):
@@ -6428,15 +6465,23 @@ def run_dual_momentum(sid, params):
             entry['log_queue'].put("__STOPPED__")
             return
 
-        # Wrap sleep for periodic PnL snapshots (mirrors EMA Trend)
+        # Wrap sleep for periodic PnL snapshots + DB persistence (mirrors EMA Spread)
         import strategy.dual_momentum_basket as _dmb_mod
         _orig_sleep = _dmb_mod.time.sleep
+        _tick = [0]
         def _snap_sleep(secs):
             _orig_sleep(secs)
-            try:
-                save_pnl_snapshot(uid, sid, round(s.pnl, 4))
-            except Exception:
-                pass
+            _tick[0] += 1
+            if _tick[0] % 6 == 0:
+                try:
+                    save_pnl_snapshot(uid, sid, round(s.pnl, 4))
+                    update_strategy_db(sid, pnl=round(s.pnl, 4), legs=s.legs,
+                        details={**params, 'profile_id': entry.get('profile_id'),
+                                 'cumulative_pnl': s.cumulative_pnl,
+                                 'total_trades': s.total_trades,
+                                 'trade_log': s.trade_log[-50:]})
+                except Exception:
+                    pass
         _dmb_mod.time.sleep = _snap_sleep
         try:
             s.monitor()
