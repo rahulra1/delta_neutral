@@ -3532,8 +3532,11 @@ def api_strategy_detail(sid):
             for leg in strat.legs:
                 _md = _marks.get(leg['symbol'])
                 _mark = _md['mark_price'] if _md and _md.get('mark_price') else leg['entry_price']
-                _lp = (_mark - leg['entry_price']) * leg['size'] * leg.get('contract_value', 0)
-                live_legs.append({'symbol': leg['symbol'], 'type': 'long', 'strike': leg.get('coin', ''),
+                _sign = 1 if leg.get('side', 'buy') == 'buy' else -1
+                _lp = _sign * (_mark - leg['entry_price']) * leg['size'] * leg.get('contract_value', 0)
+                live_legs.append({'symbol': leg['symbol'],
+                    'type': 'long' if leg.get('side', 'buy') == 'buy' else 'short',
+                    'strike': leg.get('coin', ''),
                     'side': leg.get('side', 'buy'), 'size': leg['size'], 'entry_price': round(leg['entry_price'], 6),
                     'current_mark': round(_mark, 6),
                     'current_pnl': round(_lp, 4),
@@ -6741,9 +6744,11 @@ def ema_trend_status(sid):
     for l in s.legs:
         _md = _marks.get(l['symbol'])
         _mark = _md['mark_price'] if _md and _md.get('mark_price') else l['entry_price']
-        _lp = (_mark - l['entry_price']) * l['size'] * l.get('contract_value', 0)
+        _sign = 1 if l.get('side', 'buy') == 'buy' else -1
+        _lp = _sign * (_mark - l['entry_price']) * l['size'] * l.get('contract_value', 0)
         enriched_legs.append({
-            'symbol': l['symbol'], 'coin': l.get('coin', ''), 'type': 'long',
+            'symbol': l['symbol'], 'coin': l.get('coin', ''),
+            'type': 'long' if l.get('side', 'buy') == 'buy' else 'short',
             'side': l.get('side', 'buy'), 'size': l['size'],
             'entry_price': round(l['entry_price'], 6),
             'mark_price': round(_mark, 6), 'pnl': round(_lp, 4),

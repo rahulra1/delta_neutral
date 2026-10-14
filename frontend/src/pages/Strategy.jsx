@@ -118,9 +118,9 @@ const STRATEGIES = [
     features: ['EMA14 Direction', 'Two-Tier TP/SL', '50/50 Scale-Out', 'TP2 / SL2 on remainder'],
     rec: '⏱ Daily 6:30 PM · BTC options · De-risked exits' },
   { key: 'ema_trend', label: 'EMA Trend Follower', icon: '🚀', type: 'Futures',
-    desc: 'Long-only basket over the top-50 perpetuals by turnover. Buys coins bullish on the daily 20/50 EMA crossover ($100 each), exits when they turn bearish. Re-scans hourly.',
-    features: ['Top-50 by Volume', 'Daily 20/50 EMA', 'Long-Only Basket', 'Hourly Rescan'],
-    rec: '⏱ Hourly · Delta perpetuals · Trend momentum' },
+    desc: 'Long/short basket over the top-N perpetuals by 24h change. Longs top gainers, shorts top losers, each confirmed by 6h OI change >10% ($100 each). Held until TP +10% / SL -5%. Re-scans hourly.',
+    features: ['Top-N Gainers/Losers', 'Long + Short', '6h OI Filter >10%', 'TP 10% / SL 5%'],
+    rec: '⏱ Hourly · Delta perpetuals · Long/short momentum' },
   { key: 'dual_momentum', label: 'Dual Momentum Basket', icon: '⚖️', type: 'Futures',
     desc: 'Twice-daily long/short basket. At 6 AM & 6 PM IST, longs the top-N 24h gainers and shorts the top-N losers ($10 each). Tracks TP +10% / SL -5% per position and closes any coin no longer in its side\'s list.',
     features: ['Top-N Gainers/Losers', 'Long + Short', '6 AM / 6 PM IST', 'TP 10% / SL 5%'],
@@ -1234,7 +1234,7 @@ export default function Strategy() {
           )} />
       )}
       {activeTab === 'ema_trend' && (
-        <StrategyTemplate title="EMA Trend Follower" icon="🚀" type="Futures" description="Long-only basket over top-50 perpetuals by turnover. Buys coins bullish on the daily 20/50 EMA crossover ($100 each), exits when bearish. Rescans hourly." profiles={profiles}
+        <StrategyTemplate title="EMA Trend Follower" icon="🚀" type="Futures" description="Long/short basket over top-N perpetuals by 24h change. Longs top gainers, shorts top losers, each with 6h OI change >10%. Held until TP +10% / SL -5%. Rescans hourly." profiles={profiles}
           configFields={EMA_TREND_FIELDS}
           onStart={async (config) => { const { data } = await api.post('/ema-trend/start', config); return data; }}
           onStop={async (sid) => { await api.post('/ema-trend/stop', { sid }); }}
@@ -1249,13 +1249,14 @@ export default function Strategy() {
               </div>
               {s.legs && s.legs.length > 0 && (
                 <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
-                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Open Longs</div>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Open Positions</div>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
-                    <thead><tr>{['Coin', 'Symbol', 'Size', 'Entry', 'Mark', 'P&L'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <thead><tr>{['Coin', 'Symbol', 'Side', 'Size', 'Entry', 'Mark', 'P&L'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
                     <tbody>{s.legs.map((l, i) => (
                       <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
                         <td style={{ padding: '4px 8px', fontWeight: 600 }}>{l.coin || ''}</td>
                         <td style={{ padding: '4px 8px' }}>{l.symbol}</td>
+                        <td style={{ padding: '4px 8px' }}><span className={`badge ${l.side === 'buy' ? 'badge-green' : 'badge-red'}`}>{l.side === 'buy' ? 'LONG' : 'SHORT'}</span></td>
                         <td style={{ padding: '4px 8px' }}>{l.size}</td>
                         <td style={{ padding: '4px 8px' }}>${(l.entry_price || 0).toFixed(6)}</td>
                         <td style={{ padding: '4px 8px', fontWeight: 600 }}>${(l.mark_price || 0).toFixed(6)}</td>
