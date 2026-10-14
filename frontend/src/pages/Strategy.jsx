@@ -263,6 +263,7 @@ const NSE_DUAL_MOMENTUM_FIELDS = [
   { key: 'amount_per_stock', label: 'Amount per Stock (₹)', type: 'number', default: 10000 },
   { key: 'tp_pct', label: 'Take Profit (fraction)', type: 'number', step: '0.01', default: 0.05, hint: '0.05 = +5%' },
   { key: 'sl_pct', label: 'Stop Loss (fraction)', type: 'number', step: '0.01', default: 0.03, hint: '0.03 = -3%' },
+  { key: 'min_oi_change_pct', label: 'Min OI Change (%)', type: 'number', step: '0.1', default: 10, hint: 'Only trade F&O stocks whose OI rose more than this %. 0 = off' },
   { key: 'trading_days', label: 'Trading Days', type: 'text', default: '0,1,2,3,4', hint: '0=Mon..4=Fri' },
   { key: 'entry_hour', label: 'Entry Hour (24h IST)', type: 'number', default: 9 },
   { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 30 },

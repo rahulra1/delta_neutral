@@ -269,8 +269,11 @@ def _extract_mover_rows(payload):
     # Flat shape (losers): {'data': [...]}
     if isinstance(payload.get('data'), list) and payload['data']:
         return payload['data']
-    # Grouped shape (gainers): pick the most useful group that has rows.
-    for key in ('NIFTY', 'allSec', 'SecGtr20', 'FOSec', 'NIFTYNEXT50', 'BANKNIFTY'):
+    # Grouped shape (gainers): prefer FOSec — the F&O-eligible stocks. This is
+    # the right universe because (a) only F&O stocks have OI for the OI filter,
+    # and (b) it includes non-NIFTY-50 movers like TATAELXSI. Fall back to the
+    # all-securities groups, then NIFTY, then any non-empty group.
+    for key in ('FOSec', 'allSec', 'SecGtr20', 'NIFTYNEXT50', 'NIFTY', 'BANKNIFTY'):
         grp = payload.get(key)
         if isinstance(grp, dict) and isinstance(grp.get('data'), list) and grp['data']:
             return grp['data']
@@ -306,7 +309,10 @@ def get_nse_top_movers(direction='gainers', limit=5):
     else:
         rows = None
         s = _get_session()
-        url = _MOVERS_URL.format(direction=direction)
+        # NSE's endpoint spells the losers direction "loosers" (sic). Using the
+        # correct English "losers" returns {"data": "Missing index or key."}.
+        nse_dir = 'loosers' if direction == 'losers' else 'gainers'
+        url = _MOVERS_URL.format(direction=nse_dir)
         try:
             r = s.get(url, timeout=10)
             if r.status_code in (401, 403):
@@ -347,3 +353,67 @@ def get_nse_top_movers(direction='gainers', limit=5):
     for i, c in enumerate(top, start=1):
         c['rank'] = i
     return top
+
+
+# ── Stock OI change (F&O OI spurts) — for the Dual Momentum OI filter ──
+
+_OI_SPURTS_URL = NSE_BASE + '/api/live-analysis-oi-spurts-underlyings'
+_oi_cache = {'data': None, 'ts': 0.0}
+_OI_TTL = 60          # seconds
+
+
+def get_nse_oi_changes():
+    """Return {symbol: oi_change_pct} for F&O-eligible NSE stocks.
+
+    Source: NSE live-analysis OI-spurts (underlyings). Each row has latestOI,
+    prevOI, changeInOI and avgInOI (the % change in OI). We prefer avgInOI;
+    if absent, derive changeInOI/prevOI*100.
+
+    Only F&O stocks appear here (cash-only names won't be present, so the OI
+    filter will exclude them). 60s cache + disk fallback. {} on failure.
+    """
+    now = time.time()
+    if _oi_cache['data'] is not None and now - _oi_cache['ts'] < _OI_TTL:
+        rows = _oi_cache['data']
+    else:
+        rows = None
+        s = _get_session()
+        try:
+            r = s.get(_OI_SPURTS_URL, timeout=10)
+            if r.status_code in (401, 403):
+                global _session_ts
+                _session_ts = 0
+                s = _get_session()
+                r = s.get(_OI_SPURTS_URL, timeout=10)
+            if r.ok:
+                payload = r.json()
+                rows = payload.get('data') if isinstance(payload, dict) else None
+                if rows:
+                    _oi_cache['data'] = rows
+                    _oi_cache['ts'] = time.time()
+                    _save_disk('oi_spurts', rows)
+        except Exception as e:
+            logger.warning(f"NSE OI-spurts fetch error: {e}")
+        if not rows:
+            disk = _load_disk('oi_spurts')
+            if disk:
+                logger.warning("NSE: serving cached OI-spurts (market closed or error)")
+                rows = disk
+    if not rows:
+        return {}
+
+    out = {}
+    for row in rows:
+        sym = row.get('symbol')
+        if not sym:
+            continue
+        pct = row.get('avgInOI')
+        if pct is None:
+            prev = row.get('prevOI') or 0
+            chg = row.get('changeInOI') or 0
+            pct = (chg / prev * 100) if prev else 0.0
+        try:
+            out[sym] = float(pct)
+        except (ValueError, TypeError):
+            continue
+    return out

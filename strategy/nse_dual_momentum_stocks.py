@@ -26,7 +26,7 @@ import logging
 import threading
 from datetime import datetime, timedelta, timezone
 
-from api.nse import get_nse_top_movers
+from api.nse import get_nse_top_movers, get_nse_oi_changes
 from strategy.base import BaseStrategy
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,7 @@ TOP_N = 5
 AMOUNT_PER_STOCK = 10000.0      # ₹ invested per stock (whole shares)
 TP_PCT = 0.05                   # +5% in the trade's favour -> take profit
 SL_PCT = 0.03                   # -3% against the trade      -> stop loss
+MIN_OI_CHANGE_PCT = 10.0        # only trade stocks whose OI change > +10%
 ENTRY_HOUR = 9
 ENTRY_MINUTE = 30
 EXIT_HOUR = 15
@@ -56,11 +57,13 @@ class NseDualMomentumStocks(BaseStrategy):
                  exit_hour=EXIT_HOUR, exit_minute=EXIT_MINUTE,
                  trading_days=None, dry_run=True,
                  tp_pct=TP_PCT, sl_pct=SL_PCT,
+                 min_oi_change_pct=MIN_OI_CHANGE_PCT,
                  monitor_interval=MONITOR_INTERVAL, run_immediately=False):
         self.top_n = top_n
         self.amount_per_stock = amount_per_stock
         self.tp_pct = tp_pct
         self.sl_pct = sl_pct
+        self.min_oi_change_pct = min_oi_change_pct
         self.entry_hour = entry_hour
         self.entry_minute = entry_minute
         self.exit_hour = exit_hour
@@ -102,6 +105,7 @@ class NseDualMomentumStocks(BaseStrategy):
             'amount_per_stock': amount_per_stock,
             'tp_pct': tp_pct,
             'sl_pct': sl_pct,
+            'min_oi_change_pct': min_oi_change_pct,
             'entry_hour': entry_hour,
             'entry_minute': entry_minute,
             'exit_hour': exit_hour,
@@ -125,6 +129,8 @@ class NseDualMomentumStocks(BaseStrategy):
               f"+ top {self.top_n} losers (SHORT)")
         print(f"[NSE Dual Momentum] ₹{self.amount_per_stock:.0f}/stock (whole shares) | "
               f"TP +{self.tp_pct*100:.1f}% / SL -{self.sl_pct*100:.1f}% (side-aware)")
+        if self.min_oi_change_pct and self.min_oi_change_pct > 0:
+            print(f"[NSE Dual Momentum] Entry filter: F&O OI change > +{self.min_oi_change_pct:.1f}%")
         print(f"[NSE Dual Momentum] Entry {self.entry_hour}:{self.entry_minute:02d} | "
               f"Square-off {self.exit_hour}:{self.exit_minute:02d} IST | Days: {days_str} | "
               f"Monitor {self.monitor_interval}s"
@@ -188,14 +194,45 @@ class NseDualMomentumStocks(BaseStrategy):
             print(f"{tag} No movers data — skipping day")
             return
         print(f"\n{tag} Entry | gainers={len(gainers)} losers={len(losers)}")
+        # OI-change gate: only trade a stock whose F&O open interest rose more
+        # than min_oi_change_pct (fresh positioning confirming the move).
+        oi_changes = {}
+        if self.min_oi_change_pct and self.min_oi_change_pct > 0:
+            try:
+                oi_changes = get_nse_oi_changes()
+            except Exception as e:
+                logger.warning("[NSE Dual Momentum] OI fetch failed: %s", e)
+            if not oi_changes:
+                print(f"{tag} ⚠ OI data unavailable — OI filter skipped this run")
         for m in gainers:
-            self._enter(m['symbol'], 'buy', m.get('ltp'), m.get('change_pct'))
+            if self._oi_confirms(m['symbol'], oi_changes, tag):
+                self._enter(m['symbol'], 'buy', m.get('ltp'), m.get('change_pct'))
         for m in losers:
-            self._enter(m['symbol'], 'sell', m.get('ltp'), m.get('change_pct'))
+            if self._oi_confirms(m['symbol'], oi_changes, tag):
+                self._enter(m['symbol'], 'sell', m.get('ltp'), m.get('change_pct'))
         self._persist_state()
         self._print_summary()
         # Monitor until the square-off time or until the day/strategy ends.
         self._monitor_until_squareoff(tag)
+
+    def _oi_confirms(self, symbol, oi_changes, tag=''):
+        """True if the stock's OI change exceeds min_oi_change_pct.
+
+        Gate is active only when min_oi_change_pct > 0 AND OI data is available;
+        otherwise it passes (so paper testing works when the OI feed is empty).
+        A stock absent from the F&O OI list is treated as not confirmed.
+        """
+        if not self.min_oi_change_pct or self.min_oi_change_pct <= 0 or not oi_changes:
+            return True
+        oi_pct = oi_changes.get(symbol)
+        if oi_pct is None:
+            print(f"{tag} Skip {symbol} — no F&O OI data (not in OI-spurts list)")
+            return False
+        if oi_pct > self.min_oi_change_pct:
+            return True
+        print(f"{tag} Skip {symbol} — OI change {oi_pct:+.2f}% <= "
+              f"{self.min_oi_change_pct:.1f}% threshold")
+        return False
 
     def _monitor_until_squareoff(self, tag):
         while self._running:
