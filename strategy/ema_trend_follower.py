@@ -2,12 +2,12 @@
 
 Universe : Top-N coins by 24h price change (perpetual futures), refreshed hourly.
 Signal   : 24h price-change ranking + 6h open-interest confirmation.
-Entry    : When a top-N 24h gainer (not already held) has a 6h OI change above
-           min_oi_change_pct, open a LONG (buy) sized to ~$100 notional
-           (integer lots from contract value). (No EMA direction check.)
-Exit     : When a held coin drops out of the top-N 24h gainers (momentum faded),
-           close it. Positions also exit on TP/SL. Long-only; no shorts.
-Holding  : A held coin is kept while it remains in the top-N list.
+Entry    : LONG the top-N 24h gainers and SHORT the top-N 24h losers, each only
+           when its 6h OI change is above min_oi_change_pct. ~$100 notional each
+           (integer lots). No EMA direction check.
+Exit     : A position is held until its side-aware TP or SL hits (TP/SL checked
+           continuously). Leaving the gainers/losers list does NOT close it.
+Holding  : Kept until TP/SL — even if the coin drops out of its side's top-N.
 Refresh  : Universe + signals re-evaluated every refresh_interval seconds (hourly).
 
 Modes    : dry_run=True  -> logs intended orders, no real trades (default).
@@ -127,10 +127,10 @@ class EmaTrendFollower(BaseStrategy):
     def initialize(self):
         self._running = True
         mode = 'DRY-RUN' if self.dry_run else 'LIVE'
-        print(f"[EMA Trend] Started [{mode}] | Universe: top {self.top_n} by 24h change ({self.change_direction})")
+        print(f"[EMA Trend] Started [{mode}] | Universe: top {self.top_n} gainers (LONG) + top {self.top_n} losers (SHORT) by 24h change")
         print(f"[EMA Trend] Signal: 24h price-change rank + OI confirm "
               f"(no EMA) | ${self.notional_usd}/coin | "
-              f"Refresh {self.refresh_interval}s | Long-only")
+              f"Refresh {self.refresh_interval}s | Long/Short")
         print(f"[EMA Trend] Risk: TP +{self.tp_pct*100:.1f}% / SL -{self.sl_pct*100:.1f}% "
               f"| Re-entry cooldown {self.reentry_cooldown_hours}h "
               f"| Price check {self.price_check_interval}s")
@@ -190,11 +190,12 @@ class EmaTrendFollower(BaseStrategy):
             entry = leg['entry_price']
             if entry <= 0:
                 continue
-            change = (md['mark_price'] - entry) / entry
-            if change >= self.tp_pct:
+            raw = (md['mark_price'] - entry) / entry
+            favour = raw if leg.get('side', 'buy') == 'buy' else -raw
+            if favour >= self.tp_pct:
                 self._exit(leg['symbol'], reason='take_profit')
                 self._set_cooldown(leg['symbol'])
-            elif change <= -self.sl_pct:
+            elif favour <= -self.sl_pct:
                 self._exit(leg['symbol'], reason='stop_loss')
                 self._set_cooldown(leg['symbol'])
 
@@ -247,44 +248,51 @@ class EmaTrendFollower(BaseStrategy):
         for leg in legs_copy:
             md = marks.get(leg['symbol'])
             if md and md.get('mark_price'):
-                open_pnl += (md['mark_price'] - leg['entry_price']) * leg['size'] * leg['contract_value']
+                sign = 1 if leg.get('side', 'buy') == 'buy' else -1
+                open_pnl += sign * (md['mark_price'] - leg['entry_price']) * leg['size'] * leg['contract_value']
         return self.cumulative_pnl + open_pnl
 
     # ---- Core logic --------------------------------------------------------
     def evaluate_once(self):
         """One full pass: refresh universe, score signals, enter/exit."""
         ts = datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')
-        top = get_top_coins_by_change(limit=self.top_n, direction=self.change_direction)
-        if not top:
+        gainers = get_top_coins_by_change(limit=self.top_n, direction='gainers')
+        losers = get_top_coins_by_change(limit=self.top_n, direction='losers')
+        if not gainers and not losers:
             logger.warning("[EMA Trend] Top-coin fetch empty — skipping cycle")
             self._consecutive_failures += 1
             return
         self._consecutive_failures = 0
 
-        universe = {c['symbol']: c for c in top}
-        print(f"\n[EMA Trend] [{ts}] Universe: {len(universe)} coins")
+        gain_syms = {c['symbol']: c for c in gainers}
+        lose_syms = {c['symbol']: c for c in losers}
+        print(f"\n[EMA Trend] [{ts}] Universe: {len(gain_syms)} gainers (LONG) + "
+              f"{len(lose_syms)} losers (SHORT)")
 
-        # 1) EXIT pass — close held coins that have dropped out of the top-N
-        #    24h gainers (momentum faded). (EMA trend check removed; entry/exit
-        #    now driven purely by 24h price-change ranking + OI confirmation.)
-        with self._legs_lock:
-            held = [l['symbol'] for l in self.legs]
-        for sym in held:
-            if sym not in universe:
-                self._exit(sym, reason='left top gainers')
+        # No list-rotation exit: an open position is held until its TP or SL
+        # hits (checked continuously in _risk_loop). Leaving the gainers/losers
+        # list does NOT close it.
 
-        # 2) ENTRY pass — top-N 24h gainers not already held, confirmed by a
-        #    6h OI change above the threshold. No EMA direction check.
+        # ENTRY pass — LONG top-N gainers, SHORT top-N losers; each confirmed
+        # by a 6h OI change above the threshold. No EMA direction check.
         with self._legs_lock:
-            held_set = {l['symbol'] for l in self.legs}
-        for sym, meta in universe.items():
-            if sym in held_set:
+            held_set = {(l['symbol'], l['side']) for l in self.legs}
+        for sym, meta in gain_syms.items():
+            if (sym, 'buy') in held_set:
                 continue
             if self._in_cooldown(sym):
                 continue
             if not self._oi_confirms(sym, meta):
                 continue
-            self._enter(sym, meta.get('coin', ''), meta)
+            self._enter(sym, meta.get('coin', ''), 'buy', meta)
+        for sym, meta in lose_syms.items():
+            if (sym, 'sell') in held_set:
+                continue
+            if self._in_cooldown(sym):
+                continue
+            if not self._oi_confirms(sym, meta):
+                continue
+            self._enter(sym, meta.get('coin', ''), 'sell', meta)
 
         self._persist_state()
         self._print_summary()
@@ -312,7 +320,7 @@ class EmaTrendFollower(BaseStrategy):
             return 0
         return max(1, int(round(self.notional_usd / lot_notional)))
 
-    def _enter(self, symbol, coin, meta):
+    def _enter(self, symbol, coin, side, meta):
         px = get_futures_price(symbol)
         if not px or not px.get('mark_price'):
             logger.warning("[EMA Trend] Skip %s — no mark price", symbol)
@@ -326,24 +334,25 @@ class EmaTrendFollower(BaseStrategy):
         if lots <= 0:
             return
         est_notional = lots * mark_price * contract_value
+        tag = 'LONG' if side == 'buy' else 'SHORT'
 
         if self.dry_run:
-            print(f"[EMA Trend] [DRY] BUY {symbol} x{lots} @ ~{mark_price:.6f} "
+            print(f"[EMA Trend] [DRY] {tag} {side.upper()} {symbol} x{lots} @ ~{mark_price:.6f} "
                   f"(~${est_notional:.2f}) | 24h {meta.get('change_24h', 0):+.2f}% "
                   f"OI6h {meta.get('oi_change_6h_pct', 0):+.2f}%")
             filled_price = mark_price
         else:
-            result = place_order(product_id, symbol, lots, 'buy')
+            result = place_order(product_id, symbol, lots, side)
             if not result:
-                logger.warning("[EMA Trend] BUY %s failed — not recording", symbol)
+                logger.warning("[EMA Trend] %s %s failed — not recording", side.upper(), symbol)
                 return
             filled_price = float(result.get('average_fill_price') or mark_price)
-            print(f"[EMA Trend] BUY {symbol} x{lots} filled @ {filled_price:.6f} "
+            print(f"[EMA Trend] {tag} {side.upper()} {symbol} x{lots} filled @ {filled_price:.6f} "
                   f"(~${est_notional:.2f})")
 
         leg = {
             'symbol': symbol, 'product_id': product_id, 'coin': coin,
-            'side': 'buy', 'size': lots, 'entry_price': filled_price,
+            'side': side, 'size': lots, 'entry_price': filled_price,
             'contract_value': contract_value,
             'opened_at': datetime.now(IST).isoformat(),
         }
@@ -356,14 +365,14 @@ class EmaTrendFollower(BaseStrategy):
             if self._user_id is not None:
                 position_tracker.open(
                     self._user_id, product_id, symbol,
-                    type='futures', strike='0', side='buy',
+                    type='futures', strike='0', side=side,
                     size=lots, entry_price=filled_price, asset=coin or symbol,
                     source='EMA Trend', strategy_sid=self._sid or '',
                     contract_value=contract_value)
         except Exception as e:
             logger.debug("[EMA Trend] position_tracker.open failed for %s: %s", symbol, e)
         self.trade_log.append({
-            'ts': datetime.now(IST).isoformat(), 'action': 'BUY', 'symbol': symbol,
+            'ts': datetime.now(IST).isoformat(), 'action': side.upper(), 'symbol': symbol,
             'lots': lots, 'price': filled_price, 'notional': round(est_notional, 2),
         })
 
@@ -375,19 +384,22 @@ class EmaTrendFollower(BaseStrategy):
         px = get_futures_price(symbol)
         mark_price = px['mark_price'] if px and px.get('mark_price') else leg['entry_price']
         lots, cv = leg['size'], leg['contract_value']
-        realized = (mark_price - leg['entry_price']) * lots * cv
+        side = leg.get('side', 'buy')
+        sign = 1 if side == 'buy' else -1
+        close_side = 'sell' if side == 'buy' else 'buy'
+        realized = sign * (mark_price - leg['entry_price']) * lots * cv
 
         if self.dry_run:
-            print(f"[EMA Trend] [DRY] SELL {symbol} x{lots} @ ~{mark_price:.6f} "
+            print(f"[EMA Trend] [DRY] CLOSE {close_side.upper()} {symbol} x{lots} @ ~{mark_price:.6f} "
                   f"| {reason} | PnL ${realized:+.2f}")
         else:
-            result = place_order(leg['product_id'], symbol, lots, 'sell')
+            result = place_order(leg['product_id'], symbol, lots, close_side)
             if not result:
-                logger.warning("[EMA Trend] SELL %s failed — keeping for retry", symbol)
+                logger.warning("[EMA Trend] CLOSE %s failed — keeping for retry", symbol)
                 return
             fill = float(result.get('average_fill_price') or mark_price)
-            realized = (fill - leg['entry_price']) * lots * cv
-            print(f"[EMA Trend] SELL {symbol} x{lots} filled @ {fill:.6f} "
+            realized = sign * (fill - leg['entry_price']) * lots * cv
+            print(f"[EMA Trend] CLOSE {close_side.upper()} {symbol} x{lots} filled @ {fill:.6f} "
                   f"| {reason} | PnL ${realized:+.2f}")
 
         with self._legs_lock:
@@ -401,7 +413,7 @@ class EmaTrendFollower(BaseStrategy):
         except Exception as e:
             logger.debug("[EMA Trend] position_tracker.close failed for %s: %s", symbol, e)
         self.trade_log.append({
-            'ts': datetime.now(IST).isoformat(), 'action': 'SELL', 'symbol': symbol,
+            'ts': datetime.now(IST).isoformat(), 'action': f'CLOSE_{side.upper()}', 'symbol': symbol,
             'lots': lots, 'price': mark_price, 'pnl': round(realized, 4), 'reason': reason,
         })
 
@@ -424,10 +436,14 @@ class EmaTrendFollower(BaseStrategy):
     # ---- reporting ---------------------------------------------------------
     def _print_summary(self):
         with self._legs_lock:
-            n = len(self.legs)
-            syms = ', '.join(sorted(l['symbol'] for l in self.legs)) or '(none)'
-        print(f"[EMA Trend] Open: {n} | Holding: {syms} | "
-              f"Realized PnL: ${self.cumulative_pnl:+.2f}")
+            longs = sorted(l['symbol'] for l in self.legs if l.get('side', 'buy') == 'buy')
+            shorts = sorted(l['symbol'] for l in self.legs if l.get('side') == 'sell')
+        print(f"[EMA Trend] Open: {len(longs)+len(shorts)} "
+              f"(L:{len(longs)} / S:{len(shorts)}) | Realized PnL: ${self.cumulative_pnl:+.2f}")
+        if longs:
+            print(f"[EMA Trend]   LONG : {', '.join(longs)}")
+        if shorts:
+            print(f"[EMA Trend]   SHORT: {', '.join(shorts)}")
 
     # ---- app/thread integration -------------------------------------------
     def _apply_thread_context(self):
@@ -543,7 +559,7 @@ class EmaTrendFollower(BaseStrategy):
                 for l in restored:
                     position_tracker.open(
                         self._user_id, l['product_id'], l['symbol'],
-                        type='futures', strike='0', side='buy',
+                        type='futures', strike='0', side=l.get('side', 'buy'),
                         size=l['size'], entry_price=l['entry_price'],
                         asset=l.get('coin') or l['symbol'],
                         source='EMA Trend', strategy_sid=self._sid or '',
