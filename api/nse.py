@@ -241,3 +241,109 @@ def _generate_expiries():
     today = datetime.now()
     d = today + timedelta(days=(3 - today.weekday()) % 7 or 7)
     return [(d + timedelta(weeks=i)).strftime('%d-%m-%Y') for i in range(8)]
+
+
+# ── Stock top-movers (gainers / losers) — for the Dual Momentum Stocks strategy ──
+
+_MOVERS_URL = NSE_BASE + '/api/live-analysis-variations?index={direction}'
+_movers_cache = {}        # {direction: {'data': [...], 'ts': float}}
+_MOVERS_TTL = 30          # seconds
+
+
+def _f_num(v):
+    try:
+        return float(v) if v is not None else 0.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _extract_mover_rows(payload):
+    """NSE returns gainers grouped by index (NIFTY/allSec/...) but losers as a
+    flat {'data': [...]}. Normalize both to a single list of raw rows.
+
+    Preference order for grouped payloads: NIFTY (the liquid NIFTY-50 names)
+    first, then allSec as a fallback, else the first group that has data.
+    """
+    if not isinstance(payload, dict):
+        return []
+    # Flat shape (losers): {'data': [...]}
+    if isinstance(payload.get('data'), list) and payload['data']:
+        return payload['data']
+    # Grouped shape (gainers): pick the most useful group that has rows.
+    for key in ('NIFTY', 'allSec', 'SecGtr20', 'FOSec', 'NIFTYNEXT50', 'BANKNIFTY'):
+        grp = payload.get(key)
+        if isinstance(grp, dict) and isinstance(grp.get('data'), list) and grp['data']:
+            return grp['data']
+    # Last resort: any group with a non-empty data list.
+    for key, grp in payload.items():
+        if key == 'legends':
+            continue
+        if isinstance(grp, dict) and isinstance(grp.get('data'), list) and grp['data']:
+            return grp['data']
+    return []
+
+
+def get_nse_top_movers(direction='gainers', limit=5):
+    """Return the top-N NSE stock movers for the given direction.
+
+    Args:
+        direction: 'gainers' (largest positive % change) or 'losers'.
+        limit: number of stocks to return.
+
+    Returns:
+        List of dicts sorted most-extreme first, each:
+            {rank, symbol, ltp, change_pct, prev_price}
+        Empty list on failure (caller should skip the cycle).
+
+    Uses the live NSE live-analysis-variations endpoint via the shared cookie
+    session, with a 30s in-memory cache and a disk fallback (like the chain).
+    """
+    direction = 'losers' if str(direction).lower().startswith('los') else 'gainers'
+
+    cached = _movers_cache.get(direction)
+    if cached and time.time() - cached['ts'] < _MOVERS_TTL:
+        rows = cached['data']
+    else:
+        rows = None
+        s = _get_session()
+        url = _MOVERS_URL.format(direction=direction)
+        try:
+            r = s.get(url, timeout=10)
+            if r.status_code in (401, 403):
+                global _session_ts
+                _session_ts = 0
+                s = _get_session()
+                r = s.get(url, timeout=10)
+            if r.ok:
+                payload = r.json()
+                rows = _extract_mover_rows(payload)
+                if rows:
+                    _movers_cache[direction] = {'data': rows, 'ts': time.time()}
+                    _save_disk(f'movers_{direction}', rows)
+        except Exception as e:
+            logger.warning(f"NSE top-movers fetch error ({direction}): {e}")
+        if not rows:
+            disk = _load_disk(f'movers_{direction}')
+            if disk:
+                logger.warning(f"NSE: serving cached {direction} (market closed or error)")
+                rows = disk
+    if not rows:
+        return []
+
+    out = []
+    for row in rows:
+        sym = row.get('symbol')
+        if not sym:
+            continue
+        out.append({
+            'symbol': sym,
+            'ltp': _f_num(row.get('ltp')),
+            'change_pct': _f_num(row.get('perChange')),
+            'prev_price': _f_num(row.get('prev_price')),
+        })
+    # Gainers: largest positive first; losers: most negative first.
+    out.sort(key=lambda c: c['change_pct'], reverse=(direction == 'gainers'))
+    top = out[:limit]
+    for i, c in enumerate(top, start=1):
+        c['rank'] = i
+    return top

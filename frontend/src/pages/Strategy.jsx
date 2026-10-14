@@ -125,6 +125,10 @@ const STRATEGIES = [
     desc: 'Twice-daily long/short basket. At 6 AM & 6 PM IST, longs the top-N 24h gainers and shorts the top-N losers ($10 each). Tracks TP +10% / SL -5% per position and closes any coin no longer in its side\'s list.',
     features: ['Top-N Gainers/Losers', 'Long + Short', '6 AM / 6 PM IST', 'TP 10% / SL 5%'],
     rec: '⏱ Twice daily · Delta perpetuals · Market-neutral momentum' },
+  { key: 'nse_dual_momentum', label: 'NSE Dual Momentum', icon: '⚖️🇮🇳', type: 'Equity',
+    desc: 'Intraday long/short NSE stock basket. Buys top-N gainers, shorts top-N losers (₹10,000 each, whole shares). TP +5% / SL -3% side-aware, squared off at 3:15 PM. Paper or live.',
+    features: ['Top-N Gainers/Losers', 'Long + Short Stocks', 'Intraday Square-off', 'Paper Trading'],
+    rec: '⏱ Intraday 9:30–3:15 IST · NSE equities' },
 ];
 
 const DN_FIELDS = [
@@ -252,6 +256,21 @@ const NSE_STRANGLE_FIELDS = [
   { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 15 },
   { key: 'exit_minute', label: 'Exit Minute', type: 'number', default: 15 },
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 15 },
+];
+
+const NSE_DUAL_MOMENTUM_FIELDS = [
+  { key: 'top_n', label: 'Top N (Gainers & Losers)', type: 'number', default: 5 },
+  { key: 'amount_per_stock', label: 'Amount per Stock (₹)', type: 'number', default: 10000 },
+  { key: 'tp_pct', label: 'Take Profit (fraction)', type: 'number', step: '0.01', default: 0.05, hint: '0.05 = +5%' },
+  { key: 'sl_pct', label: 'Stop Loss (fraction)', type: 'number', step: '0.01', default: 0.03, hint: '0.03 = -3%' },
+  { key: 'trading_days', label: 'Trading Days', type: 'text', default: '0,1,2,3,4', hint: '0=Mon..4=Fri' },
+  { key: 'entry_hour', label: 'Entry Hour (24h IST)', type: 'number', default: 9 },
+  { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 30 },
+  { key: 'exit_hour', label: 'Exit Hour (24h IST)', type: 'number', default: 15 },
+  { key: 'exit_minute', label: 'Exit Minute', type: 'number', default: 15 },
+  { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 30 },
+  { key: 'dry_run', label: 'Mode', type: 'select', options: [{value:true,label:'Paper'},{value:false,label:'Live'}], default: true },
+  { key: 'run_immediately', label: 'Run Immediately (test)', type: 'select', options: [{value:false,label:'No — wait for entry time'},{value:true,label:'Yes — enter now once'}], default: false, hint: 'Testing: enter now on start, then daily at entry time' },
 ];
 
 const NSE_DN_FIELDS = [
@@ -774,6 +793,62 @@ export default function Strategy() {
                         <td style={{ padding: '4px 8px' }}>{t.direction === 'bear_call' ? '🐻 Bear Call' : '🐂 Bull Put'}</td>
                         <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{t.pnl}</td>
                         <td style={{ padding: '4px 8px' }}>{t.exit_reason === 'target' ? '🎯 TP' : t.exit_reason === 'stoploss' ? '🛑 SL' : '⏰ EOD'}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )} />
+      )}
+      {activeTab === 'nse_dual_momentum' && (
+        <StrategyTemplate title="NSE Dual Momentum" icon="⚖️🇮🇳" type="Equity" description="Intraday long/short NSE stock basket. Buys top-N gainers, shorts top-N losers (₹10,000 each, whole shares). TP +5% / SL -3% side-aware, squared off at 3:15 PM." profiles={profiles}
+          configFields={NSE_DUAL_MOMENTUM_FIELDS}
+          onStart={async (config) => {
+            const c = { ...config };
+            if (typeof c.trading_days === 'string') c.trading_days = c.trading_days.split(',').map(d => parseInt(d.trim()));
+            const { data } = await api.post('/nse-dual-momentum/start', c);
+            return data;
+          }}
+          onStop={async (sid) => { await api.post('/nse-dual-momentum/stop', { sid }); }}
+          statusEndpoint="/nse-dual-momentum/status" streamEndpoint="/nse-dual-momentum/stream"
+          renderStatus={(s) => (
+            <>
+              <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                <div className="stat-card"><div className="label">Session P&L</div><div className="value" style={{ color: (s.session_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{(s.session_pnl || 0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Cumulative P&L</div><div className="value" style={{ color: (s.cumulative_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{(s.cumulative_pnl||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Total (incl. Open)</div><div className="value" style={{ color: (s.total_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{(s.total_pnl||0).toFixed(2)}</div></div>
+                <div className="stat-card"><div className="label">Days Traded</div><div className="value">{s.days_traded || 0}</div></div>
+              </div>
+              {s.legs && s.legs.length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Open Positions</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Symbol', 'Side', 'Qty', 'Entry', 'Mark', 'P&L'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{s.legs.map((l, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>{l.symbol}</td>
+                        <td style={{ padding: '4px 8px' }}><span className={`badge ${l.side === 'buy' ? 'badge-green' : 'badge-red'}`}>{l.side === 'buy' ? 'LONG' : 'SHORT'}</span></td>
+                        <td style={{ padding: '4px 8px' }}>{l.qty}</td>
+                        <td style={{ padding: '4px 8px' }}>₹{(l.entry_price||0).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>₹{(l.mark_price||0).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: (l.pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{(l.pnl||0).toFixed(2)}</td>
+                      </tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+              {(s.trade_log || []).length > 0 && (
+                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Trade Log</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                    <thead><tr>{['Time', 'Action', 'Symbol', 'Qty', 'Price', 'P&L'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+                    <tbody>{(s.trade_log || []).slice(-10).reverse().map((t, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '4px 8px' }}>{(t.ts || '').slice(11, 16) || t.date}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.action}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>{t.symbol}</td>
+                        <td style={{ padding: '4px 8px' }}>{t.qty}</td>
+                        <td style={{ padding: '4px 8px' }}>₹{(t.price||0).toFixed(2)}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 700, color: (t.pnl||0) >= 0 ? 'var(--green)' : 'var(--red)' }}>{t.pnl != null ? `₹${t.pnl}` : '—'}</td>
                       </tr>))}</tbody>
                   </table>
                 </div>
