@@ -1,14 +1,13 @@
 """EMA Trend Follower — long-only momentum basket on Delta Exchange perpetuals.
 
 Universe : Top-N coins by 24h price change (perpetual futures), refreshed hourly.
-Signal   : Daily 20/50 EMA crossover.
-             EMA20 > EMA50  -> BULLISH
-             EMA20 < EMA50  -> BEARISH
-Entry    : When a top-N coin is BULLISH and not already held, open a LONG (buy)
-           position sized to ~$100 notional (integer lots from contract value).
-Exit     : When a held coin turns BEARISH, close it (long-only; no shorts).
-Holding  : A held coin is kept until it turns bearish, even if it drops out of
-           the top-N list.
+Signal   : 24h price-change ranking + 6h open-interest confirmation.
+Entry    : When a top-N 24h gainer (not already held) has a 6h OI change above
+           min_oi_change_pct, open a LONG (buy) sized to ~$100 notional
+           (integer lots from contract value). (No EMA direction check.)
+Exit     : When a held coin drops out of the top-N 24h gainers (momentum faded),
+           close it. Positions also exit on TP/SL. Long-only; no shorts.
+Holding  : A held coin is kept while it remains in the top-N list.
 Refresh  : Universe + signals re-evaluated every refresh_interval seconds (hourly).
 
 Modes    : dry_run=True  -> logs intended orders, no real trades (default).
@@ -29,7 +28,7 @@ import config
 from api.orders import place_order
 from api.pricing import get_futures_price
 from api.position_tracker import position_tracker
-from api.top_coins import get_top_coins_by_change, ema_crossover_direction
+from api.top_coins import get_top_coins_by_change
 from strategy.base import BaseStrategy
 
 logger = logging.getLogger(__name__)
@@ -46,8 +45,8 @@ REFRESH_INTERVAL = 3600          # hourly
 MONITOR_INTERVAL = 3600
 
 # Per-position risk exits and re-entry cooldown.
-TP_PCT = 0.05                    # +5% from entry -> take profit
-SL_PCT = 0.02                    # -2% from entry -> stop loss
+TP_PCT = 0.10                    # +10% from entry -> take profit
+SL_PCT = 0.05                    # -5% from entry -> stop loss
 REENTRY_COOLDOWN_HOURS = 24      # after a TP/SL exit, block re-entry this long
 PRICE_CHECK_INTERVAL = 60        # seconds between TP/SL price checks
 MIN_OI_CHANGE_PCT = 10.0         # only enter coins whose 6h OI change > +10% (0 = off)
@@ -129,8 +128,8 @@ class EmaTrendFollower(BaseStrategy):
         self._running = True
         mode = 'DRY-RUN' if self.dry_run else 'LIVE'
         print(f"[EMA Trend] Started [{mode}] | Universe: top {self.top_n} by 24h change ({self.change_direction})")
-        print(f"[EMA Trend] Signal: {self.ema_fast}/{self.ema_slow} EMA on "
-              f"{self.ema_resolution} | ${self.notional_usd}/coin | "
+        print(f"[EMA Trend] Signal: 24h price-change rank + OI confirm "
+              f"(no EMA) | ${self.notional_usd}/coin | "
               f"Refresh {self.refresh_interval}s | Long-only")
         print(f"[EMA Trend] Risk: TP +{self.tp_pct*100:.1f}% / SL -{self.sl_pct*100:.1f}% "
               f"| Re-entry cooldown {self.reentry_cooldown_hours}h "
@@ -265,16 +264,17 @@ class EmaTrendFollower(BaseStrategy):
         universe = {c['symbol']: c for c in top}
         print(f"\n[EMA Trend] [{ts}] Universe: {len(universe)} coins")
 
-        # 1) EXIT pass — held coins that turned bearish.
+        # 1) EXIT pass — close held coins that have dropped out of the top-N
+        #    24h gainers (momentum faded). (EMA trend check removed; entry/exit
+        #    now driven purely by 24h price-change ranking + OI confirmation.)
         with self._legs_lock:
             held = [l['symbol'] for l in self.legs]
         for sym in held:
-            sig = ema_crossover_direction(sym, resolution=self.ema_resolution,
-                                          fast=self.ema_fast, slow=self.ema_slow)
-            if sig['direction'] == 'BEARISH':
-                self._exit(sym, reason='turned bearish')
+            if sym not in universe:
+                self._exit(sym, reason='left top gainers')
 
-        # 2) ENTRY pass — bullish coins in universe not already held.
+        # 2) ENTRY pass — top-N 24h gainers not already held, confirmed by a
+        #    6h OI change above the threshold. No EMA direction check.
         with self._legs_lock:
             held_set = {l['symbol'] for l in self.legs}
         for sym, meta in universe.items():
@@ -284,10 +284,7 @@ class EmaTrendFollower(BaseStrategy):
                 continue
             if not self._oi_confirms(sym, meta):
                 continue
-            sig = ema_crossover_direction(sym, resolution=self.ema_resolution,
-                                          fast=self.ema_fast, slow=self.ema_slow)
-            if sig['direction'] == 'BULLISH':
-                self._enter(sym, meta.get('coin', ''), sig)
+            self._enter(sym, meta.get('coin', ''), meta)
 
         self._persist_state()
         self._print_summary()
@@ -315,7 +312,7 @@ class EmaTrendFollower(BaseStrategy):
             return 0
         return max(1, int(round(self.notional_usd / lot_notional)))
 
-    def _enter(self, symbol, coin, sig):
+    def _enter(self, symbol, coin, meta):
         px = get_futures_price(symbol)
         if not px or not px.get('mark_price'):
             logger.warning("[EMA Trend] Skip %s — no mark price", symbol)
@@ -332,8 +329,8 @@ class EmaTrendFollower(BaseStrategy):
 
         if self.dry_run:
             print(f"[EMA Trend] [DRY] BUY {symbol} x{lots} @ ~{mark_price:.6f} "
-                  f"(~${est_notional:.2f}) | EMA{self.ema_fast}>{self.ema_slow} "
-                  f"spread {sig.get('spread_pct', 0):+.2f}%")
+                  f"(~${est_notional:.2f}) | 24h {meta.get('change_24h', 0):+.2f}% "
+                  f"OI6h {meta.get('oi_change_6h_pct', 0):+.2f}%")
             filled_price = mark_price
         else:
             result = place_order(product_id, symbol, lots, 'buy')
