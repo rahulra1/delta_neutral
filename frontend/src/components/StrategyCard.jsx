@@ -119,6 +119,8 @@ function SourceBadge({ source }) {
     'Strategy Builder': { bg: '#dbeafe', color: '#2563eb' },
     'Div+MSS': { bg: '#fce7f3', color: '#db2777' },
     'SMA+Vol': { bg: '#d1fae5', color: '#059669' },
+    'EMA Trend': { bg: '#e0e7ff', color: '#4f46e5' },
+    'Dual Momentum': { bg: '#cffafe', color: '#0891b2' },
   };
   const c = colors[source] || { bg: '#f0f0f0', color: 'var(--muted)' };
   return <span style={{ fontSize: '.68rem', padding: '2px 8px', borderRadius: 4, fontWeight: 700, background: c.bg, color: c.color }}>{source || 'Manual'}</span>;

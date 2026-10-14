@@ -12,6 +12,7 @@ const ALL_STRATEGIES = [
   { key: 'ema_spread', label: 'EMA Credit Spread' },
   { key: 'ema_spread_v2', label: 'EMA Credit Spread V2' },
   { key: 'ema_trend', label: 'EMA Trend Follower' },
+  { key: 'dual_momentum', label: 'Dual Momentum Basket' },
   { key: 'iv_crush', label: 'IV Crush' },
   { key: 'call_ratio', label: 'Call Ratio Spread' },
   { key: 'rsi_div_mss', label: 'Div + MSS' },

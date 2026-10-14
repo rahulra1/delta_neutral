@@ -147,14 +147,14 @@ def _resume_db_strategies():
 
         if not legs:
             # Daily-recurring strategies don't need legs to resume — they open trades on schedule
-            if source not in ('EMA Spread', 'EMA Spread V2', 'EMA Trend', 'OI Strategy', 'Daily Strangle', 'Weekly DN',
+            if source not in ('EMA Spread', 'EMA Spread V2', 'EMA Trend', 'Dual Momentum', 'OI Strategy', 'Daily Strangle', 'Weekly DN',
                               'Portfolio Strangle', 'Hybrid Switch', 'Pivot SuperTrend',
                               'NSE Strangle', 'NSE Delta Neutral', 'NSE EMA Spread'):
                 continue
 
         # Skip strategies where all legs have no product_id (invalid/empty data)
         valid_legs = [l for l in legs if l.get('product_id')]
-        if not valid_legs and source not in ('EMA Spread', 'EMA Spread V2', 'EMA Trend', 'OI Strategy', 'Daily Strangle',
+        if not valid_legs and source not in ('EMA Spread', 'EMA Spread V2', 'EMA Trend', 'Dual Momentum', 'OI Strategy', 'Daily Strangle',
                                               'Weekly DN', 'Portfolio Strangle', 'Hybrid Switch',
                                               'Pivot SuperTrend', 'NSE Strangle',
                                               'NSE Delta Neutral', 'NSE EMA Spread'):
@@ -2694,6 +2694,13 @@ def api_all_strategies():
                         continue
                 elif sid in ema_trend_strategies and ema_trend_strategies[sid].get('strategy'):
                     s = ema_trend_strategies[sid]['strategy']
+                    entry['pnl'] = round(s.pnl, 4)
+                    if not s._running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.pnl, 4))
+                        continue
+                elif sid in dual_momentum_strategies and dual_momentum_strategies[sid].get('strategy'):
+                    s = dual_momentum_strategies[sid]['strategy']
                     entry['pnl'] = round(s.pnl, 4)
                     if not s._running:
                         entry['status'] = 'completed'
@@ -7241,7 +7248,7 @@ def api_tracker_logs(sid):
         pnl = round(strat.total_pnl, 2) if strat else 0
         return jsonify(sid=sid, logs=logs[-last:], running=e.get('running', False), pnl=pnl, status='running' if e.get('running') else 'completed')
     # Check new strategy dicts
-    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_v2_strategies, ema_trend_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies):
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies):
         e = dct.get(sid)
         if e and e.get('user_id') == current_user_id():
             logs = list(e.get('log_history', []))
@@ -7279,7 +7286,7 @@ def api_tracker_close(sid):
         e['strategy'].close_all_positions()
         return jsonify(status='closed')
     # New strategy dicts
-    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_v2_strategies, ema_trend_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies):
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies):
         e = dct.get(sid)
         if e and e.get('user_id') == current_user_id() and e.get('strategy'):
             e['strategy'].close_all()
