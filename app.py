@@ -933,6 +933,7 @@ def _resume_db_strategies():
                         ema_resolution=details.get('ema_resolution', '1d'),
                         refresh_interval=int(details.get('refresh_interval', 3600)),
                         dry_run=bool(details.get('dry_run', False)),
+                        min_oi_change_pct=float(details.get('min_oi_change_pct', 10.0)),
                     )
                     entry['strategy'] = s
                     s._log_queue = entry['log_queue']
@@ -6604,6 +6605,7 @@ def run_ema_trend(sid, params):
             ema_resolution=params.get('ema_resolution', '1d'),
             refresh_interval=int(params.get('refresh_interval', 3600)),
             dry_run=bool(params.get('dry_run', False)),
+            min_oi_change_pct=float(params.get('min_oi_change_pct', 10.0)),
         )
         s._log_queue = entry['log_queue']
         s._log_history = entry['log_history']

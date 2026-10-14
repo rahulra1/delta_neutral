@@ -50,6 +50,7 @@ TP_PCT = 0.05                    # +5% from entry -> take profit
 SL_PCT = 0.02                    # -2% from entry -> stop loss
 REENTRY_COOLDOWN_HOURS = 24      # after a TP/SL exit, block re-entry this long
 PRICE_CHECK_INTERVAL = 60        # seconds between TP/SL price checks
+MIN_OI_CHANGE_PCT = 10.0         # only enter coins whose 6h OI change > +10% (0 = off)
 
 
 class EmaTrendFollower(BaseStrategy):
@@ -61,7 +62,8 @@ class EmaTrendFollower(BaseStrategy):
                  tp_pct=TP_PCT, sl_pct=SL_PCT,
                  reentry_cooldown_hours=REENTRY_COOLDOWN_HOURS,
                  price_check_interval=PRICE_CHECK_INTERVAL,
-                 change_direction=CHANGE_DIRECTION):
+                 change_direction=CHANGE_DIRECTION,
+                 min_oi_change_pct=MIN_OI_CHANGE_PCT):
         self.top_n = top_n
         self.notional_usd = notional_usd
         self.ema_fast = ema_fast
@@ -75,6 +77,7 @@ class EmaTrendFollower(BaseStrategy):
         self.reentry_cooldown_hours = reentry_cooldown_hours
         self.price_check_interval = price_check_interval
         self.change_direction = change_direction
+        self.min_oi_change_pct = min_oi_change_pct
 
         # positions kept as a list of "legs" so they serialize like other
         # strategies. Each leg:
@@ -118,6 +121,7 @@ class EmaTrendFollower(BaseStrategy):
             'reentry_cooldown_hours': reentry_cooldown_hours,
             'price_check_interval': price_check_interval,
             'change_direction': change_direction,
+            'min_oi_change_pct': min_oi_change_pct,
         }
 
     # ---- BaseStrategy interface -------------------------------------------
@@ -131,6 +135,8 @@ class EmaTrendFollower(BaseStrategy):
         print(f"[EMA Trend] Risk: TP +{self.tp_pct*100:.1f}% / SL -{self.sl_pct*100:.1f}% "
               f"| Re-entry cooldown {self.reentry_cooldown_hours}h "
               f"| Price check {self.price_check_interval}s")
+        if self.min_oi_change_pct and self.min_oi_change_pct > 0:
+            print(f"[EMA Trend] Entry filter: 6h OI change > +{self.min_oi_change_pct:.1f}%")
         with self._legs_lock:
             if self.legs:
                 print(f"[EMA Trend] Resumed with {len(self.legs)} position(s): "
@@ -276,6 +282,8 @@ class EmaTrendFollower(BaseStrategy):
                 continue
             if self._in_cooldown(sym):
                 continue
+            if not self._oi_confirms(sym, meta):
+                continue
             sig = ema_crossover_direction(sym, resolution=self.ema_resolution,
                                           fast=self.ema_fast, slow=self.ema_slow)
             if sig['direction'] == 'BULLISH':
@@ -283,6 +291,22 @@ class EmaTrendFollower(BaseStrategy):
 
         self._persist_state()
         self._print_summary()
+
+    def _oi_confirms(self, symbol, meta):
+        """True if the coin's 6h open-interest change exceeds min_oi_change_pct.
+
+        Rising OI means new positions are being opened behind the move (genuine
+        buildup) rather than an unwind. Gate is active only when
+        min_oi_change_pct > 0; otherwise it always passes.
+        """
+        if not self.min_oi_change_pct or self.min_oi_change_pct <= 0:
+            return True
+        oi_pct = meta.get('oi_change_6h_pct', 0.0)
+        if oi_pct > self.min_oi_change_pct:
+            return True
+        print(f"[EMA Trend] Skip {symbol} — 6h OI change {oi_pct:+.2f}% "
+              f"<= {self.min_oi_change_pct:.1f}% threshold")
+        return False
 
     def _compute_lots(self, mark_price, contract_value):
         """Integer contracts to reach ~notional_usd, minimum 1."""

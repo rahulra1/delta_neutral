@@ -221,6 +221,7 @@ const EMA_TREND_FIELDS = [
   { key: 'ema_slow', label: 'Slow EMA', type: 'number', default: 50 },
   { key: 'ema_resolution', label: 'EMA Timeframe', type: 'text', default: '1d', hint: '1d = daily chart' },
   { key: 'refresh_interval', label: 'Rescan Interval (s)', type: 'number', default: 3600, hint: '3600 = hourly' },
+  { key: 'min_oi_change_pct', label: 'Min 6h OI Change (%)', type: 'number', step: '0.1', default: 10, hint: 'Only enter coins whose 6h open interest rose more than this %. 0 = off' },
 ];
 
 const DUAL_MOMENTUM_FIELDS = [
