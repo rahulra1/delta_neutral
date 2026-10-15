@@ -1,13 +1,13 @@
 """EMA Trend Follower — long-only momentum basket on Delta Exchange perpetuals.
 
-Universe : Top-N coins by 24h price change (perpetual futures), refreshed hourly.
-Signal   : 24h price-change ranking + 6h open-interest confirmation.
-Entry    : LONG the top-N 24h gainers and SHORT the top-N 24h losers, each only
-           when its 6h OI change is above min_oi_change_pct. ~$100 notional each
-           (integer lots). No EMA direction check.
-Exit     : A position is held until its side-aware TP or SL hits (TP/SL checked
-           continuously). Leaving the gainers/losers list does NOT close it.
-Holding  : Kept until TP/SL — even if the coin drops out of its side's top-N.
+Universe : Top-N perpetuals ranked by 6h open-interest change, refreshed hourly.
+Signal   : 6h OI change (ranking + filter) and 6h price-change direction.
+Entry    : From the top-N by 6h OI change, keep only those with 6h OI change
+           above min_oi_change_pct (>10%). For each, go LONG if its 6h price
+           change is positive, SHORT if negative. ~$100 notional each.
+Exit     : A position is held until its side-aware TP (+10%) or SL (-5%) hits.
+           After a TP/SL exit, the coin is blocked from re-entry for 24h.
+Holding  : Kept until TP/SL — list membership does not close it.
 Refresh  : Universe + signals re-evaluated every refresh_interval seconds (hourly).
 
 Modes    : dry_run=True  -> logs intended orders, no real trades (default).
@@ -28,7 +28,7 @@ import config
 from api.orders import place_order
 from api.pricing import get_futures_price
 from api.position_tracker import position_tracker
-from api.top_coins import get_top_coins_by_change
+from api.top_coins import get_top_coins_by_oi_change, get_price_change_6h
 from strategy.base import BaseStrategy
 
 logger = logging.getLogger(__name__)
@@ -127,9 +127,9 @@ class EmaTrendFollower(BaseStrategy):
     def initialize(self):
         self._running = True
         mode = 'DRY-RUN' if self.dry_run else 'LIVE'
-        print(f"[EMA Trend] Started [{mode}] | Universe: top {self.top_n} gainers (LONG) + top {self.top_n} losers (SHORT) by 24h change")
-        print(f"[EMA Trend] Signal: 24h price-change rank + OI confirm "
-              f"(no EMA) | ${self.notional_usd}/coin | "
+        print(f"[EMA Trend] Started [{mode}] | Universe: top {self.top_n} by 6h OI change")
+        print(f"[EMA Trend] Signal: 6h OI rank + OI>{self.min_oi_change_pct:.0f}% filter, "
+              f"direction by 6h price change | ${self.notional_usd}/coin | "
               f"Refresh {self.refresh_interval}s | Long/Short")
         print(f"[EMA Trend] Risk: TP +{self.tp_pct*100:.1f}% / SL -{self.sl_pct*100:.1f}% "
               f"| Re-entry cooldown {self.reentry_cooldown_hours}h "
@@ -256,43 +256,37 @@ class EmaTrendFollower(BaseStrategy):
     def evaluate_once(self):
         """One full pass: refresh universe, score signals, enter/exit."""
         ts = datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')
-        gainers = get_top_coins_by_change(limit=self.top_n, direction='gainers')
-        losers = get_top_coins_by_change(limit=self.top_n, direction='losers')
-        if not gainers and not losers:
-            logger.warning("[EMA Trend] Top-coin fetch empty — skipping cycle")
+        # Universe: top-N perpetuals ranked by 6h OI change (largest first).
+        universe = get_top_coins_by_oi_change(limit=self.top_n, direction='increase')
+        if not universe:
+            logger.warning("[EMA Trend] OI-change fetch empty — skipping cycle")
             self._consecutive_failures += 1
             return
         self._consecutive_failures = 0
-
-        gain_syms = {c['symbol']: c for c in gainers}
-        lose_syms = {c['symbol']: c for c in losers}
-        print(f"\n[EMA Trend] [{ts}] Universe: {len(gain_syms)} gainers (LONG) + "
-              f"{len(lose_syms)} losers (SHORT)")
+        print(f"\n[EMA Trend] [{ts}] Universe: top {len(universe)} by 6h OI change")
 
         # No list-rotation exit: an open position is held until its TP or SL
-        # hits (checked continuously in _risk_loop). Leaving the gainers/losers
-        # list does NOT close it.
+        # hits (checked continuously in _risk_loop).
 
-        # ENTRY pass — LONG top-N gainers, SHORT top-N losers; each confirmed
-        # by a 6h OI change above the threshold. No EMA direction check.
+        # ENTRY pass — for each top-OI coin passing the >threshold OI filter,
+        # go LONG if its 6h price change is positive, else SHORT.
         with self._legs_lock:
-            held_set = {(l['symbol'], l['side']) for l in self.legs}
-        for sym, meta in gain_syms.items():
-            if (sym, 'buy') in held_set:
+            held_syms = {l['symbol'] for l in self.legs}
+        for meta in universe:
+            sym = meta['symbol']
+            if sym in held_syms:
                 continue
             if self._in_cooldown(sym):
                 continue
             if not self._oi_confirms(sym, meta):
                 continue
-            self._enter(sym, meta.get('coin', ''), 'buy', meta)
-        for sym, meta in lose_syms.items():
-            if (sym, 'sell') in held_set:
+            price_chg_6h = get_price_change_6h(sym)
+            if price_chg_6h == 0.0:
+                print(f"[EMA Trend] Skip {sym} — no 6h price data")
                 continue
-            if self._in_cooldown(sym):
-                continue
-            if not self._oi_confirms(sym, meta):
-                continue
-            self._enter(sym, meta.get('coin', ''), 'sell', meta)
+            side = 'buy' if price_chg_6h > 0 else 'sell'
+            meta['price_change_6h'] = price_chg_6h
+            self._enter(sym, meta.get('coin', ''), side, meta)
 
         self._persist_state()
         self._print_summary()
@@ -338,7 +332,7 @@ class EmaTrendFollower(BaseStrategy):
 
         if self.dry_run:
             print(f"[EMA Trend] [DRY] {tag} {side.upper()} {symbol} x{lots} @ ~{mark_price:.6f} "
-                  f"(~${est_notional:.2f}) | 24h {meta.get('change_24h', 0):+.2f}% "
+                  f"(~${est_notional:.2f}) | 6h px {meta.get('price_change_6h', 0):+.2f}% "
                   f"OI6h {meta.get('oi_change_6h_pct', 0):+.2f}%")
             filled_price = mark_price
         else:

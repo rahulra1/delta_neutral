@@ -169,6 +169,76 @@ def get_candles(symbol, resolution='1h', lookback_bars=200):
         return []
 
 
+def get_top_coins_by_oi_change(limit=50, contract_type='perpetual_futures',
+                               direction='increase'):
+    """Fetch the top-N perpetuals ranked by 6h open-interest change.
+
+    Args:
+        limit: number of coins to return.
+        direction: 'increase' -> largest positive 6h OI change first (default),
+                   'abs'      -> largest absolute 6h OI change first.
+
+    Returns:
+        List of dicts sorted by 6h OI change, each with:
+        rank, symbol, coin, mark_price, change_24h, oi_value_usd,
+        oi_change_usd_6h, oi_change_6h_pct. [] on failure.
+    """
+    path = '/v2/tickers'
+    query_string = f'?contract_types={contract_type}'
+    headers = get_headers('GET', path, query_string)
+    try:
+        resp = requests.get(f'{config.BASE_URL}{path}{query_string}', headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get('success'):
+            logger.error("Tickers request unsuccessful: %s", data)
+            return []
+        coins = []
+        for t in data.get('result', []):
+            oi_usd = _f(t.get('oi_value_usd'))
+            oi_chg = _f(t.get('oi_change_usd_6h'))
+            prev_oi = oi_usd - oi_chg
+            oi_chg_pct = (oi_chg / prev_oi * 100) if prev_oi else 0.0
+            coins.append({
+                'symbol': t.get('symbol', ''),
+                'coin': t.get('underlying_asset_symbol', ''),
+                'mark_price': _f(t.get('mark_price')),
+                'change_24h': _f(t.get('mark_change_24h')),
+                'oi_value_usd': oi_usd,
+                'oi_change_usd_6h': oi_chg,
+                'oi_change_6h_pct': oi_chg_pct,
+            })
+        if direction == 'abs':
+            coins.sort(key=lambda c: abs(c['oi_change_6h_pct']), reverse=True)
+        else:
+            coins.sort(key=lambda c: c['oi_change_6h_pct'], reverse=True)
+        top = coins[:limit]
+        for i, c in enumerate(top, start=1):
+            c['rank'] = i
+        return top
+    except Exception as e:
+        logger.error("Error fetching top coins by OI change: %s", e)
+        return []
+
+
+def get_price_change_6h(symbol, resolution='1h'):
+    """Return the % price change over the last ~6 hours, computed from candles.
+
+    Delta's ticker board only exposes 24h price change, so the 6h move is
+    derived from 1h closes (latest close vs the close ~6 bars earlier).
+    Returns a float %; 0.0 if there isn't enough candle data.
+    """
+    candles = get_candles(symbol, resolution=resolution, lookback_bars=12)
+    closes = [_f(c.get('close')) for c in candles if c.get('close')]
+    if len(closes) < 7:
+        return 0.0
+    now_px = closes[-1]
+    past_px = closes[-7]   # 6 bars back ≈ 6 hours on the 1h resolution
+    if past_px <= 0:
+        return 0.0
+    return (now_px - past_px) / past_px * 100.0
+
+
 def ema_crossover_direction(symbol, resolution='1h', fast=20, slow=50):
     """Determine trend direction via a fast/slow EMA crossover.
 
