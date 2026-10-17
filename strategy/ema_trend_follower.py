@@ -28,7 +28,7 @@ import config
 from api.orders import place_order
 from api.pricing import get_futures_price
 from api.position_tracker import position_tracker
-from api.top_coins import get_top_coins_by_change
+from api.top_coins import get_top_coins_by_change, price_above_ema
 from strategy.base import BaseStrategy
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,12 @@ EMA_RESOLUTION = '1d'
 CHANGE_DIRECTION = 'gainers'     # rank universe by 24h price change: gainers/losers/abs
 REFRESH_INTERVAL = 3600          # hourly
 MONITOR_INTERVAL = 3600
+
+# BTC market-regime gate: longs only when BTC price > its 1H EMA200, shorts only
+# when below. Computed once per evaluate_once cycle.
+BTC_TREND_SYMBOL = 'BTCUSD'
+BTC_TREND_RESOLUTION = '1h'
+BTC_TREND_EMA_PERIOD = 200
 
 # Per-position risk exits and re-entry cooldown.
 TP_PCT = 0.10                    # +10% from entry -> take profit
@@ -273,26 +279,42 @@ class EmaTrendFollower(BaseStrategy):
         # hits (checked continuously in _risk_loop). Leaving the gainers/losers
         # list does NOT close it.
 
+        # BTC regime gate: compute once per cycle. Longs are only allowed when
+        # BTC price is ABOVE its 1H EMA200; shorts only when BELOW. If BTC data
+        # is unavailable we can't confirm the regime, so skip the entry pass.
+        btc_above = price_above_ema(BTC_TREND_SYMBOL, resolution=BTC_TREND_RESOLUTION,
+                                    period=BTC_TREND_EMA_PERIOD)
+        if btc_above is None:
+            logger.warning("[EMA Trend] BTC 1H EMA200 unavailable — skipping entry pass")
+            self._persist_state()
+            self._print_summary()
+            return
+        print(f"[EMA Trend] BTC {BTC_TREND_RESOLUTION} price is "
+              f"{'ABOVE' if btc_above else 'BELOW'} EMA{BTC_TREND_EMA_PERIOD} "
+              f"-> {'LONGS' if btc_above else 'SHORTS'} enabled this cycle")
+
         # ENTRY pass — LONG top-N gainers, SHORT top-N losers; each confirmed
-        # by a 6h OI change above the threshold. No EMA direction check.
+        # by a 6h OI change above the threshold, and gated by the BTC regime.
         with self._legs_lock:
             held_set = {(l['symbol'], l['side']) for l in self.legs}
-        for sym, meta in gain_syms.items():
-            if (sym, 'buy') in held_set:
-                continue
-            if self._in_cooldown(sym):
-                continue
-            if not self._oi_confirms(sym, meta):
-                continue
-            self._enter(sym, meta.get('coin', ''), 'buy', meta)
-        for sym, meta in lose_syms.items():
-            if (sym, 'sell') in held_set:
-                continue
-            if self._in_cooldown(sym):
-                continue
-            if not self._oi_confirms(sym, meta):
-                continue
-            self._enter(sym, meta.get('coin', ''), 'sell', meta)
+        if btc_above:
+            for sym, meta in gain_syms.items():
+                if (sym, 'buy') in held_set:
+                    continue
+                if self._in_cooldown(sym):
+                    continue
+                if not self._oi_confirms(sym, meta):
+                    continue
+                self._enter(sym, meta.get('coin', ''), 'buy', meta)
+        else:
+            for sym, meta in lose_syms.items():
+                if (sym, 'sell') in held_set:
+                    continue
+                if self._in_cooldown(sym):
+                    continue
+                if not self._oi_confirms(sym, meta):
+                    continue
+                self._enter(sym, meta.get('coin', ''), 'sell', meta)
 
         self._persist_state()
         self._print_summary()

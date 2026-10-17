@@ -169,6 +169,20 @@ def get_candles(symbol, resolution='1h', lookback_bars=200):
         return []
 
 
+def price_above_ema(symbol, resolution='1h', period=200):
+    """True if the latest close is above EMA(period) on `resolution` candles.
+
+    Returns True (price > EMA), False (price < EMA), or None when there aren't
+    enough candles to compute the EMA. Used as a trend/regime filter.
+    """
+    candles = get_candles(symbol, resolution=resolution, lookback_bars=period * 2)
+    closes = [_f(c.get('close')) for c in candles if _f(c.get('close')) > 0]
+    ema = _ema(closes, period)
+    if ema is None or not closes:
+        return None
+    return closes[-1] > ema
+
+
 def ema_crossover_direction(symbol, resolution='1h', fast=20, slow=50):
     """Determine trend direction via a fast/slow EMA crossover.
 
