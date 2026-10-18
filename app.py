@@ -3488,6 +3488,17 @@ def api_strategy_detail(sid):
             logs = ecs.get('log_history', [])
             entry['trade_log'] = strat.trade_log[-20:]
             entry['days_traded'] = strat.total_days_traded
+            entry['cumulative_pnl'] = round(strat.cumulative_pnl, 4)
+            # Surface the open legs so the dashboard "Legs" tab isn't empty while
+            # a spread is live (mirrors the EMA Spread V2 branch below).
+            for leg in strat.legs:
+                live_legs.append({'symbol': leg['symbol'], 'type': leg['type'], 'strike': leg['strike'],
+                    'side': leg['side'], 'size': leg['size'], 'entry_price': round(leg['entry_price'], 4),
+                    'current_mark': round(leg.get('current_mark', 0), 4),
+                    'current_pnl': round(leg.get('current_pnl', 0), 4),
+                    'delta': leg.get('delta', 0)})
+            if hasattr(strat, '_pnl_history') and strat._pnl_history:
+                pnl_history = list(strat._pnl_history[-500:])
         elif sid in ema_spread_v2_strategies and ema_spread_v2_strategies[sid].get('strategy'):
             ecs = ema_spread_v2_strategies[sid]
             strat = ecs['strategy']
