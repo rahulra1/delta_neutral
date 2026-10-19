@@ -6,10 +6,11 @@ Universe : At entry time, the top-N NSE gainers (by % change) and top-N losers.
 Entry    : Gainers -> BUY (long), Losers -> SELL (short), a fixed ₹ amount each.
            Share quantity is a whole number: qty = floor(amount / price). A stock
            whose single share costs more than the per-stock budget is skipped.
-Exit     : Per-position TP% / SL% on price (side-aware: a short profits when the
-           price falls). Checked every monitor_interval seconds.
-Square-off: Intraday only — every open position is force-closed at a configurable
-           exit time (default 15:15 IST) and hard EOD (15:30). Never held overnight.
+Exit     : Each position is HELD until its side-aware TP% / SL% hits (checked
+           every price_check_interval). Any position still open at the square-off
+           time (default 15:15 IST, hard EOD 15:30) is force-closed.
+Schedule : Universe re-scanned every refresh_interval (hourly). No re-entry
+           cooldown. New entries stop once past the square-off time for the day.
 Days     : Trades on configurable weekdays (default Mon–Fri).
 
 Modes    : dry_run=True  -> paper trading. No real orders; fills simulated at the
@@ -36,21 +37,28 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # Defaults
 TOP_N = 5
 AMOUNT_PER_STOCK = 10000.0      # ₹ invested per stock (whole shares)
-TP_PCT = 0.05                   # +5% in the trade's favour -> take profit
-SL_PCT = 0.03                   # -3% against the trade      -> stop loss
+TP_PCT = 0.10                   # +10% in the trade's favour -> take profit
+SL_PCT = 0.05                   # -5% against the trade      -> stop loss
 MIN_OI_CHANGE_PCT = 10.0        # only trade stocks whose OI change > +10%
 ENTRY_HOUR = 9
 ENTRY_MINUTE = 30
 EXIT_HOUR = 15
 EXIT_MINUTE = 15
-MONITOR_INTERVAL = 30           # seconds between TP/SL price checks
+MONITOR_INTERVAL = 30           # (legacy) kept for config compatibility
+REFRESH_INTERVAL = 3600         # hourly universe rescan (like EMA Trend)
+PRICE_CHECK_INTERVAL = 60       # seconds between TP/SL price checks
+REENTRY_COOLDOWN_HOURS = 24     # after a TP/SL exit, block re-entry this long
 MARKET_CLOSE_HOUR = 15
 MARKET_CLOSE_MINUTE = 30
 DEFAULT_TRADING_DAYS = [0, 1, 2, 3, 4]   # 0=Mon .. 4=Fri
 
 
 class NseDualMomentumStocks(BaseStrategy):
-    """Intraday long gainers / short losers basket on NSE stocks (paper or live)."""
+    """Long gainers / short losers basket on NSE stocks (paper or live).
+
+    Hourly rescan; positions held until TP/SL (no intraday square-off); 24h
+    re-entry cooldown after a TP/SL exit — mirroring EmaTrendFollower.
+    """
 
     def __init__(self, top_n=TOP_N, amount_per_stock=AMOUNT_PER_STOCK,
                  entry_hour=ENTRY_HOUR, entry_minute=ENTRY_MINUTE,
@@ -58,7 +66,9 @@ class NseDualMomentumStocks(BaseStrategy):
                  trading_days=None, dry_run=True,
                  tp_pct=TP_PCT, sl_pct=SL_PCT,
                  min_oi_change_pct=MIN_OI_CHANGE_PCT,
-                 monitor_interval=MONITOR_INTERVAL, run_immediately=False):
+                 monitor_interval=MONITOR_INTERVAL, run_immediately=False,
+                 refresh_interval=REFRESH_INTERVAL,
+                 price_check_interval=PRICE_CHECK_INTERVAL):
         self.top_n = top_n
         self.amount_per_stock = amount_per_stock
         self.tp_pct = tp_pct
@@ -69,10 +79,11 @@ class NseDualMomentumStocks(BaseStrategy):
         self.exit_hour = exit_hour
         self.exit_minute = exit_minute
         self.monitor_interval = monitor_interval
+        self.refresh_interval = refresh_interval
+        self.price_check_interval = price_check_interval
         self.trading_days = trading_days if trading_days is not None else DEFAULT_TRADING_DAYS
         self.dry_run = dry_run
-        # Testing: when True, the first monitor() iteration enters immediately,
-        # bypassing the entry-time wait and trading-day filter.
+        # Testing: when True, the first monitor() iteration enters immediately.
         self.run_immediately = run_immediately
 
         # Each leg (a position):
@@ -111,6 +122,8 @@ class NseDualMomentumStocks(BaseStrategy):
             'exit_hour': exit_hour,
             'exit_minute': exit_minute,
             'monitoring_interval': monitor_interval,
+            'refresh_interval': refresh_interval,
+            'price_check_interval': price_check_interval,
             'trading_days': self.trading_days,
             'dry_run': dry_run,
             'run_immediately': run_immediately,
@@ -131,9 +144,9 @@ class NseDualMomentumStocks(BaseStrategy):
               f"TP +{self.tp_pct*100:.1f}% / SL -{self.sl_pct*100:.1f}% (side-aware)")
         if self.min_oi_change_pct and self.min_oi_change_pct > 0:
             print(f"[NSE Dual Momentum] Entry filter: F&O OI change > +{self.min_oi_change_pct:.1f}%")
-        print(f"[NSE Dual Momentum] Entry {self.entry_hour}:{self.entry_minute:02d} | "
-              f"Square-off {self.exit_hour}:{self.exit_minute:02d} IST | Days: {days_str} | "
-              f"Monitor {self.monitor_interval}s"
+        print(f"[NSE Dual Momentum] Hold until TP/SL, else square-off at "
+              f"{self.exit_hour}:{self.exit_minute:02d} IST | Rescan {self.refresh_interval}s | "
+              f"Price check {self.price_check_interval}s | Days: {days_str}"
               + ("  | RUN-NOW (test)" if self.run_immediately else ""))
         with self._legs_lock:
             if self.legs:
@@ -147,53 +160,60 @@ class NseDualMomentumStocks(BaseStrategy):
             set_thread_credentials(self._api_key, self._api_secret, self._broker)
 
     def monitor(self):
-        """Main loop: each trading day, wait for entry time, open the basket,
-        monitor TP/SL until the square-off time, close everything, repeat."""
+        """Hourly rescan loop + a background risk thread for TP/SL (mirrors
+        EmaTrendFollower). Positions are held until TP/SL — no square-off."""
         self._apply_thread_context()
+        risk_thread = threading.Thread(target=self._risk_loop, daemon=True)
+        risk_thread.start()
         first = True
         while self._running:
-            # Testing shortcut: on the very first pass, if run_immediately is set,
-            # enter right now regardless of clock/weekday. Normal scheduling after.
-            if first and self.run_immediately:
-                first = False
-                print("[NSE Dual Momentum] run_immediately — entering now (test mode)")
-                self._entered_today_slot = datetime.now(IST).strftime('%Y-%m-%d')
-                self.total_days_traded += 1
-                try:
-                    self._run_day()
-                except Exception as e:
-                    logger.error("[NSE Dual Momentum] Day run failed: %s", e)
-                continue
+            try:
+                if first and self.run_immediately:
+                    print("[NSE Dual Momentum] run_immediately — scanning now (test mode)")
+                self._evaluate_once()
+            except Exception as e:
+                logger.error("[NSE Dual Momentum] Evaluation cycle failed: %s", e)
             first = False
-            self._wait_for_next_entry()
+            self._interruptible_sleep(self.refresh_interval)
+
+    def _risk_loop(self):
+        """Fast loop: check held positions against side-aware TP/SL. If a
+        position hasn't hit TP/SL by the 15:15 square-off time, force-close it."""
+        self._apply_thread_context()
+        while self._running:
+            self._interruptible_sleep(self.price_check_interval)
             if not self._running:
                 break
-            now = datetime.now(IST)
-            if now.weekday() not in self.trading_days:
-                print(f"[NSE Dual Momentum] Skipping {now.strftime('%A')} — not a trading day")
-                continue
-            slot = now.strftime('%Y-%m-%d')
-            if slot == self._entered_today_slot:
-                # Already traded today (e.g. resumed after entry) — just wait.
-                self._interruptible_sleep(self.monitor_interval)
-                continue
-            self._entered_today_slot = slot
-            self.total_days_traded += 1
             try:
-                self._run_day()
+                if self._past_squareoff(datetime.now(IST)):
+                    with self._legs_lock:
+                        any_open = any(not l.get('stopped') for l in self.legs)
+                    if any_open:
+                        print(f"[NSE Dual Momentum] ⏰ 15:15 square-off — closing open positions")
+                        self._close_all_open(reason='square_off')
+                else:
+                    self._check_tp_sl('[risk]')
             except Exception as e:
-                logger.error("[NSE Dual Momentum] Day run failed: %s", e)
+                logger.error("[NSE Dual Momentum] Risk check failed: %s", e)
 
-    def _run_day(self):
-        """Open the basket at entry time, then monitor until square-off."""
-        ts = datetime.now(IST).strftime('%Y-%m-%d %H:%M')
+    def _evaluate_once(self):
+        """One rescan: fetch gainers/losers, enter new positions (OI-confirmed,
+        not already held, not in cooldown). Held positions exit only via TP/SL."""
+        now = datetime.now(IST)
+        if now.weekday() not in self.trading_days:
+            return
+        # Don't open new positions at/after square-off time (they'd just be
+        # closed again); entries only during the trading session before 15:15.
+        if self._past_squareoff(now):
+            return
+        ts = now.strftime('%Y-%m-%d %H:%M')
         tag = f"[NSE DM {ts}]"
         gainers = get_nse_top_movers('gainers', limit=self.top_n)
         losers = get_nse_top_movers('losers', limit=self.top_n)
         if not gainers and not losers:
-            print(f"{tag} No movers data — skipping day")
+            print(f"{tag} No movers data — skipping cycle")
             return
-        print(f"\n{tag} Entry | gainers={len(gainers)} losers={len(losers)}")
+        print(f"\n{tag} Scan | gainers={len(gainers)} losers={len(losers)}")
         # OI-change gate: only trade a stock whose F&O open interest rose more
         # than min_oi_change_pct (fresh positioning confirming the move).
         oi_changes = {}
@@ -212,8 +232,6 @@ class NseDualMomentumStocks(BaseStrategy):
                 self._enter(m['symbol'], 'sell', m.get('ltp'), m.get('change_pct'))
         self._persist_state()
         self._print_summary()
-        # Monitor until the square-off time or until the day/strategy ends.
-        self._monitor_until_squareoff(tag)
 
     def _oi_confirms(self, symbol, oi_changes, tag=''):
         """True if the stock's OI change exceeds min_oi_change_pct.
@@ -234,28 +252,8 @@ class NseDualMomentumStocks(BaseStrategy):
               f"{self.min_oi_change_pct:.1f}% threshold")
         return False
 
-    def _monitor_until_squareoff(self, tag):
-        while self._running:
-            now = datetime.now(IST)
-            # Hard EOD or configured square-off -> close everything, end the day.
-            if self._past_squareoff(now):
-                print(f"{tag} ⏰ Square-off — closing all open positions")
-                self._close_all_open(reason='square_off')
-                break
-            try:
-                self._check_tp_sl(tag)
-            except Exception as e:
-                logger.error("[NSE Dual Momentum] TP/SL check failed: %s", e)
-            with self._legs_lock:
-                any_open = any(not l.get('stopped') for l in self.legs)
-            if not any_open:
-                print(f"{tag} All positions closed (TP/SL) — day done")
-                break
-            self._interruptible_sleep(self.monitor_interval)
-        # Day summary
-        self._persist_state()
-
     def _past_squareoff(self, now):
+        """True at/after the configured exit time (default 15:15) or hard EOD 15:30."""
         if now.hour > self.exit_hour or (now.hour == self.exit_hour and now.minute >= self.exit_minute):
             return True
         if now.hour > MARKET_CLOSE_HOUR or (now.hour == MARKET_CLOSE_HOUR and now.minute >= MARKET_CLOSE_MINUTE):
