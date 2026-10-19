@@ -74,7 +74,7 @@ class NseEmaCreditSpread(BaseStrategy):
                  monitor_interval=DEFAULT_MONITOR_INTERVAL,
                  entry_hour=DEFAULT_ENTRY_HOUR, entry_minute=DEFAULT_ENTRY_MINUTE,
                  exit_hour=DEFAULT_EXIT_HOUR, exit_minute=DEFAULT_EXIT_MINUTE,
-                 trading_days=None, lot_size=None):
+                 trading_days=None, lot_size=None, delta_tolerance=0.10):
         self.symbol = symbol
         self.lots = lots
         self.lot_size = lot_size if lot_size else NSE_LOT_SIZES.get(symbol, 50)
@@ -90,6 +90,10 @@ class NseEmaCreditSpread(BaseStrategy):
         self.exit_hour = exit_hour
         self.exit_minute = exit_minute
         self.trading_days = trading_days if trading_days is not None else DEFAULT_TRADING_DAYS
+        # Delta-match tolerance passed to the shared strike selector. The selector
+        # still RETURNS the best-scored strike regardless; this only controls when
+        # it logs a "selected" vs "outside tolerance" warning.
+        self.delta_tolerance = delta_tolerance
 
         # State
         self._running = False
@@ -121,6 +125,7 @@ class NseEmaCreditSpread(BaseStrategy):
             'entry_hour': entry_hour, 'entry_minute': entry_minute,
             'exit_hour': exit_hour, 'exit_minute': exit_minute,
             'trading_days': self.trading_days,
+            'delta_tolerance': self.delta_tolerance,
         }
 
     def initialize(self):
@@ -315,42 +320,51 @@ class NseEmaCreditSpread(BaseStrategy):
         return day_legs, premium, direction
 
     def _find_by_delta(self, chain, spot, opt_type, target_delta):
-        """Find an OTM option closest to target delta from the option chain."""
-        candidates = []
+        """Find the best OTM option near target_delta from the option chain.
 
-        for row in chain:
-            strike = float(row['strike'])
-            opt = row.get(opt_type)
-            if not opt or opt.get('mark_price', 0) <= 0:
-                continue
+        Delegates to the shared api.delta_finder.find_target_delta_options — the
+        single source of truth for delta-based strike selection across the app.
+        That selector applies, in order:
+          - a delta-range pre-filter (0.25x–2.5x the target delta),
+          - a hard liquidity gate dropping strikes with OI==0 AND volume==0
+            (Groww prices every strike off last-traded-price, so an untraded
+            far-OTM strike reports a stale ltp that only *looks* tradeable),
+            with a soft fallback to the unfiltered set if that empties the pool,
+          - a min-max weighted score: delta-closeness 0.80 + volume 0.10 + OI 0.10,
+          - a tolerance check that logs when the best match is off-target.
+        It understands the Groww list-of-rows chain format directly.
 
-            delta = opt.get('delta', 0)
-            if delta == 0:
-                continue
+        Returns a leg dict in THIS strategy's shape (keys: symbol, trading_symbol,
+        strike, mark_price, delta), or None when no suitable strike is found.
+        """
+        from api.delta_finder import find_target_delta_options
 
-            # OTM filter
-            if opt_type == 'call' and strike <= spot:
-                continue
-            if opt_type == 'put' and strike >= spot:
-                continue
-            if opt_type == 'call' and delta <= 0:
-                continue
-            if opt_type == 'put' and delta >= 0:
-                continue
-
-            candidates.append({
-                'symbol': opt.get('symbol', ''),
-                'trading_symbol': opt.get('trading_symbol', ''),
-                'strike': row['strike'],
-                'mark_price': opt['mark_price'],
-                'delta': delta,
-            })
-
-        if not candidates:
+        best_call, best_put = find_target_delta_options(
+            chain, target_delta, tolerance=self.delta_tolerance)
+        best = best_call if opt_type == 'call' else best_put
+        if not best:
             return None
 
-        candidates.sort(key=lambda x: abs(abs(x['delta']) - target_delta))
-        return candidates[0]
+        # Normalize the shared selector's result into this strategy's leg shape.
+        # delta_finder returns 'strike_price' (as a float) and folds trading_symbol
+        # into 'symbol'; the strategy expects 'strike' (string, matching the chain
+        # rows' format) plus a separate 'trading_symbol'. Render an integer-valued
+        # strike WITHOUT a trailing '.0' so _get_price_from_chain's string match
+        # against row['strike'] still works during monitoring.
+        tsym = best.get('symbol', '')
+        sp = best.get('strike_price', '')
+        try:
+            spf = float(sp)
+            strike_str = str(int(spf)) if spf == int(spf) else str(spf)
+        except (TypeError, ValueError):
+            strike_str = str(sp)
+        return {
+            'symbol': tsym,
+            'trading_symbol': best.get('trading_symbol', tsym),
+            'strike': strike_str,
+            'mark_price': best.get('mark_price', 0),
+            'delta': best.get('delta', 0),
+        }
 
     def _place_spread_orders(self, sell_opt, buy_opt, tag):
         """Place live orders via Groww for the spread.
