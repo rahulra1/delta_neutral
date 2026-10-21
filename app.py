@@ -53,6 +53,7 @@ portfolio_strangle_strategies = {}
 hybrid_strategies = {}
 weekly_dn_strategies = {}
 ema_spread_strategies = {}
+ema_spread_scheduled_strategies = {}
 ema_spread_v2_strategies = {}
 ema_trend_strategies = {}
 dual_momentum_strategies = {}
@@ -148,14 +149,14 @@ def _resume_db_strategies():
 
         if not legs:
             # Daily-recurring strategies don't need legs to resume — they open trades on schedule
-            if source not in ('EMA Spread', 'EMA Spread V2', 'EMA Trend', 'Dual Momentum', 'OI Strategy', 'Daily Strangle', 'Weekly DN',
+            if source not in ('EMA Spread', 'EMA Spread Scheduled', 'EMA Spread V2', 'EMA Trend', 'Dual Momentum', 'OI Strategy', 'Daily Strangle', 'Weekly DN',
                               'Portfolio Strangle', 'Hybrid Switch', 'Pivot SuperTrend',
                               'NSE Strangle', 'NSE Delta Neutral', 'NSE EMA Spread', 'NSE Dual Momentum'):
                 continue
 
         # Skip strategies where all legs have no product_id (invalid/empty data)
         valid_legs = [l for l in legs if l.get('product_id')]
-        if not valid_legs and source not in ('EMA Spread', 'EMA Spread V2', 'EMA Trend', 'Dual Momentum', 'OI Strategy', 'Daily Strangle',
+        if not valid_legs and source not in ('EMA Spread', 'EMA Spread Scheduled', 'EMA Spread V2', 'EMA Trend', 'Dual Momentum', 'OI Strategy', 'Daily Strangle',
                                               'Weekly DN', 'Portfolio Strangle', 'Hybrid Switch',
                                               'Pivot SuperTrend', 'NSE Strangle',
                                               'NSE Delta Neutral', 'NSE EMA Spread', 'NSE Dual Momentum'):
@@ -772,6 +773,78 @@ def _resume_db_strategies():
             entry['thread'] = t
             t.start()
             logger.info(f"[resume] Resumed EMA Spread {sid}")
+
+        # 9-sched. Restore EMA Credit Spread Scheduled (selected-weekday variant)
+        elif source == 'EMA Spread Scheduled':
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
+                     'log_history': [], 'running': False, 'params': details,
+                     'user_id': user_id, 'profile_id': profile_id}
+            ema_spread_scheduled_strategies[sid] = entry
+
+            def _resume_ecss(sid=sid, entry=entry, details=details, user_id=user_id, legs=legs):
+                # Retry setup up to 5 times with backoff — handles transient API failures on restart
+                for attempt in range(5):
+                    if _setup_strategy_thread(entry):
+                        break
+                    logger.warning(f"[resume] EMA Spread Scheduled {sid} — setup failed (attempt {attempt+1}/5), retrying in 30s")
+                    entry['running'] = False
+                    time.sleep(30)
+                else:
+                    logger.error(f"[resume] EMA Spread Scheduled {sid} — setup failed after 5 attempts, will retry on next restart")
+                    return
+                try:
+                    from strategy.ema_credit_spread_scheduled import EMACreditSpreadScheduled
+                    _td = details.get('trading_days', [0, 1, 2, 3, 4])
+                    if isinstance(_td, str):
+                        _td = [int(x) for x in _td.split(',') if x.strip() != '']
+                    s = EMACreditSpreadScheduled(
+                        asset=details.get('asset', 'BTC'),
+                        lot_size=int(details.get('lot_size', 100)),
+                        sell_delta=float(details.get('sell_delta', 0.20)),
+                        buy_delta=float(details.get('buy_delta', 0.10)),
+                        ema_period=int(details.get('ema_period', 14)),
+                        tp_pct=float(details.get('tp_pct', 90)) / 100,
+                        sl_pct=float(details.get('sl_pct', 100)) / 100,
+                        monitor_interval=int(details.get('monitoring_interval', 5)),
+                        entry_hour=int(details.get('entry_hour', 18)),
+                        entry_minute=int(details.get('entry_minute', 30)),
+                        min_expiry_days=int(details.get('min_expiry_days', 8)),
+                        trading_days=_td,
+                    )
+                    entry['strategy'] = s
+                    s._log_queue = entry['log_queue']
+                    s._log_history = entry['log_history']
+                    s._sid = sid
+                    s._user_id = user_id
+                    import config as _cfg
+                    s._api_key = _cfg.get_api_key()
+                    s._api_secret = _cfg.get_api_secret()
+                    s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
+                    entry['running'] = True
+                    s.restore_state(details=details, legs=legs)
+                    s.initialize()
+                    if s.trade_log:
+                        print(f"[EMA Spread Scheduled] Restored {len(s.trade_log)} days | Cum PnL: ${s.cumulative_pnl:+.4f}")
+                    s.monitor()
+                except Exception as e:
+                    logger.error(f"[resume] EMA Spread Scheduled {sid} error: {e}")
+                finally:
+                    strategy = entry.get('strategy')
+                    if strategy and not strategy._running:
+                        pnl = round(getattr(strategy, 'cumulative_pnl', 0), 4)
+                        record_end(sid, pnl, 0)
+                        update_tracked(sid, status='completed', pnl=round(pnl, 2),
+                                       exit_reason='intentional_close')
+                    elif not strategy:
+                        logger.warning(f"[resume] EMA Spread Scheduled {sid} — thread exited without strategy object, keeping status 'running'")
+                    else:
+                        logger.warning(f"[resume] EMA Spread Scheduled {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
+                    _teardown_strategy_thread(entry)
+
+            t = threading.Thread(target=_resume_ecss, daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed EMA Spread Scheduled {sid}")
 
         # 9a. Restore EMA Credit Spread V2 (two-tier TP1/TP2/SL1/SL2)
         elif source == 'EMA Spread V2':
@@ -2340,6 +2413,15 @@ def dashboard_live_pnl():
                             total_live_pnl += pnl
                             active_pnls.append({'sid': sid, 'name': 'EMA Spread', 'pnl': pnl})
 
+                    for sid, e in ema_spread_scheduled_strategies.items():
+                        if e.get('user_id') != uid or not e.get('running'):
+                            continue
+                        s = e.get('strategy')
+                        if s:
+                            pnl = round(s.pnl, 4)
+                            total_live_pnl += pnl
+                            active_pnls.append({'sid': sid, 'name': 'EMA Spread Scheduled', 'pnl': pnl})
+
                     for sid, e in ema_spread_v2_strategies.items():
                         if e.get('user_id') != uid or not e.get('running'):
                             continue
@@ -2560,6 +2642,11 @@ def api_dashboard():
                     s = ema_spread_strategies[sid]['strategy']
                     t['pnl'] = round(s.pnl, 4)
                     t['cumulative_pnl'] = round(s.cumulative_pnl, 4)
+                # Check EMA Spread Scheduled
+                elif sid in ema_spread_scheduled_strategies and ema_spread_scheduled_strategies[sid].get('strategy'):
+                    s = ema_spread_scheduled_strategies[sid]['strategy']
+                    t['pnl'] = round(s.pnl, 4)
+                    t['cumulative_pnl'] = round(s.cumulative_pnl, 4)
                 # Check EMA Spread V2
                 elif sid in ema_spread_v2_strategies and ema_spread_v2_strategies[sid].get('strategy'):
                     s = ema_spread_v2_strategies[sid]['strategy']
@@ -2628,6 +2715,7 @@ def api_dashboard():
         running_count += sum(1 for sid, e in oi_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in weekly_dn_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in ema_spread_strategies.items() if e.get('user_id') == uid and e.get('running'))
+        running_count += sum(1 for sid, e in ema_spread_scheduled_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in ema_spread_v2_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in ema_trend_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in dual_momentum_strategies.items() if e.get('user_id') == uid and e.get('running'))
@@ -2770,6 +2858,12 @@ def api_all_strategies():
                         continue
                 elif sid in ema_spread_strategies and ema_spread_strategies[sid].get('strategy'):
                     s = ema_spread_strategies[sid]['strategy']
+                    entry['pnl'] = round(s.pnl, 4)
+                    if not s._running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.pnl, 4))
+                elif sid in ema_spread_scheduled_strategies and ema_spread_scheduled_strategies[sid].get('strategy'):
+                    s = ema_spread_scheduled_strategies[sid]['strategy']
                     entry['pnl'] = round(s.pnl, 4)
                     if not s._running:
                         entry['status'] = 'completed'
@@ -3015,6 +3109,8 @@ def api_close_strategy(sid):
             profile_id = weekly_dn_strategies[sid].get('profile_id')
         elif sid in ema_spread_strategies:
             profile_id = ema_spread_strategies[sid].get('profile_id')
+        elif sid in ema_spread_scheduled_strategies:
+            profile_id = ema_spread_scheduled_strategies[sid].get('profile_id')
         elif sid in ema_spread_v2_strategies:
             profile_id = ema_spread_v2_strategies[sid].get('profile_id')
         elif sid in ema_trend_strategies:
@@ -3089,6 +3185,15 @@ def api_close_strategy(sid):
                 ecs['strategy'].close_all()
             except Exception as e:
                 logger.error(f"[close] EMA Spread {sid} close_all error: {e}")
+        closed = True
+    # EMA Spread Scheduled
+    if not closed and sid in ema_spread_scheduled_strategies:
+        ecs = ema_spread_scheduled_strategies[sid]
+        if ecs.get('strategy'):
+            try:
+                ecs['strategy'].close_all()
+            except Exception as e:
+                logger.error(f"[close] EMA Spread Scheduled {sid} close_all error: {e}")
         closed = True
     # EMA Spread V2
     if not closed and sid in ema_spread_v2_strategies:
@@ -3266,6 +3371,8 @@ def api_close_all_strategies():
                 profile_id = weekly_dn_strategies[sid].get('profile_id')
             elif sid in ema_spread_strategies:
                 profile_id = ema_spread_strategies[sid].get('profile_id')
+            elif sid in ema_spread_scheduled_strategies:
+                profile_id = ema_spread_scheduled_strategies[sid].get('profile_id')
             elif sid in ema_spread_v2_strategies:
                 profile_id = ema_spread_v2_strategies[sid].get('profile_id')
             elif sid in ema_trend_strategies:
@@ -3322,6 +3429,11 @@ def api_close_all_strategies():
             closed = True
         if not closed and sid in ema_spread_strategies:
             ecs = ema_spread_strategies[sid]
+            if ecs.get('strategy'):
+                ecs['strategy'].close_all()
+            closed = True
+        if not closed and sid in ema_spread_scheduled_strategies:
+            ecs = ema_spread_scheduled_strategies[sid]
             if ecs.get('strategy'):
                 ecs['strategy'].close_all()
             closed = True
@@ -3483,6 +3595,25 @@ def api_strategy_detail(sid):
             logs = wdn.get('log_history', [])
         elif sid in ema_spread_strategies and ema_spread_strategies[sid].get('strategy'):
             ecs = ema_spread_strategies[sid]
+            strat = ecs['strategy']
+            entry['pnl'] = round(strat.pnl, 4)
+            entry['running'] = ecs.get('running', False)
+            logs = ecs.get('log_history', [])
+            entry['trade_log'] = strat.trade_log[-20:]
+            entry['days_traded'] = strat.total_days_traded
+            entry['cumulative_pnl'] = round(strat.cumulative_pnl, 4)
+            # Surface the open legs so the dashboard "Legs" tab isn't empty while
+            # a spread is live (mirrors the EMA Spread V2 branch below).
+            for leg in strat.legs:
+                live_legs.append({'symbol': leg['symbol'], 'type': leg['type'], 'strike': leg['strike'],
+                    'side': leg['side'], 'size': leg['size'], 'entry_price': round(leg['entry_price'], 4),
+                    'current_mark': round(leg.get('current_mark', 0), 4),
+                    'current_pnl': round(leg.get('current_pnl', 0), 4),
+                    'delta': leg.get('delta', 0)})
+            if hasattr(strat, '_pnl_history') and strat._pnl_history:
+                pnl_history = list(strat._pnl_history[-500:])
+        elif sid in ema_spread_scheduled_strategies and ema_spread_scheduled_strategies[sid].get('strategy'):
+            ecs = ema_spread_scheduled_strategies[sid]
             strat = ecs['strategy']
             entry['pnl'] = round(strat.pnl, 4)
             entry['running'] = ecs.get('running', False)
@@ -4116,6 +4247,8 @@ def api_pnl_series():
                 t['pnl'] = round(portfolio_strangle_strategies[sid]['strategy'].pnl, 4)
             elif sid in ema_spread_strategies and ema_spread_strategies[sid].get('strategy'):
                 t['pnl'] = round(ema_spread_strategies[sid]['strategy'].pnl, 4)
+            elif sid in ema_spread_scheduled_strategies and ema_spread_scheduled_strategies[sid].get('strategy'):
+                t['pnl'] = round(ema_spread_scheduled_strategies[sid]['strategy'].pnl, 4)
             elif sid in ema_spread_v2_strategies and ema_spread_v2_strategies[sid].get('strategy'):
                 t['pnl'] = round(ema_spread_v2_strategies[sid]['strategy'].pnl, 4)
             elif sid in ema_trend_strategies and ema_trend_strategies[sid].get('strategy'):
@@ -6423,6 +6556,188 @@ def ema_spread_status(sid):
     )
 
 
+# ── EMA Credit Spread Scheduled Strategy Routes (selected-weekday variant) ──
+
+
+def run_ema_spread_scheduled(sid, params):
+    entry = ema_spread_scheduled_strategies[sid]
+    uid = entry['user_id']
+    if not _setup_strategy_thread(entry):
+        entry['log_queue'].put("__STOPPED__")
+        return
+
+    try:
+        from strategy.ema_credit_spread_scheduled import EMACreditSpreadScheduled
+        _td = params.get('trading_days', [0, 1, 2, 3, 4])
+        if isinstance(_td, str):
+            _td = [int(x) for x in _td.split(',') if x.strip() != '']
+        print(f"[EMA Spread Scheduled] Params received: entry_hour={params.get('entry_hour')}, entry_minute={params.get('entry_minute')}, trading_days={_td}")
+        s = EMACreditSpreadScheduled(
+            asset=params.get('asset', 'BTC'),
+            lot_size=int(params.get('lot_size', 100)),
+            sell_delta=float(params.get('sell_delta', 0.20)),
+            buy_delta=float(params.get('buy_delta', 0.10)),
+            ema_period=int(params.get('ema_period', 14)),
+            tp_pct=float(params.get('tp_pct', 90)) / 100,
+            sl_pct=float(params.get('sl_pct', 100)) / 100,
+            monitor_interval=int(params.get('monitoring_interval', 5)),
+            entry_hour=int(params.get('entry_hour', 18)),
+            entry_minute=int(params.get('entry_minute', 30)),
+            min_expiry_days=int(params.get('min_expiry_days', 8)),
+            trading_days=_td,
+        )
+        s._log_queue = entry['log_queue']
+        s._log_history = entry['log_history']
+        s._sid = sid
+        s._user_id = uid
+        import config as _cfg
+        s._api_key = _cfg.get_api_key()
+        s._api_secret = _cfg.get_api_secret()
+        s._broker = getattr(_cfg._thread_local, 'broker', 'demo')
+        entry['strategy'] = s
+        entry['running'] = True
+        record_start(sid, params, user_id=uid)
+        if not s.initialize():
+            entry['log_queue'].put("✗ Init failed")
+            entry['running'] = False
+            entry['log_queue'].put("__STOPPED__")
+            return
+
+        # Wrap sleep for PnL snapshots
+        import strategy.ema_credit_spread_scheduled as _ess_mod
+        _orig_sleep = _ess_mod.time.sleep
+        _tick = [0]
+        def _snap_sleep(secs):
+            _orig_sleep(secs)
+            _tick[0] += 1
+            if _tick[0] % 6 == 0:
+                try:
+                    save_pnl_snapshot(uid, sid, round(s.pnl, 4))
+                    update_strategy_db(sid, pnl=round(s.pnl, 4), legs=s.legs,
+                        details={**params, 'profile_id': entry.get('profile_id'),
+                                 'cumulative_pnl': s.cumulative_pnl,
+                                 'total_days_traded': s.total_days_traded,
+                                 'trading_days': _td,
+                                 'trade_log': s.trade_log[-50:]})
+                except Exception:
+                    pass
+        _ess_mod.time.sleep = _snap_sleep
+        try:
+            s.monitor()
+        finally:
+            _ess_mod.time.sleep = _orig_sleep
+    except Exception as e:
+        entry['log_queue'].put(f"❌ Error: {e}")
+    finally:
+        strategy = entry.get('strategy')
+        if strategy and not strategy._running:
+            pnl = round(strategy.cumulative_pnl, 4)
+            record_end(sid, pnl, getattr(strategy, 'total_days_traded', 0))
+            update_tracked(sid, status='completed', pnl=round(pnl, 2),
+                           exit_reason='intentional_close')
+        elif not strategy:
+            logger.warning(f"[deploy] EMA Spread Scheduled {sid} — thread exited without strategy object, keeping status 'running'")
+        else:
+            logger.warning(f"[deploy] EMA Spread Scheduled {sid} — thread exited unexpectedly, keeping status 'running' for re-resume")
+        _teardown_strategy_thread(entry)
+
+
+@app.route('/api/ema-spread-scheduled/start', methods=['POST'])
+@login_required
+def ema_spread_scheduled_start():
+    params = request.json
+    profile_id = params.pop('profile_id', None)
+    api_key, api_secret, _, broker = get_profile_creds(profile_id)
+    if not api_key:
+        return jsonify(error="No API profile selected"), 400
+    sid = str(uuid.uuid4())[:8]
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
+             'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    ema_spread_scheduled_strategies[sid] = entry
+    track_strategy(sid, 'EMA Spread Scheduled', f"{params.get('asset','BTC')} EMA Spread (Scheduled)", current_user_id(), details={**params, 'profile_id': profile_id})
+    entry['thread'] = threading.Thread(target=run_ema_spread_scheduled, args=(sid, params), daemon=True)
+    entry['thread'].start()
+    return jsonify(status="started", sid=sid)
+
+
+@app.route('/api/ema-spread-scheduled/stop', methods=['POST'])
+@login_required
+def ema_spread_scheduled_stop():
+    sid = request.json.get('sid')
+    e = ema_spread_scheduled_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error="Not found"), 404
+    if e.get('strategy'):
+        try:
+            from config import set_thread_credentials
+            profile_id = e.get('profile_id')
+            if profile_id:
+                api_key, api_secret, _, broker = get_profile_creds(profile_id)
+                if api_key:
+                    set_thread_credentials(api_key, api_secret, broker)
+            e['strategy'].close_all()
+        except Exception as ex:
+            logger.error(f"[ema_spread_scheduled_stop] {sid} error: {ex}")
+    return jsonify(status="stopping")
+
+
+@app.route('/api/ema-spread-scheduled/stream/<sid>')
+@login_required
+def ema_spread_scheduled_stream(sid):
+    e = ema_spread_scheduled_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
+    q = e['log_queue']
+    def generate():
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                if msg == "__STOPPED__":
+                    yield f"event: stopped\ndata: done\n\n"
+                    break
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield f": heartbeat\n\n"
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/ema-spread-scheduled/status/<sid>')
+@login_required
+def ema_spread_scheduled_status(sid):
+    e = ema_spread_scheduled_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(running=False)
+    s = e.get('strategy')
+    if not e['running'] or not s:
+        return jsonify(running=False)
+    pnl_pct = (s._pnl / s.net_premium * 100) if s.net_premium > 0 else 0
+    profile_id = e.get('profile_id')
+    uid = e.get('user_id')
+    enriched_legs = []
+    for l in s.legs:
+        mark, pnl = _enrich_leg(l, getattr(s, 'asset', 'BTC'), profile_id=profile_id, user_id=uid)
+        enriched_legs.append({
+            'symbol': l['symbol'], 'strike': l['strike'], 'type': l['type'],
+            'side': l['side'], 'delta': l['delta'], 'size': l['size'],
+            'entry_price': round(l['entry_price'], 4),
+            'mark_price': mark, 'pnl': pnl,
+            'product_id': l.get('product_id'),
+        })
+    return jsonify(
+        running=True,
+        cumulative_pnl=round(s.cumulative_pnl, 4),
+        today_pnl=round(s._pnl, 4),
+        session_pnl=round(s._pnl, 4),
+        net_premium=round(s.net_premium, 4),
+        pnl_pct=round(pnl_pct, 1),
+        days_traded=s.total_days_traded,
+        entry_time=f"{s.entry_hour}:{s.entry_minute:02d}",
+        trade_log=s.trade_log[-10:],
+        legs=enriched_legs,
+    )
+
+
 # ── EMA Credit Spread V2 Strategy Routes (two-tier TP1/TP2/SL1/SL2) ──
 
 
@@ -7646,7 +7961,7 @@ def api_tracker_logs(sid):
         pnl = round(strat.total_pnl, 2) if strat else 0
         return jsonify(sid=sid, logs=logs[-last:], running=e.get('running', False), pnl=pnl, status='running' if e.get('running') else 'completed')
     # Check new strategy dicts
-    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, nse_dual_momentum_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies):
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_scheduled_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, nse_dual_momentum_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies):
         e = dct.get(sid)
         if e and e.get('user_id') == current_user_id():
             logs = list(e.get('log_history', []))
@@ -7684,7 +7999,7 @@ def api_tracker_close(sid):
         e['strategy'].close_all_positions()
         return jsonify(status='closed')
     # New strategy dicts
-    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, nse_dual_momentum_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies):
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_scheduled_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, nse_dual_momentum_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies):
         e = dct.get(sid)
         if e and e.get('user_id') == current_user_id() and e.get('strategy'):
             e['strategy'].close_all()

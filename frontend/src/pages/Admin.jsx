@@ -10,6 +10,7 @@ const ALL_STRATEGIES = [
   { key: 'oi_strategy', label: 'OI Strategy' },
   { key: 'weekly_dn', label: 'Weekly Delta Neutral' },
   { key: 'ema_spread', label: 'EMA Credit Spread' },
+  { key: 'ema_spread_scheduled', label: 'EMA Spread (Scheduled)' },
   { key: 'ema_spread_v2', label: 'EMA Credit Spread V2' },
   { key: 'ema_trend', label: 'EMA Trend Follower' },
   { key: 'dual_momentum', label: 'Dual Momentum Basket' },
