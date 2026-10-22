@@ -62,8 +62,13 @@ class BuilderScheduler:
         self.entry_hour, self.entry_minute = _parse_hhmm(entry_time, 9, 20)
 
         risk = self.config.get('risk', {}) or {}
-        self.sl_pct = float(risk.get('sl_pct', 0) or 0)
-        self.target_pct = float(risk.get('target_pct', 0) or 0)
+        # Default TP 50% / SL 100% of premium when the config OMITS them (matches
+        # the builder UI defaults, so a position always has a risk exit). An
+        # explicit 0 is respected as "disabled" (rely on square-off/expiry).
+        _sl = risk.get('sl_pct', None)
+        _tp = risk.get('target_pct', None)
+        self.sl_pct = float(100 if _sl is None else _sl)
+        self.target_pct = float(50 if _tp is None else _tp)
         self._cv = 0.001  # contract value; refreshed per entry from config
 
         self._running = False

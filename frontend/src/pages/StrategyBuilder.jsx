@@ -73,7 +73,7 @@ export default function StrategyBuilder() {
   const [legs, setLegs] = useState([{ side: 'sell', type: 'CE', strike: 'ATM', lots: 1 }]);
   const [entry, setEntry] = useState([{ type: 'time', value: '09:20' }]);
   const [exit, setExit] = useState([{ type: 'time', value: '15:15' }]);
-  const [risk, setRisk] = useState({ sl: 30, target: 50, legSl: 0, trail: 0, maxLoss: 0, reentry: 'none' });
+  const [risk, setRisk] = useState({ sl: 100, target: 50, legSl: 0, trail: 0, maxLoss: 0, reentry: 'none' });
   const [exec, setExec] = useState({ orderType: 'market', product: 'overnight', lots: 1, sqoff: '15:15', days: [0, 1, 2, 3, 4], daysBeforeExpiryEntry: '', daysBeforeExpiryExit: '' });
   const [adj, setAdj] = useState({ trigger: 'none', value: 40, action: 'shift', maxAdj: 3 });
   const [toast, setToast] = useState('');
@@ -307,8 +307,8 @@ export default function StrategyBuilder() {
           {/* Risk Management */}
           <div className="sb-card">
             <div className="sb-card-title">🛡 Risk Management</div>
-            <div className="sb-field"><label>Overall Stop Loss (%)</label><input type="number" value={risk.sl} onChange={e => setRisk(p => ({ ...p, sl: +e.target.value }))} /><span className="hint">% of premium collected</span></div>
-            <div className="sb-field"><label>Overall Target (%)</label><input type="number" value={risk.target} onChange={e => setRisk(p => ({ ...p, target: +e.target.value }))} /><span className="hint">% of premium collected</span></div>
+            <div className="sb-field"><label>Overall Target / Take Profit (%)</label><input type="number" value={risk.target} onChange={e => setRisk(p => ({ ...p, target: +e.target.value }))} /><span className="hint">Close in profit at this % of premium collected</span></div>
+            <div className="sb-field"><label>Overall Stop Loss (%)</label><input type="number" value={risk.sl} onChange={e => setRisk(p => ({ ...p, sl: +e.target.value }))} /><span className="hint">Close in loss at this % of premium collected</span></div>
             <div className="sb-field"><label>Per-Leg Stop Loss (%)</label><input type="number" value={risk.legSl} onChange={e => setRisk(p => ({ ...p, legSl: +e.target.value }))} /><span className="hint">0 = disabled</span></div>
             <div className="sb-field"><label>Trailing SL (%)</label><input type="number" value={risk.trail} onChange={e => setRisk(p => ({ ...p, trail: +e.target.value }))} /><span className="hint">0 = disabled</span></div>
             <div className="sb-field"><label>Max Loss (absolute $)</label><input type="number" value={risk.maxLoss} onChange={e => setRisk(p => ({ ...p, maxLoss: +e.target.value }))} /><span className="hint">0 = no cap</span></div>
@@ -341,7 +341,7 @@ export default function StrategyBuilder() {
               ['Start Days', (exec.days || []).length ? exec.days.map(d => DAY_LABELS[d]).join(', ') : '—'],
               ['Entry', entry.map(c => c.type).join(', ') || '—'],
               ['Exit', exit.map(c => c.type).join(', ') || '—'],
-              ['SL / Target', `${risk.sl}% / ${risk.target}%`],
+              ['Target / SL', `${risk.target}% / ${risk.sl}%`],
             ].map(([k, v]) => (
               <div key={k} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', fontSize: '.82rem', borderBottom: '1px solid var(--border)' }}>
                 <span style={{ color: 'var(--muted)' }}>{k}</span><span style={{ fontWeight: 600 }}>{v}</span>

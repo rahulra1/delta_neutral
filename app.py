@@ -7910,10 +7910,13 @@ def api_deploy_strategy_builder():
         'leg_details': ', '.join(f"{l['side'].upper()} {l.get('type','')} {l.get('strike','')}" for l in placed_legs[:4]),
     }, user_id=current_user_id())
 
-    # Start monitor if risk targets are set
+    # Start monitor if risk targets are set. Default TP 50% / SL 100% when the
+    # config omits them (matches the builder UI); an explicit 0 disables.
     risk = data.get('risk', {})
-    sl_pct = float(risk.get('sl_pct', 0))
-    tgt_pct = float(risk.get('target_pct', 0))
+    _sl = risk.get('sl_pct', None)
+    _tp = risk.get('target_pct', None)
+    sl_pct = float(100 if _sl is None else _sl)
+    tgt_pct = float(50 if _tp is None else _tp)
     total_premium = sum(l['entry_price'] * l['size'] for l in placed_legs if l['side'] == 'sell')
     lot_sizes = {'BTC': 0.001, 'ETH': 0.01}
     lot_size = lot_sizes.get(asset, 0.001)
