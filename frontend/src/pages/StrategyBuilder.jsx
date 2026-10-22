@@ -288,7 +288,15 @@ export default function StrategyBuilder() {
             ))}
             <div style={{ fontSize: '.72rem', color: 'var(--muted)', marginTop: 8 }}>ANY condition being TRUE (OR logic) will trigger exit</div>
             <div style={{ borderTop: '1px solid var(--border)', marginTop: 10, paddingTop: 10 }}>
-              <div className="sb-field"><label>Square Off Time</label><input type="time" value={exec.sqoff} onChange={e => setExec(p => ({ ...p, sqoff: e.target.value }))} /><span className="hint">Daily time to force-close open legs</span></div>
+              <div className="sb-field"><label>Square Off Time</label><input type="time" value={exec.sqoff} onChange={e => setExec(p => ({ ...p, sqoff: e.target.value }))} /><span className="hint">Daily time to force-close open legs</span>
+                {(() => {
+                  const entryTime = (entry.find(c => c.type === 'time' && c.value) || {}).value;
+                  if (entryTime && exec.sqoff && exec.sqoff <= entryTime) {
+                    return <span className="hint" style={{ color: 'var(--red)', fontWeight: 700 }}>⚠ Square-off ({exec.sqoff}) is at/before entry ({entryTime}) — the position would be held to the NEXT day's {exec.sqoff}. Set a later square-off for same-day exit.</span>;
+                  }
+                  return null;
+                })()}
+              </div>
               <div className="sb-field"><label>Days Before Expiry to Exit</label><input type="number" value={exec.daysBeforeExpiryExit} onChange={e => setExec(p => ({ ...p, daysBeforeExpiryExit: e.target.value }))} placeholder="blank = TP/SL only" /><span className="hint">0 = exit on expiry day</span></div>
             </div>
           </div>

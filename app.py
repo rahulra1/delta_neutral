@@ -2777,6 +2777,7 @@ def api_dashboard():
         running_count += sum(1 for sid, e in portfolio_strangle_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in hybrid_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in _futures_traders.items() if e.get('user_id') == uid and e['trader'].running)
+        running_count += sum(1 for sid, e in builder_scheduler_strategies.items() if e.get('user_id') == uid and e.get('running'))
     running_count += len(registry.get_running(uid))
     pnls = [t.get('pnl', 0) for t in completed]
     wins = [p for p in pnls if p > 0]

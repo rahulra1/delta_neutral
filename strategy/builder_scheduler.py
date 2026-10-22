@@ -290,20 +290,48 @@ class BuilderScheduler:
         from api.orders import place_order
         from api.pricing import get_current_price
         self._apply_thread_context()
+        opened_at = datetime.now(IST)
+        # Resolve the square-off target ONCE, anchored to entry: today's
+        # exit_hour:exit_minute, rolled to the next day if that moment already
+        # passed when we opened (prevents an exit time <= entry time from
+        # force-closing the position the instant it opens — the "exit 14:42
+        # with entry 14:46" confusion).
+        exit_target = opened_at.replace(hour=self.exit_hour, minute=self.exit_minute,
+                                        second=0, microsecond=0)
+        if exit_target <= opened_at:
+            exit_target += timedelta(days=1)
+        self._print(f"[Builder Sched] Position #{entry_id} square-off at "
+                    f"{exit_target.strftime('%Y-%m-%d %H:%M')} IST")
         while self._running:
             time.sleep(30)
             if mon is not None and not getattr(mon, 'running', False):
                 return  # monitor already closed via TP/SL (it books its own PnL)
+            # If this position is no longer open (closed by TP/SL, another
+            # watcher, or a duplicate loop), stop — do NOT place close orders.
+            with self._open_lock:
+                still_open = any(p.get('entry_id') == entry_id for p in self._open_positions)
+            if not still_open:
+                return
             now = datetime.now(IST)
-            exit_dt = now.replace(hour=self.exit_hour, minute=self.exit_minute,
-                                  second=0, microsecond=0)
-            force = now >= exit_dt
-            if self.days_before_exit is not None:
+            # Square-off once we reach the resolved exit target.
+            force = now >= exit_target
+            # Days-before-expiry exit: close when within N days of expiry, but
+            # never before the square-off target (so it can't fire pre-entry).
+            if self.days_before_exit is not None and now >= exit_target:
                 dte = self._days_to_expiry(expiry)
-                if dte is not None and dte <= self.days_before_exit and now >= exit_dt:
+                if dte is not None and dte <= self.days_before_exit:
                     force = True
             if not force:
                 continue
+
+            # Atomically CLAIM the position so only one closer acts on it.
+            with self._open_lock:
+                claimed = any(p.get('entry_id') == entry_id for p in self._open_positions)
+                if claimed:
+                    self._open_positions = [p for p in self._open_positions
+                                            if p.get('entry_id') != entry_id]
+            if not claimed:
+                return  # someone else already closed it
 
             # Book realized PnL from current marks BEFORE closing, then close.
             realized = 0.0
@@ -323,16 +351,25 @@ class BuilderScheduler:
             if mon is not None:
                 mon.running = False
             self._print(f"[Builder Sched] Force-closed {len(placed)} legs (square-off/expiry)")
-            self._on_position_closed(entry_id, realized, 'expiry_exit')
+            self._book_close(entry_id, realized, 'expiry_exit')
             return
 
     def _on_position_closed(self, entry_id, pnl, reason):
-        """Called once per position when it closes (TP/SL via monitor, or the
-        expiry/square-off watcher). Books realized PnL, drops the position from
-        the open set, logs, and persists."""
+        """Close callback for the TP/SL monitor. Atomically claims the position
+        (so a racing watcher/duplicate can't double-book or double-close), then
+        books the realized PnL."""
         with self._open_lock:
-            self._open_positions = [p for p in self._open_positions
-                                    if p.get('entry_id') != entry_id]
+            claimed = any(p.get('entry_id') == entry_id for p in self._open_positions)
+            if claimed:
+                self._open_positions = [p for p in self._open_positions
+                                        if p.get('entry_id') != entry_id]
+        if not claimed:
+            return  # already closed by the expiry watcher or a duplicate loop
+        self._book_close(entry_id, pnl, reason)
+
+    def _book_close(self, entry_id, pnl, reason):
+        """Book realized PnL, log, and persist. Caller must have already removed
+        the position from _open_positions (the claim) to guarantee single-book."""
         # Drop any finished monitors so the active list stays clean.
         self._monitors = [m for m in self._monitors if getattr(m, 'running', False)]
         self.cumulative_pnl += (pnl or 0)
