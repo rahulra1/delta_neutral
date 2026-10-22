@@ -114,6 +114,10 @@ class BuilderScheduler:
             self._print(f"[Builder Sched] Enter only within {self.days_before_entry}d of expiry")
         if self.days_before_exit is not None:
             self._print(f"[Builder Sched] Force exit within {self.days_before_exit}d of expiry")
+        # Persist a fresh row at startup so the DB reflects a running strategy
+        # even before the first entry (and after a resume) — like EMA Spread's
+        # deploy-time row stays authoritative.
+        self._persist_state()
         return True
 
     def monitor(self):
@@ -122,6 +126,10 @@ class BuilderScheduler:
             self._wait_for_next_entry()
             if not self._running:
                 break
+            # Keep the DB row + PnL snapshot fresh each cycle (even when flat),
+            # so a long-running idle strategy stays current and resumable.
+            self._persist_state()
+            self._save_snapshot()
             now = datetime.now(IST)
             if now.weekday() not in self.days:
                 continue
@@ -129,6 +137,15 @@ class BuilderScheduler:
                 self._run_one_entry()
             except Exception as e:
                 logger.error("[Builder Sched] entry failed: %s", e)
+
+    def _save_snapshot(self):
+        """Write a PnL snapshot for the UI chart (best-effort, like EMA Spread)."""
+        try:
+            from models import save_pnl_snapshot
+            if self._user_id and self._sid:
+                save_pnl_snapshot(self._user_id, self._sid, round(self.pnl, 2))
+        except Exception:
+            pass
 
     def close_all(self):
         self._running = False
@@ -413,8 +430,18 @@ class BuilderScheduler:
 
     def _interruptible_sleep(self, seconds):
         end = time.time() + seconds
+        last_persist = time.time()
         while self._running and time.time() < end:
             time.sleep(min(30, end - time.time()))
+            # Refresh the DB row + snapshot every ~15 min during a long idle wait
+            # so a flat, waiting strategy keeps a current row (resumable + live PnL).
+            if time.time() - last_persist >= 900:
+                last_persist = time.time()
+                try:
+                    self._persist_state()
+                    self._save_snapshot()
+                except Exception:
+                    pass
 
     # ── plumbing ────────────────────────────────────────────────────────
 
@@ -440,6 +467,18 @@ class BuilderScheduler:
         currently-open positions to the DB row keyed by _sid, so a restart can
         resume monitoring open legs and keep booking into cumulative_pnl."""
         sid = getattr(self, '_sid', None)
+        if not sid:
+            # Fallback: discover our sid from the app registry (mirrors
+            # EMACreditSpread) so persistence survives a missing _sid.
+            try:
+                from app import builder_scheduler_strategies
+                for s_id, entry in builder_scheduler_strategies.items():
+                    if entry.get('strategy') is self:
+                        sid = s_id
+                        self._sid = sid
+                        break
+            except Exception:
+                pass
         if not sid:
             return
         try:
