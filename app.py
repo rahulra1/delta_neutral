@@ -151,7 +151,8 @@ def _resume_db_strategies():
             # Daily-recurring strategies don't need legs to resume — they open trades on schedule
             if source not in ('EMA Spread', 'EMA Spread Scheduled', 'EMA Spread V2', 'EMA Trend', 'Dual Momentum', 'OI Strategy', 'Daily Strangle', 'Weekly DN',
                               'Portfolio Strangle', 'Hybrid Switch', 'Pivot SuperTrend',
-                              'NSE Strangle', 'NSE Delta Neutral', 'NSE EMA Spread', 'NSE Dual Momentum'):
+                              'NSE Strangle', 'NSE Delta Neutral', 'NSE EMA Spread', 'NSE Dual Momentum',
+                              'Strategy Builder (Recurring)'):
                 continue
 
         # Skip strategies where all legs have no product_id (invalid/empty data)
@@ -1571,6 +1572,54 @@ def _resume_db_strategies():
             entry['thread'] = t
             t.start()
             logger.info(f"[resume] Resumed NSE Dual Momentum {sid}")
+
+        # Resume recurring Strategy Builder
+        elif source == 'Strategy Builder (Recurring)':
+            entry = {'thread': None, 'strategy': None, 'running': False,
+                     'user_id': user_id, 'profile_id': profile_id, 'params': details,
+                     'log_queue': queue.Queue(maxsize=500), 'log_history': []}
+            builder_scheduler_strategies[sid] = entry
+
+            def _resume_builder_sched(sid=sid, entry=entry, details=details, user_id=user_id):
+                try:
+                    from strategy.builder_scheduler import BuilderScheduler
+                    asset = details.get('underlying', details.get('asset', 'BTC'))
+                    sched = BuilderScheduler(config=details, asset=asset,
+                                             profile_id=details.get('profile_id'))
+                    sched._sid = sid
+                    sched._user_id = user_id
+                    sched._log_queue = entry['log_queue']
+                    sched._log_history = entry['log_history']
+                    import config as _cfg
+                    # Apply profile creds for this thread so re-armed monitors can trade.
+                    try:
+                        pid = details.get('profile_id')
+                        if pid:
+                            p = get_profile(int(pid), user_id)
+                            if p:
+                                _cfg.set_thread_credentials(p['api_key'], p['api_secret'], p.get('broker'))
+                    except Exception:
+                        pass
+                    sched._api_key = _cfg.get_api_key()
+                    sched._api_secret = _cfg.get_api_secret()
+                    sched._broker = getattr(_cfg._thread_local, 'broker', 'demo')
+                    entry['strategy'] = sched
+                    entry['running'] = True
+                    sched.initialize()
+                    sched.restore_state(details=details, legs=legs)
+                    sched.monitor()
+                except Exception as e:
+                    logger.error(f"[resume] Builder Scheduler {sid} error: {e}")
+                finally:
+                    strategy = entry.get('strategy')
+                    if strategy and not strategy._running:
+                        update_tracked(sid, status='completed',
+                                       pnl=round(getattr(strategy, 'cumulative_pnl', 0), 2))
+
+            t = threading.Thread(target=_resume_builder_sched, daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed Strategy Builder (Recurring) {sid}")
 
         # 10b. Resume Pivot SuperTrend
         elif source == 'Pivot SuperTrend':
@@ -3036,6 +3085,23 @@ def api_all_strategies():
                         legs_out.append({'symbol': l['symbol'], 'side': l['side'], 'size': l['size'], 'entry_price': l['entry_price'], 'current_mark': round(mark, 2), 'current_pnl': round(lpnl, 2)})
                     entry['pnl'] = round(total_pnl, 2)
                     entry['legs'] = legs_out
+                elif sid in builder_scheduler_strategies and builder_scheduler_strategies[sid].get('strategy'):
+                    s = builder_scheduler_strategies[sid]['strategy']
+                    if not builder_scheduler_strategies[sid].get('running', False) or not s._running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.cumulative_pnl, 2))
+                        continue
+                    try:
+                        from config import set_thread_credentials, set_thread_broker
+                        if getattr(s, '_api_key', None):
+                            set_thread_credentials(s._api_key, s._api_secret, getattr(s, '_broker', None))
+                        elif getattr(s, '_broker', None):
+                            set_thread_broker(s._broker)
+                    except Exception:
+                        pass
+                    st = s.status()
+                    entry['pnl'] = round(st.get('total_pnl', 0), 2)
+                    entry['legs'] = st.get('legs', [])
                 else:
                     # No monitor — compute live P&L from legs
                     raw_legs = entry.get('details', {}).get('legs', [])
@@ -3898,6 +3964,35 @@ def api_strategy_detail(sid):
                     'type': 'futures',
                 })
             entry['pnl'] = round(total_pnl, 2)
+        elif sid in builder_scheduler_strategies and builder_scheduler_strategies[sid].get('strategy'):
+            bse = builder_scheduler_strategies[sid]
+            strat = bse['strategy']
+            # Price against the strategy's broker so running PnL isn't frozen.
+            try:
+                from config import set_thread_credentials, set_thread_broker
+                if getattr(strat, '_api_key', None):
+                    set_thread_credentials(strat._api_key, strat._api_secret, getattr(strat, '_broker', None))
+                elif getattr(strat, '_broker', None):
+                    set_thread_broker(strat._broker)
+            except Exception:
+                pass
+            st = strat.status()
+            entry['pnl'] = round(st.get('total_pnl', 0), 2)
+            entry['cumulative_pnl'] = round(st.get('cumulative_pnl', 0), 2)
+            entry['running_pnl'] = round(st.get('running_pnl', 0), 2)
+            entry['running'] = bse.get('running', False) and st.get('running', False)
+            entry['total_entries'] = st.get('total_entries', 0)
+            entry['trade_log'] = st.get('trade_log', [])
+            logs = list(bse.get('log_history', []))
+            for l in st.get('legs', []):
+                live_legs.append({
+                    'symbol': l.get('symbol', ''), 'type': l.get('type', ''),
+                    'strike': l.get('strike', ''), 'side': l.get('side', ''),
+                    'size': l.get('size', 0),
+                    'entry_price': round(l.get('entry_price', 0), 4),
+                    'current_mark': round(l.get('current_mark', l.get('entry_price', 0)), 4),
+                    'current_pnl': round(l.get('current_pnl', 0), 4),
+                    'expiry': l.get('expiry', '')})
         else:
             # Option Chain / Strategy Builder / Tracker — use common P&L calculator
             raw_legs = []
@@ -7287,17 +7382,28 @@ def api_expiries():
     asset = request.args.get('asset', 'BTC')
     if asset in DELTA_ASSETS:
         from api.chain import get_expiries
-        from config import set_thread_credentials
+        from config import set_thread_credentials, BROKERS
+        import config as _cfg
         profile_id = request.args.get('profile_id')
         api_key, api_secret, _, broker = get_profile_creds(profile_id)
+        # Crypto (BTC/ETH) options are Delta Exchange only. A non-Delta broker
+        # (e.g. Groww) has no /v2/products path and 404s, so never route a Delta
+        # asset through it — coerce to a Delta environment. Prefer live if the
+        # Delta module is the live endpoint, else fall back to demo/testnet.
+        delta_brokers = {'delta_exchange', 'demo'}
+        if broker not in delta_brokers:
+            broker = 'delta_exchange' if api_key else 'demo'
         if api_key:
             set_thread_credentials(api_key, api_secret, broker)
-        elif not profile_id:
-            # No profile and no default keys — still set broker based on what we have
-            set_thread_credentials('', '', 'demo')
-        return jsonify(expiries=get_expiries(asset))
+        else:
+            set_thread_credentials('', '', broker)
+        base = getattr(_cfg, 'BASE_URL', '')
+        live = 'testnet' not in base and 'demo' not in base
+        return jsonify(expiries=get_expiries(asset), source='Delta Exchange',
+                       endpoint=base, live=live)
     from api.nse import get_nse_expiries
-    return jsonify(expiries=get_nse_expiries(asset))
+    return jsonify(expiries=get_nse_expiries(asset), source='NSE',
+                   endpoint='nseindia.com', live=True)
 
 
 @app.route('/api/chain')
@@ -7312,10 +7418,13 @@ def api_chain():
         from config import set_thread_credentials
         profile_id = request.args.get('profile_id')
         api_key, api_secret, _, broker = get_profile_creds(profile_id)
+        # Delta assets must use a Delta broker — never a Groww profile (no chain path).
+        if broker not in ('delta_exchange', 'demo'):
+            broker = 'delta_exchange' if api_key else 'demo'
         if api_key:
             set_thread_credentials(api_key, api_secret, broker)
-        elif not profile_id:
-            set_thread_credentials('', '', 'demo')
+        else:
+            set_thread_credentials('', '', broker)
         chain, spot, exp = get_option_chain_full(expiry, asset)
     else:
         from api.nse import get_nse_chain
@@ -7555,6 +7664,121 @@ def api_chart_data():
 
 # ── Strategy Builder Routes ──
 
+builder_scheduler_strategies = {}  # sid -> {strategy, thread, running, user_id, ...}
+
+
+def _deploy_builder_recurring(data, asset):
+    """Start a recurring BuilderScheduler for this builder config."""
+    from strategy.builder_scheduler import BuilderScheduler
+    uid = current_user_id()
+    profile_id = data.get('profile_id')
+    sid = str(uuid.uuid4())[:8]
+
+    sched = BuilderScheduler(config=data, asset=asset, profile_id=profile_id)
+    sched._sid = sid
+    sched._user_id = uid
+    sched._log_queue = queue.Queue(maxsize=500)
+    sched._log_history = []
+    import config as _cfg
+    # Resolve credentials + broker from the profile explicitly (do NOT rely on
+    # thread-local defaults, which fall back to 'demo'/testnet and would route
+    # a live strategy's orders to the testnet endpoint).
+    p_key, p_secret, _pname, p_broker = get_profile_creds(profile_id)
+    sched._api_key = p_key or _cfg.get_api_key()
+    sched._api_secret = p_secret or _cfg.get_api_secret()
+    sched._broker = p_broker or getattr(_cfg._thread_local, 'broker', '') or 'demo'
+
+    entry = {'strategy': sched, 'thread': None, 'running': True,
+             'user_id': uid, 'profile_id': profile_id, 'params': data,
+             'log_queue': sched._log_queue, 'log_history': sched._log_history}
+    builder_scheduler_strategies[sid] = entry
+    track_strategy(sid, 'Strategy Builder (Recurring)', data.get('name', 'Unnamed'),
+                   uid, details=data)
+
+    def _run():
+        try:
+            sched.initialize()
+            sched.monitor()
+        except Exception as e:
+            logger.error(f"[builder-sched] {sid} error: {e}")
+        finally:
+            entry['running'] = False
+            update_tracked(sid, status='completed', pnl=round(sched.cumulative_pnl, 2))
+
+    entry['thread'] = threading.Thread(target=_run, daemon=True)
+    entry['thread'].start()
+    update_tracked(sid, status='running')
+    return jsonify(status='deployed', sid=sid, recurring=True)
+
+
+@app.route('/api/strategy-builder/stop-recurring', methods=['POST'])
+@login_required
+def api_stop_builder_recurring():
+    sid = request.json.get('sid')
+    e = builder_scheduler_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error="Not found"), 404
+    try:
+        profile_id = e.get('profile_id')
+        if profile_id:
+            p = get_profile(int(profile_id), e['user_id'])
+            if p:
+                from config import set_thread_credentials
+                set_thread_credentials(p['api_key'], p['api_secret'], p.get('broker'))
+        e['strategy'].close_all()
+    except Exception as ex:
+        logger.error(f"[builder-sched stop] {sid}: {ex}")
+    e['running'] = False
+    return jsonify(status='stopped')
+
+
+@app.route('/api/strategy-builder/status/<sid>')
+@login_required
+def api_builder_recurring_status(sid):
+    e = builder_scheduler_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error="Not found"), 404
+    strat = e.get('strategy')
+    if not strat:
+        return jsonify(running=False)
+    # Price against the strategy's broker so running PnL isn't frozen at entry.
+    try:
+        from config import set_thread_credentials, set_thread_broker
+        if getattr(strat, '_api_key', None):
+            set_thread_credentials(strat._api_key, strat._api_secret, getattr(strat, '_broker', None))
+        elif getattr(strat, '_broker', None):
+            set_thread_broker(strat._broker)
+    except Exception:
+        pass
+    data = strat.status()
+    data['running'] = e.get('running', False) and data.get('running', False)
+    return jsonify(data)
+
+
+@app.route('/api/strategy-builder/stream/<sid>')
+@login_required
+def api_builder_recurring_stream(sid):
+    e = builder_scheduler_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
+    q = e.get('log_queue')
+    history = e.get('log_history', [])
+
+    def generate():
+        for msg in list(history):
+            yield f"data: {msg}\n\n"
+        if q is None:
+            return
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield ": heartbeat\n\n"
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
 @app.route('/api/strategy-builder/save', methods=['POST'])
 @login_required
 def api_save_strategy_builder():
@@ -7587,13 +7811,31 @@ def api_deploy_strategy_builder():
     if not legs_cfg:
         return jsonify(error="No legs defined"), 400
 
-    # Resolve expiry
-    expiry_key = data.get('expiry', 'current_week')
+    # Recurring mode: hand the whole config to the BuilderScheduler, which opens
+    # the strategy on the configured weekdays/time (and days-before-expiry) and
+    # repeats — instead of placing legs once right now.
+    if data.get('recurring'):
+        return _deploy_builder_recurring(data, asset)
+
+    # Resolve expiry — supports logical types (weekly/next_weekly/monthly/
+    # next_monthly) via the shared resolver, a literal DD-MM-YYYY, or the legacy
+    # current_week/next_week/current_month/next_month keys.
+    from api.expiry_resolver import resolve_expiry, EXPIRY_TYPES
+    expiry_key = data.get('expiry', 'weekly')
     expiries = get_expiries(asset)
     if not expiries:
         return jsonify(error="Could not fetch expiries"), 500
-    expiry_map = {'current_week': 0, 'next_week': 1, 'current_month': 0, 'next_month': 1}
-    expiry = expiries[min(expiry_map.get(expiry_key, 0), len(expiries) - 1)] if expiry_key != 'custom' else expiries[0]
+    _legacy = {'current_week': 'weekly', 'next_week': 'next_weekly',
+               'current_month': 'monthly', 'next_month': 'next_monthly'}
+    expiry_key = _legacy.get(expiry_key, expiry_key)
+    if expiry_key in EXPIRY_TYPES:
+        expiry = resolve_expiry(expiry_key, expiries)
+    elif expiry_key in expiries:
+        expiry = expiry_key  # literal date
+    else:
+        expiry = expiries[0]
+    if not expiry:
+        return jsonify(error=f"Could not resolve expiry '{expiry_key}'"), 500
 
     # Fetch chain
     chain, spot, _ = get_option_chain_full(expiry, asset)
@@ -7612,19 +7854,30 @@ def api_deploy_strategy_builder():
     for leg in legs_cfg:
         opt_type = 'call' if leg['type'] == 'CE' else 'put'
         strike_key = leg.get('strike', 'ATM')
-        m = re.match(r'(ATM|OTM|ITM)(\d*)', strike_key)
-        offset = 0
-        if m:
-            offset = int(m.group(2)) if m.group(2) else 0
-            if m.group(1) == 'OTM':
-                offset = offset if opt_type == 'call' else -offset
-            elif m.group(1) == 'ITM':
-                offset = -offset if opt_type == 'call' else offset
-        idx = max(0, min(atm_idx + offset, len(chain) - 1))
-        opt = chain[idx].get(opt_type)
-        if not opt or not opt.get('product_id'):
-            results.append({'strike': strike_key, 'type': leg['type'], 'success': False, 'error': 'No option found'})
-            continue
+        if leg.get('strike_mode') == 'delta':
+            from api.delta_finder import find_target_delta_options
+            tgt = abs(float(leg.get('target_delta', 0.20)))
+            bc, bp = find_target_delta_options(chain, tgt, tolerance=float(leg.get('delta_tolerance', 0.10)))
+            best = bc if opt_type == 'call' else bp
+            if not best or not best.get('product_id'):
+                results.append({'strike': f'delta {tgt}', 'type': leg['type'], 'success': False, 'error': 'No delta match'})
+                continue
+            opt = {'product_id': best.get('product_id'), 'symbol': best.get('symbol', ''),
+                   'strike': best.get('strike_price'), 'mark_price': best.get('mark_price', 0)}
+        else:
+            m = re.match(r'(ATM|OTM|ITM)(\d*)', strike_key)
+            offset = 0
+            if m:
+                offset = int(m.group(2)) if m.group(2) else 0
+                if m.group(1) == 'OTM':
+                    offset = offset if opt_type == 'call' else -offset
+                elif m.group(1) == 'ITM':
+                    offset = -offset if opt_type == 'call' else offset
+            idx = max(0, min(atm_idx + offset, len(chain) - 1))
+            opt = chain[idx].get(opt_type)
+            if not opt or not opt.get('product_id'):
+                results.append({'strike': strike_key, 'type': leg['type'], 'success': False, 'error': 'No option found'})
+                continue
 
         size = int(leg.get('lots', 1)) * lots_per_leg
         order = place_order(opt['product_id'], opt['symbol'], size, leg['side'])
@@ -7961,7 +8214,7 @@ def api_tracker_logs(sid):
         pnl = round(strat.total_pnl, 2) if strat else 0
         return jsonify(sid=sid, logs=logs[-last:], running=e.get('running', False), pnl=pnl, status='running' if e.get('running') else 'completed')
     # Check new strategy dicts
-    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_scheduled_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, nse_dual_momentum_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies):
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_scheduled_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, nse_dual_momentum_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies, builder_scheduler_strategies):
         e = dct.get(sid)
         if e and e.get('user_id') == current_user_id():
             logs = list(e.get('log_history', []))
@@ -7999,7 +8252,7 @@ def api_tracker_close(sid):
         e['strategy'].close_all_positions()
         return jsonify(status='closed')
     # New strategy dicts
-    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_scheduled_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, nse_dual_momentum_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies):
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_scheduled_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, nse_dual_momentum_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies, builder_scheduler_strategies):
         e = dct.get(sid)
         if e and e.get('user_id') == current_user_id() and e.get('strategy'):
             e['strategy'].close_all()

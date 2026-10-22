@@ -117,6 +117,7 @@ function SourceBadge({ source }) {
     'AlgoX DN': { bg: '#ede9fe', color: '#6366f1' },
     'Option Chain': { bg: '#fef3c7', color: '#d97706' },
     'Strategy Builder': { bg: '#dbeafe', color: '#2563eb' },
+    'Strategy Builder (Recurring)': { bg: '#dbeafe', color: '#1d4ed8' },
     'Div+MSS': { bg: '#fce7f3', color: '#db2777' },
     'SMA+Vol': { bg: '#d1fae5', color: '#059669' },
     'EMA Trend': { bg: '#e0e7ff', color: '#4f46e5' },

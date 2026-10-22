@@ -94,14 +94,18 @@ def get_nse_expiries(symbol):
     if not data:
         return _generate_expiries()
     expiries = data.get('records', {}).get('expiryDates', [])
-    result = []
+    # NSE returns expiryDates in an unspecified order; parse to real dates and
+    # sort ascending so expiries[0] is reliably the nearest (matches the Delta
+    # path and this function's docstring).
+    parsed = []
     for e in expiries:
         try:
             dt = datetime.strptime(e, '%d-%b-%Y')
-            result.append(dt.strftime('%d-%m-%Y'))
+            parsed.append((dt, dt.strftime('%d-%m-%Y')))
         except Exception:
             continue
-    return result
+    parsed.sort(key=lambda x: x[0])
+    return [s for _, s in parsed]
 
 
 def get_nse_chain(symbol, expiry_date):
