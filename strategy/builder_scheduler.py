@@ -16,6 +16,7 @@ It reuses strategy.builder_common for expiry + strike resolution so behavior
 matches the one-shot deploy exactly.
 """
 
+import sys
 import time
 import logging
 import threading
@@ -313,17 +314,9 @@ class BuilderScheduler:
         from api.pricing import get_current_price
         self._apply_thread_context()
         opened_at = datetime.now(IST)
-        # Resolve the square-off target ONCE, anchored to entry: today's
-        # exit_hour:exit_minute, rolled to the next day if that moment already
-        # passed when we opened (prevents an exit time <= entry time from
-        # force-closing the position the instant it opens — the "exit 14:42
-        # with entry 14:46" confusion).
-        exit_target = opened_at.replace(hour=self.exit_hour, minute=self.exit_minute,
-                                        second=0, microsecond=0)
-        if exit_target <= opened_at:
-            exit_target += timedelta(days=1)
-        self._print(f"[Builder Sched] Position #{entry_id} square-off at "
-                    f"{exit_target.strftime('%Y-%m-%d %H:%M')} IST")
+        exit_target, rule = self._resolve_exit_target(opened_at, expiry)
+        self._print(f"[Builder Sched] Position #{entry_id} exit at "
+                    f"{exit_target.strftime('%Y-%m-%d %H:%M')} IST ({rule})")
         while self._running:
             time.sleep(30)
             if mon is not None and not getattr(mon, 'running', False):
@@ -334,16 +327,7 @@ class BuilderScheduler:
                 still_open = any(p.get('entry_id') == entry_id for p in self._open_positions)
             if not still_open:
                 return
-            now = datetime.now(IST)
-            # Square-off once we reach the resolved exit target.
-            force = now >= exit_target
-            # Days-before-expiry exit: close when within N days of expiry, but
-            # never before the square-off target (so it can't fire pre-entry).
-            if self.days_before_exit is not None and now >= exit_target:
-                dte = self._days_to_expiry(expiry)
-                if dte is not None and dte <= self.days_before_exit:
-                    force = True
-            if not force:
+            if datetime.now(IST) < exit_target:
                 continue
 
             # Atomically CLAIM the position so only one closer acts on it.
@@ -375,6 +359,37 @@ class BuilderScheduler:
             self._print(f"[Builder Sched] Force-closed {len(placed)} legs (square-off/expiry)")
             self._book_close(entry_id, realized, 'expiry_exit')
             return
+
+    def _resolve_exit_target(self, opened_at, expiry):
+        """When a position opened at `opened_at` must be force-closed.
+
+        - days_before_expiry_exit set: exit on (expiry - N days) at the exit
+          time. The position is held across days until then -- the square-off
+          time is the time-of-day of that exit, not a daily close.
+        - not set: daily square-off -- the next exit time after opening.
+        An expiry-relative target that is already past at entry falls back to
+        the daily rule (warned), so a position is never closed the instant it
+        opens.
+        """
+        daily = opened_at.replace(hour=self.exit_hour, minute=self.exit_minute,
+                                  second=0, microsecond=0)
+        if daily <= opened_at:
+            daily += timedelta(days=1)
+        if self.days_before_exit is None:
+            return daily, 'daily square-off'
+        try:
+            exp = datetime.strptime(expiry, '%d-%m-%Y').date()
+        except (ValueError, TypeError):
+            return daily, 'daily square-off (bad expiry)'
+        target = datetime.combine(exp - timedelta(days=self.days_before_exit),
+                                  datetime.min.time(), tzinfo=IST).replace(
+            hour=self.exit_hour, minute=self.exit_minute)
+        if target <= opened_at:
+            self._print(f"[Builder Sched] ⚠ {self.days_before_exit}d-before-expiry exit "
+                        f"({target.strftime('%Y-%m-%d %H:%M')}) already passed at entry — "
+                        f"using daily square-off")
+            return daily, 'daily square-off (expiry exit already passed)'
+        return target, f'{self.days_before_exit}d before expiry {expiry}'
 
     def _on_position_closed(self, entry_id, pnl, reason):
         """Close callback for the TP/SL monitor. Atomically claims the position
@@ -564,6 +579,16 @@ class BuilderScheduler:
 
     def _print(self, msg):
         print(msg)
+        # When app.py installs LogCapture as stdout and this thread is bound to
+        # our queue (via _apply_thread_context), print() above has ALREADY
+        # routed the line into our log queue + history. Appending again here
+        # was what made every "[Builder Sched]" line appear twice. Only append
+        # manually when print() isn't captured for this strategy on this thread.
+        cap = type(sys.stdout)
+        local = getattr(cap, '_local', None)
+        if cap.__name__ == 'LogCapture' and self._log_queue is not None \
+                and getattr(local, 'log_queue', None) is self._log_queue:
+            return
         try:
             if self._log_history is not None:
                 self._log_history.append(msg)

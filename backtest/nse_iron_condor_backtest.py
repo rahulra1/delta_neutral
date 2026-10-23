@@ -44,10 +44,56 @@ def _settle(row):
     return row['settle'] if row['settle'] > 0 else row['close']
 
 
+def _read_lot_size(days, symbol, instrument, exchange):
+    """Read a stock's lot size (NewBrdLotQty) straight from a cached bhavcopy.
+
+    get_option_chain doesn't carry NewBrdLotQty into parsed rows, so re-read the
+    raw CSV for the first available trading day and pull it for this symbol.
+    """
+    import csv as _csv
+    import io as _io
+    from backtest.nse_bhavcopy import download_bhavcopy
+    for c in days:
+        ds = c['date'].replace('-', '')
+        raw = download_bhavcopy(ds, exchange=exchange)
+        if not raw:
+            continue
+        for row in _csv.DictReader(_io.StringIO(raw)):
+            if row.get('TckrSymb') == symbol and row.get('FinInstrmTp') == instrument:
+                try:
+                    return int(float(row.get('NewBrdLotQty') or 0))
+                except (ValueError, TypeError):
+                    pass
+        break
+    return None
+
+
+# Index symbols use IDO (index options); everything else is a single stock
+# using STO (stock options). Stock options are MONTHLY-only (SEBI banned weekly
+# single-stock options), so cadence is forced to monthly for stocks.
+INDEX_SYMBOLS = {'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'}
+
+# Known stock lot sizes (NewBrdLotQty). Falls back to reading it from the data.
+STOCK_LOT_SIZES = {
+    'RELIANCE': 500,
+}
+
+
 def run_backtest(symbol, lots, sell_delta, buy_delta, tp_pct, sl_pct,
-                 start, end, r=0.065, verbose=True, exchange='NSE'):
-    lot_size = NSE_LOT_SIZES.get(symbol, 50)
-    qty = lots * lot_size
+                 start, end, r=0.065, verbose=True, exchange='NSE',
+                 cadence='weekly'):
+    is_index = symbol.upper() in INDEX_SYMBOLS
+    instrument = 'IDO' if is_index else 'STO'
+    if not is_index and cadence != 'monthly':
+        print(f"[note] {symbol} is a single stock (STO) — stock options are "
+              "MONTHLY-only, forcing cadence=monthly.")
+        cadence = 'monthly'
+
+    if is_index:
+        lot_size = NSE_LOT_SIZES.get(symbol, 50)
+    else:
+        lot_size = STOCK_LOT_SIZES.get(symbol.upper(), 0)
+    qty = lots * lot_size  # may be 0 until we read lot size from data below
 
     # 1) Load every available trading day's chain in range (cached on disk).
     print(f"Loading {exchange} bhavcopy data {start} .. {end} ...", flush=True)
@@ -57,7 +103,7 @@ def run_backtest(symbol, lots, sell_delta, buy_delta, tp_pct, sl_pct,
         if d.weekday() >= 5:
             continue
         ds = d.strftime('%Y%m%d')
-        chain = get_option_chain(ds, symbol=symbol, instrument='IDO', exchange=exchange)
+        chain = get_option_chain(ds, symbol=symbol, instrument=instrument, exchange=exchange)
         n_probe += 1
         if n_probe % 50 == 0:
             print(f"  ...probed {n_probe} weekdays, {len(days)} trading days so far", flush=True)
@@ -68,33 +114,59 @@ def run_backtest(symbol, lots, sell_delta, buy_delta, tp_pct, sl_pct,
         print("Not enough data.")
         return []
 
+    # For stocks, if the lot size wasn't preset, read it from the data.
+    if qty == 0:
+        lot_size = _read_lot_size(days, symbol, instrument, exchange) or 1
+        qty = lots * lot_size
+        print(f"[note] {symbol} lot size detected = {lot_size} "
+              f"-> {lots} lots = {qty} qty\n", flush=True)
+
     chain_by_date = {c['date']: c for c in days}
     ordered_dates = [c['date'] for c in days]
     date_index = {dt: i for i, dt in enumerate(ordered_dates)}
 
-    # 2) Detect weekly expiry days: the set of XpryDt values that actually fall on
-    #    a trading day present in our data = real expiry days we can enter on.
+    # 2) Detect expiry days. An expiry day = an XpryDt value that is also a
+    #    trading day we have data for (so we can actually enter that morning).
     all_expiries = set()
     for c in days:
         all_expiries.update(c['expiries'])
-    # expiry days that are also trading days we have data for, within range:
-    expiry_trading_days = sorted(e for e in all_expiries if e in chain_by_date)
+
+    if cadence == 'monthly':
+        # Monthly expiry = the LAST expiry within each calendar month. Enter on
+        # each monthly-expiry trading day and sell the NEXT month's monthly.
+        by_month = {}
+        for e in all_expiries:
+            by_month.setdefault(e[:7], []).append(e)
+        monthly_expiries = sorted(max(v) for v in by_month.values())
+        monthly_set = set(monthly_expiries)
+        entry_days = sorted(e for e in monthly_expiries if e in chain_by_date)
+    else:
+        entry_days = sorted(e for e in all_expiries if e in chain_by_date)
+        monthly_set = None
 
     trades = []
     skipped = 0
 
-    for entry_date in expiry_trading_days:
+    for entry_date in entry_days:
         chain = chain_by_date[entry_date]
         spot = chain['spot']
 
-        # Sell the NEXT weekly expiry (strictly after today).
+        # Choose the expiry to SELL.
         future_exp = sorted(e for e in chain['expiries']
                             if datetime.strptime(e, '%Y-%m-%d').date()
                             > datetime.strptime(entry_date, '%Y-%m-%d').date())
-        if not future_exp:
-            skipped += 1
-            continue
-        expiry = future_exp[0]  # next weekly
+        if cadence == 'monthly':
+            # Sell the NEXT monthly expiry (next calendar month's last expiry).
+            future_monthly = [e for e in future_exp if e in monthly_set]
+            if not future_monthly:
+                skipped += 1
+                continue
+            expiry = future_monthly[0]
+        else:
+            if not future_exp:
+                skipped += 1
+                continue
+            expiry = future_exp[0]  # next weekly
 
         leg = chain['options'].get(expiry)
         if not leg:
@@ -193,14 +265,15 @@ def run_backtest(symbol, lots, sell_delta, buy_delta, tp_pct, sl_pct,
         })
 
     _report(trades, skipped, symbol, lots, qty, sell_delta, buy_delta,
-            tp_pct, sl_pct, verbose, exchange)
+            tp_pct, sl_pct, verbose, exchange, cadence)
     return trades
 
 
 def _report(trades, skipped, symbol, lots, qty, sell_delta, buy_delta,
-            tp_pct, sl_pct, verbose, exchange='NSE'):
+            tp_pct, sl_pct, verbose, exchange='NSE', cadence='weekly'):
+    label = cadence.upper()
     print("=" * 80)
-    print(f"  IRON CONDOR BACKTEST — {symbol} [{exchange}]  (REAL bhavcopy, WEEKLY/expiry-day)")
+    print(f"  IRON CONDOR BACKTEST — {symbol} [{exchange}]  (REAL bhavcopy, {label}/expiry-day)")
     print("=" * 80)
     print(f"  Lots: {lots} ({qty} qty) | Sell {sell_delta}d / Buy {buy_delta}d "
           f"both wings | TP {tp_pct*100:.0f}% / SL {sl_pct*100:.0f}% of credit")
@@ -239,7 +312,8 @@ def _report(trades, skipped, symbol, lots, qty, sell_delta, buy_delta,
     avg_win = sum(t['pnl'] for t in wins) / len(wins) if wins else 0
     avg_loss = sum(t['pnl'] for t in losses) / len(losses) if losses else 0
 
-    print(f"  Trades (weeks): {n}   (skipped {skipped} expiry days)")
+    unit = 'months' if cadence == 'monthly' else 'weeks'
+    print(f"  Trades ({unit}): {n}   (skipped {skipped} expiry days)")
     print(f"  Win rate:       {win_rate:.1f}%   ({len(wins)}W / {len(losses)}L)")
     print(f"  Total P&L:      Rs {total:,.0f}")
     print(f"  Avg win:        Rs {avg_win:,.0f}    Avg loss: Rs {avg_loss:,.0f}")
@@ -253,7 +327,7 @@ def _report(trades, skipped, symbol, lots, qty, sell_delta, buy_delta,
     max_risk = max(per_risk) if per_risk else 0
     avg_risk = sum(per_risk) / len(per_risk) if per_risk else 0
     print("-" * 80)
-    print("  CAPITAL / MARGIN REQUIRED (one condor at a time, weekly)")
+    print(f"  CAPITAL / MARGIN REQUIRED (one condor at a time, {cadence})")
     print(f"  Defined max risk per condor (avg): Rs {avg_risk:,.0f}")
     print(f"  PEAK FUND REQUIRED:                Rs {max_risk:,.0f}  "
           "(worst single condor's max loss)")
@@ -298,6 +372,8 @@ def main():
     ap.add_argument('--rate', type=float, default=0.065)
     ap.add_argument('--quiet', action='store_true')
     ap.add_argument('--exchange', default=None, choices=['NSE', 'BSE'])
+    ap.add_argument('--cadence', default='weekly', choices=['weekly', 'monthly'],
+                    help='expiry cadence: weekly (default) or monthly')
     args = ap.parse_args()
 
     exchange = args.exchange
@@ -309,7 +385,7 @@ def main():
 
     run_backtest(args.symbol, args.lots, args.sell_delta, args.buy_delta,
                  args.tp, args.sl, start, end, r=args.rate,
-                 verbose=not args.quiet, exchange=exchange)
+                 verbose=not args.quiet, exchange=exchange, cadence=args.cadence)
 
 
 if __name__ == '__main__':
