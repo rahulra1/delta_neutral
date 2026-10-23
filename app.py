@@ -160,7 +160,8 @@ def _resume_db_strategies():
         if not valid_legs and source not in ('EMA Spread', 'EMA Spread Scheduled', 'EMA Spread V2', 'EMA Trend', 'Dual Momentum', 'OI Strategy', 'Daily Strangle',
                                               'Weekly DN', 'Portfolio Strangle', 'Hybrid Switch',
                                               'Pivot SuperTrend', 'NSE Strangle',
-                                              'NSE Delta Neutral', 'NSE EMA Spread', 'NSE Dual Momentum'):
+                                              'NSE Delta Neutral', 'NSE EMA Spread', 'NSE Dual Momentum',
+                                              'Strategy Builder (Recurring)'):
             logger.warning(f"[resume] Skipping {sid} — no valid legs (missing product_id)")
             all_tracked[sid]['status'] = 'closed'
             try:
@@ -1603,6 +1604,7 @@ def _resume_db_strategies():
                     sched._api_key = _cfg.get_api_key()
                     sched._api_secret = _cfg.get_api_secret()
                     sched._broker = getattr(_cfg._thread_local, 'broker', 'demo')
+                    sched._running = True  # before exposing it to the dashboard poll
                     entry['strategy'] = sched
                     entry['running'] = True
                     sched.initialize()
@@ -7688,6 +7690,10 @@ def _deploy_builder_recurring(data, asset):
     sched._api_key = p_key or _cfg.get_api_key()
     sched._api_secret = p_secret or _cfg.get_api_secret()
     sched._broker = p_broker or getattr(_cfg._thread_local, 'broker', '') or 'demo'
+    # Mark running BEFORE registering so a dashboard poll between registration
+    # and initialize() (on the worker thread) can't see _running=False and
+    # mark the strategy completed.
+    sched._running = True
 
     entry = {'strategy': sched, 'thread': None, 'running': True,
              'user_id': uid, 'profile_id': profile_id, 'params': data,
