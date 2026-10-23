@@ -136,8 +136,9 @@ class TestIncompleteData:
 
 
 class TestCloseAll:
+    @patch(f'{MODULE}.get_fill_price', return_value={'order_id': 1, 'price': 400.0, 'filled_size': 10, 'commission': 0.0, 'source': 'fill'})
     @patch(f'{MODULE}.place_order', return_value={'id': 1})
-    def test_close_all_places_opposite_orders(self, mock_order):
+    def test_close_all_places_opposite_orders(self, mock_order, mock_fill):
         cb = MagicMock()
         m = _make_monitor(on_complete=cb)
         m.running = True
@@ -149,12 +150,18 @@ class TestCloseAll:
         for c in mock_order.call_args_list:
             assert c[0][3] == 'buy'  # opposite of 'sell'
         assert m.running is False
-        cb.assert_called_once_with(5.0, 'max_profit')
+        # Realized PnL comes from executed exit fills (400), not the mark-based
+        # current_pnl: (500-400)*10*0.001 + (450-400)*10*0.001 = 1.5
+        args = cb.call_args[0]
+        assert args[0] == pytest.approx(1.5)
+        assert args[1] == 'max_profit'
+        assert all(l['exit_price'] == 400.0 for l in m.legs)
 
 
 class TestStop:
+    @patch(f'{MODULE}.get_fill_price', return_value={'order_id': 1, 'price': 400.0, 'filled_size': 10, 'commission': 0.0, 'source': 'fill'})
     @patch(f'{MODULE}.place_order', return_value={'id': 1})
-    def test_manual_stop(self, mock_order):
+    def test_manual_stop(self, mock_order, mock_fill):
         m = _make_monitor()
         m.running = True
         m.stop()

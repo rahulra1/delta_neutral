@@ -225,7 +225,7 @@ class BuilderScheduler:
 
     def _run_one_entry(self):
         from api.chain import get_option_chain_full, get_expiries
-        from api.orders import place_order
+        from api.orders import place_order, get_fill_price
         from strategy.builder_common import (
             resolve_builder_expiry, resolve_leg_to_option, atm_index)
         from strategy.monitor import StrategyMonitor
@@ -260,10 +260,20 @@ class BuilderScheduler:
             if order is None:
                 self._print(f"[Builder Sched] Order FAILED {leg['side']} {opt['symbol']}")
                 continue
+            # Entry basis = the EXECUTED price of this order (looked up by id),
+            # not the chain mark. Mark is only a logged fallback.
+            mark = float(opt.get('mark_price', 0) or 0)
+            fill = get_fill_price(order, fallback=mark)
+            src = 'fill' if fill['source'] == 'fill' else 'MARK fallback (no fill)'
+            self._print(f"[Builder Sched] {leg['side'].upper()} {opt['symbol']} x{size} "
+                        f"@ {fill['price']:.4f} ({src}, order {fill['order_id']}, mark {mark:.4f})")
             placed.append({'product_id': opt['product_id'], 'symbol': opt['symbol'],
                            'type': leg['type'], 'strike': opt['strike'],
                            'side': leg['side'], 'size': size,
-                           'entry_price': float(opt.get('mark_price', 0))})
+                           'entry_price': fill['price'],
+                           'entry_order_id': fill['order_id'],
+                           'entry_price_source': fill['source'],
+                           'entry_commission': fill['commission']})
 
         if not placed:
             self._print("[Builder Sched] No legs placed this cycle")
@@ -310,7 +320,7 @@ class BuilderScheduler:
         self._persist_state()
 
     def _expiry_exit_watch(self, entry_id, placed, expiry, mon):
-        from api.orders import place_order
+        from api.orders import place_order, get_fill_price
         from api.pricing import get_current_price
         self._apply_thread_context()
         opened_at = datetime.now(IST)
@@ -339,7 +349,9 @@ class BuilderScheduler:
             if not claimed:
                 return  # someone else already closed it
 
-            # Book realized PnL from current marks BEFORE closing, then close.
+            # Close each leg, then book realized PnL from the EXECUTED close
+            # price (looked up by order id) vs the entry fill. The current mark
+            # is only a logged fallback when a fill can't be obtained.
             realized = 0.0
             for l in placed:
                 try:
@@ -347,13 +359,26 @@ class BuilderScheduler:
                     mark = data['mark_price'] if data else l['entry_price']
                 except Exception:
                     mark = l['entry_price']
-                sign = 1 if l['side'] == 'sell' else -1
-                realized += sign * (l['entry_price'] - mark) * l['size'] * self._cv
                 close_side = 'sell' if l['side'] == 'buy' else 'buy'
+                exit_px = float(mark)
                 try:
-                    place_order(l['product_id'], l['symbol'], l['size'], close_side)
+                    order = place_order(l['product_id'], l['symbol'], l['size'], close_side)
+                    if order is None:
+                        self._print(f"[Builder Sched] ⚠ Close FAILED {l['symbol']} — PnL uses mark {mark:.4f}")
+                    else:
+                        fill = get_fill_price(order, fallback=mark)
+                        exit_px = fill['price']
+                        l['exit_order_id'] = fill['order_id']
+                        l['exit_price_source'] = fill['source']
+                        l['exit_commission'] = fill['commission']
+                        src = 'fill' if fill['source'] == 'fill' else 'MARK fallback (no fill)'
+                        self._print(f"[Builder Sched] {close_side.upper()} {l['symbol']} x{l['size']} "
+                                    f"@ {exit_px:.4f} ({src}, order {fill['order_id']})")
                 except Exception as e:
                     logger.warning("[Builder Sched] close fail %s: %s", l['symbol'], e)
+                l['exit_price'] = exit_px
+                sign = 1 if l['side'] == 'sell' else -1
+                realized += sign * (l['entry_price'] - exit_px) * l['size'] * self._cv
             if mon is not None:
                 mon.running = False
             self._print(f"[Builder Sched] Force-closed {len(placed)} legs (square-off/expiry)")

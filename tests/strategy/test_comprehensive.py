@@ -35,6 +35,13 @@ def mock_place_order(product_id, symbol, size, side, **kw):
             'size': size, 'side': side, 'state': 'closed'}
 
 
+def mock_get_fill_price(order, fallback=None, **kw):
+    """Simulates resolving the executed price of an order by id."""
+    return {'order_id': (order or {}).get('id'), 'price': float(fallback or 0),
+            'filled_size': (order or {}).get('size', 0), 'commission': 0.0,
+            'source': 'fill'}
+
+
 def mock_place_order_fail(*args, **kw):
     return None
 
@@ -387,9 +394,10 @@ class TestStrategyMonitorExecution:
         return StrategyMonitor(legs=legs, max_profit=0.5, max_loss=0.5,
                                asset='BTC', lot_size=0.001, interval=0.1)
 
+    @patch('strategy.monitor.get_fill_price', side_effect=mock_get_fill_price)
     @patch('strategy.monitor.place_order', side_effect=mock_place_order)
     @patch('strategy.monitor.get_current_price')
-    def test_exits_on_max_profit(self, mock_price, mock_order):
+    def test_exits_on_max_profit(self, mock_price, mock_order, mock_fill):
         """Monitor should close when P&L exceeds max_profit."""
         # Prices dropped a lot → profit for short
         mock_price.side_effect = lambda pid, asset: {
@@ -403,9 +411,10 @@ class TestStrategyMonitorExecution:
         assert mon.exit_reason is not None
         assert mock_order.called  # closed the legs
 
+    @patch('strategy.monitor.get_fill_price', side_effect=mock_get_fill_price)
     @patch('strategy.monitor.place_order', side_effect=mock_place_order)
     @patch('strategy.monitor.get_current_price')
-    def test_exits_on_max_loss(self, mock_price, mock_order):
+    def test_exits_on_max_loss(self, mock_price, mock_order, mock_fill):
         """Monitor should close when loss exceeds max_loss."""
         # Prices went up a lot → loss for short
         mock_price.side_effect = lambda pid, asset: {

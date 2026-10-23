@@ -7463,16 +7463,23 @@ def api_place_legs():
         ok = result is not None
         results.append({'symbol': leg['symbol'], 'side': leg['side'], 'size': leg['size'], 'success': ok})
         if ok:
+            from api.orders import get_fill_price
+            fill = get_fill_price(result, fallback=float(leg.get('mark', 0) or 0))
+            results[-1].update(order_id=fill['order_id'], fill_price=fill['price'],
+                               price_source=fill['source'])
             placed_legs.append({
                 'product_id': leg['product_id'], 'symbol': leg['symbol'],
                 'type': leg.get('type', ''), 'strike': leg.get('strike', ''),
                 'side': leg['side'], 'size': int(leg['size']),
-                'entry_price': float(leg.get('mark', 0)),
+                'entry_price': fill['price'],
+                'entry_order_id': fill['order_id'],
+                'entry_price_source': fill['source'],
+                'entry_commission': fill['commission'],
             })
             position_tracker.open(current_user_id(), leg['product_id'], leg['symbol'],
                 type=leg.get('type', ''), strike=leg.get('strike', ''),
                 side=leg['side'], size=int(leg['size']),
-                entry_price=float(leg.get('mark', 0)),
+                entry_price=fill['price'],
                 asset=data.get('asset', 'BTC'), source='Option Chain')
 
     # Always track the strategy
@@ -7885,16 +7892,24 @@ def api_deploy_strategy_builder():
         ok = order is not None
         results.append({'symbol': opt['symbol'], 'side': leg['side'], 'size': size, 'success': ok})
         if ok:
+            # Entry basis = EXECUTED price from the order id (mark is a logged fallback).
+            from api.orders import get_fill_price
+            fill = get_fill_price(order, fallback=float(opt.get('mark_price', 0) or 0))
+            results[-1].update(order_id=fill['order_id'], fill_price=fill['price'],
+                               price_source=fill['source'])
             placed_legs.append({
                 'product_id': opt['product_id'], 'symbol': opt['symbol'],
                 'type': leg['type'], 'strike': opt['strike'],
                 'side': leg['side'], 'size': size,
-                'entry_price': float(opt.get('mark_price', 0)),
+                'entry_price': fill['price'],
+                'entry_order_id': fill['order_id'],
+                'entry_price_source': fill['source'],
+                'entry_commission': fill['commission'],
             })
             position_tracker.open(current_user_id(), opt['product_id'], opt['symbol'],
                 type=leg['type'], strike=opt['strike'],
                 side=leg['side'], size=size,
-                entry_price=float(opt.get('mark_price', 0)),
+                entry_price=fill['price'],
                 asset=asset, source='Strategy Builder')
 
     if not placed_legs:

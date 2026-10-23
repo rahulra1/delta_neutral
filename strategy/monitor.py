@@ -3,7 +3,7 @@ import threading
 import logging
 from datetime import datetime
 from api.pricing import get_current_price
-from api.orders import place_order
+from api.orders import place_order, get_fill_price
 from api.live_pnl import compute_leg_pnl
 from config import get_contract_value
 
@@ -36,6 +36,7 @@ class StrategyMonitor:
         self.user_id = None
         self.sid = None
         self.profile_id = None
+        self._last_marks = {}         # product_id -> last mark (exit fallback only)
 
     def _log(self, msg):
         with self._lock:
@@ -80,6 +81,7 @@ class StrategyMonitor:
                         details.append(f"{leg.get('symbol', '?')}: no data")
                         continue
                     mark = data['mark_price']
+                    self._last_marks[pid] = mark
                     leg_pnl = compute_leg_pnl(
                         float(leg.get('entry_price', 0)), mark,
                         int(leg.get('size', 0)), leg.get('side', 'sell'), self.lot_size
@@ -123,14 +125,36 @@ class StrategyMonitor:
                 self._log(f"⚠ Monitor error: {e}")
 
     def _close_all(self):
+        """Close every leg and compute the REALIZED PnL from executed prices:
+        entry = the leg's entry fill, exit = the close order's fill (looked up
+        by order id). Falls back to the last seen mark only when a fill can't
+        be obtained."""
+        realized = 0.0
         for leg in self.legs:
             close_side = 'sell' if leg['side'] == 'buy' else 'buy'
             self._log(f"📝 {close_side.upper()} {leg['symbol']} x {leg['size']}")
-            place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
+            order = place_order(leg['product_id'], leg['symbol'], leg['size'], close_side)
+            fallback = self._last_marks.get(leg.get('product_id'), leg.get('entry_price', 0))
+            if order is None:
+                self._log(f"⚠ Close order FAILED for {leg['symbol']} — PnL uses mark ${fallback:.4f}")
+                exit_px = float(fallback)
+            else:
+                fill = get_fill_price(order, fallback=fallback)
+                exit_px = fill['price']
+                leg['exit_order_id'] = fill['order_id']
+                leg['exit_commission'] = fill['commission']
+                leg['exit_price_source'] = fill['source']
+                self._log(f"   ↳ exit {'fill' if fill['source'] == 'fill' else 'MARK (no fill)'} "
+                          f"${exit_px:.4f} (order {fill['order_id']})")
+            leg['exit_price'] = exit_px
+            realized += compute_leg_pnl(float(leg.get('entry_price', 0)), exit_px,
+                                        int(leg.get('size', 0)), leg.get('side', 'sell'),
+                                        self.lot_size)
         self.running = False
-        self._log(f"✅ All legs closed. Final PnL: ${self.current_pnl:.2f} ({self.exit_reason})")
+        self.current_pnl = realized
+        self._log(f"✅ All legs closed. Realized PnL (executed): ${realized:.2f} ({self.exit_reason})")
         if self.on_complete:
-            self.on_complete(self.current_pnl, self.exit_reason)
+            self.on_complete(realized, self.exit_reason)
 
     def stop(self):
         """Manual stop — close everything."""
@@ -151,6 +175,7 @@ class StrategyMonitor:
                     'symbol': l['symbol'], 'side': l['side'], 'size': l['size'],
                     'entry_price': round(l['entry_price'], 2),
                     'type': l.get('type', ''), 'strike': l.get('strike', ''),
+                    'exit_price': l.get('exit_price'),
                 } for l in self.legs],
                 'logs': list(self.log),
                 'pnl_history': list(self.pnl_history[-500:]),
