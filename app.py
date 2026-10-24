@@ -827,6 +827,9 @@ def _resume_db_strategies():
                     s.initialize()
                     if s.trade_log:
                         print(f"[EMA Spread Scheduled] Restored {len(s.trade_log)} days | Cum PnL: ${s.cumulative_pnl:+.4f}")
+                    # Resume TP/SL monitoring for any restored open spread
+                    if s.legs:
+                        s.resume_monitoring()
                     s.monitor()
                 except Exception as e:
                     logger.error(f"[resume] EMA Spread Scheduled {sid} error: {e}")

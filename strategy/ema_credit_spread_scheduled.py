@@ -462,6 +462,61 @@ class EMACreditSpreadScheduled(BaseStrategy):
         logger.info(f"[EMA Spread Sched] Restored {len(restored)} leg(s) | Cum PnL ${self.cumulative_pnl:.4f}")
         return self
 
+    def resume_monitoring(self):
+        """Start a TP/SL monitor thread for each restored open spread.
+
+        After a restart, restore_state() reloads legs but nothing watches them.
+        Group legs by day_num (a spread = sell + buy) and spawn one
+        _monitor_day_trade thread per group, same as a freshly opened trade.
+        Returns the number of monitor threads started.
+        """
+        from config import get_contract_value
+        cv = get_contract_value(self.asset)
+        with self._legs_lock:
+            legs = list(self.legs)
+
+        groups = {}
+        legacy = []
+        for leg in legs:
+            dn = leg.get('day_num', 0) or 0
+            if dn > 0:
+                groups.setdefault(dn, []).append(leg)
+            else:
+                legacy.append(leg)
+        # Legacy legs without a day_num: pair each sell with a same-type buy
+        buys = [l for l in legacy if l.get('side') == 'buy']
+        neg = 0
+        for sl in [l for l in legacy if l.get('side') == 'sell']:
+            neg -= 1
+            pair = [sl]
+            for bl in buys:
+                if bl.get('type') == sl.get('type'):
+                    pair.append(bl)
+                    buys.remove(bl)
+                    break
+            groups[neg] = pair
+        for bl in buys:
+            neg -= 1
+            groups[neg] = [bl]
+
+        started = 0
+        for day_num, day_legs in sorted(groups.items()):
+            sells = [l for l in day_legs if l['side'] == 'sell']
+            buys_ = [l for l in day_legs if l['side'] == 'buy']
+            premium = (sum(l['entry_price'] for l in sells)
+                       - sum(l['entry_price'] for l in buys_)) * self.lot_size * cv
+            if premium <= 0:
+                logger.warning(f"[EMA Spread Sched] Not monitoring group {day_num}: "
+                               f"non-positive premium {premium:.4f} (incomplete spread?)")
+                continue
+            direction = 'bear_call' if any(l.get('type') == 'call' for l in day_legs) else 'bull_put'
+            threading.Thread(target=self._monitor_day_trade,
+                             args=(day_legs, premium, day_num, direction), daemon=True).start()
+            started += 1
+            print(f"[EMA Spread Sched] Resumed monitoring spread #{day_num} "
+                  f"({len(day_legs)} legs, premium ${premium:.4f})")
+        return started
+
     # --- Timing ---
 
     def _wait_for_next_entry(self):
