@@ -285,9 +285,12 @@ promote() {
     exit 1
   fi
 
-  # Sync code from beta to gamma (preserving gamma's venv, .env, .git, node_modules)
+  # Sync code from beta to gamma (preserving gamma's venv, .env, .git, node_modules
+  # and the gamma alert bots' state/caches/logs)
   rsync -a --exclude='venv' --exclude='node_modules' --exclude='.git' \
         --exclude='__pycache__' --exclude='*.pyc' --exclude='.env' \
+        --exclude='data/event_strategy' --exclude='data/catalyst_watch' --exclude='data/listing_monitor' \
+        --exclude='.crypto_cache' --exclude='logs' \
         "$BETA_DIR/" "$GAMMA_DIR/"
 
   # Install deps in gamma
@@ -332,6 +335,11 @@ EOF
     echo "   Test at: http://127.0.0.1:$GAMMA_PORT"
     echo "   Domain:  http://gamma.algox.co.in"
     echo "   When stable, run: ./deploy-gamma.sh promote  (to push to prod)"
+    # Restart the Telegram alert bots on the new gamma code (gamma only; non-fatal for the web app)
+    if [ -f "$GAMMA_DIR/deploy-alerts.sh" ]; then
+      echo ""
+      bash "$GAMMA_DIR/deploy-alerts.sh" deploy --no-pull || echo "⚠️  Alert bots failed to deploy (gamma web app is fine) — see output above"
+    fi
   else
     echo "❌ Gamma health check failed after promote!"
     journalctl -u algox-gamma --no-pager -n 20
