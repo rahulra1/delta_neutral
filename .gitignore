@@ -15,3 +15,10 @@ __pycache__/
 users.db
 trade_history.json
 .nse_cache/
+.crypto_cache/
+data/listing_monitor/
+data/catalyst_watch/
+.env
+data/event_strategy/
+alerts_bundle.tar.gz
+logs/

@@ -149,6 +149,11 @@ EOF
     echo ""
     echo "   Test at: http://127.0.0.1:$GAMMA_PORT"
     echo "   When stable, run: ./deploy-gamma.sh promote"
+    # Telegram alert bots (gamma only, paper/alerts — see deploy-alerts.sh). Non-fatal for the web app.
+    if [ -f "$GAMMA_DIR/deploy-alerts.sh" ]; then
+      echo ""
+      bash "$GAMMA_DIR/deploy-alerts.sh" deploy --no-pull || echo "⚠️  Alert bots failed to deploy (gamma web app is fine) — see output above"
+    fi
   else
     echo "❌ Gamma health check failed!"
     journalctl -u algox-gamma --no-pager -n 20
@@ -172,6 +177,7 @@ status() {
   else
     echo "🟡 Gamma: ⏹ Not running"
   fi
+  [ -f "$GAMMA_DIR/deploy-alerts.sh" ] && bash "$GAMMA_DIR/deploy-alerts.sh" status
 
   # Prod
   ACTIVE_PORT=$(get_active_prod_port)
