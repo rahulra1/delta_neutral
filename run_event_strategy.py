@@ -234,11 +234,21 @@ def cycle(st, universe, args, cache, force_digest=False):
     today = now.date()
     if time.time() - cache.get("ts", 0) > args.refresh_h * 3600 or not cache.get("events"):
         t0 = time.time()
+        cm.STATUS.update(blocked=0, stale=0)
         cache["events"] = cm.delta_events(universe, today=today, log=lambda *a: None,
                                           page_max_age_s=int(args.refresh_h * 3600))
         cache["ts"] = time.time()
-        print("[%s] calendar refreshed: %d events (%.0fs)" % (now.strftime("%H:%M"), len(cache["events"]), time.time() - t0))
-        if not cache["events"]:
+        print("[%s] calendar refreshed: %d events (%.0fs)%s" % (
+            now.strftime("%H:%M"), len(cache["events"]), time.time() - t0,
+            " | BLOCKED by Cloudflare on %d pages, %d served from stale cache" % (cm.STATUS["blocked"], cm.STATUS["stale"])
+            if cm.STATUS["blocked"] else ""))
+        if cm.STATUS["blocked"] and not cache.get("blocked_warned"):
+            cache["blocked_warned"] = True                     # once per process, not every refresh
+            notifier.notify("\u26A0\uFE0F Event strategy: coinmarketcal.com is blocking us (Cloudflare bot challenge). "
+                            "%s Calendar may be out of date until a new source / API key is configured."
+                            % ("Using stale cached pages for %d coins." % cm.STATUS["stale"] if cm.STATUS["stale"]
+                               else "No cached pages available - calendar is EMPTY."), send=args.notify)
+        elif not cache["events"]:
             notifier.notify("\u26A0\uFE0F Event strategy: CoinMarketCal returned no events (site changed or blocked?).",
                             send=args.notify)
     events = cache["events"]

@@ -71,9 +71,20 @@ def _cached_json(name, max_age_s, builder):
 # ---------------------------------------------------------------------------------------------- sitemaps
 def coin_slugs(max_age_s=7 * 86400):
     def build():
-        txt = _get(BASE + "/sitemaps/base", timeout=40).text
-        return sorted({u.rsplit("/", 1)[1] for u in re.findall(r"<loc>(https://coinmarketcal\.com/coin/[^<]+)</loc>", txt)})
-    return _cached_json("coin_slugs.json", max_age_s, build)
+        r = _get(BASE + "/sitemaps/base", timeout=40)
+        out = sorted({u.rsplit("/", 1)[1] for u in re.findall(r"<loc>(https://coinmarketcal\.com/coin/[^<]+)</loc>", r.text)})
+        if not out:                                                    # blocked / changed: never cache an empty list
+            raise RuntimeError("coinmarketcal sitemap returned no slugs (HTTP %s%s)"
+                               % (r.status_code, ", Cloudflare challenge" if is_blocked(r) else ""))
+        return out
+    p = _cache_path("coin_slugs.json")
+    try:
+        return _cached_json("coin_slugs.json", max_age_s, build)
+    except Exception:                                                   # noqa: BLE001 - fall back to any older copy
+        if os.path.exists(p):
+            with open(p) as f:
+                return json.load(f)
+        raise
 
 
 def event_lastmod(max_age_s=12 * 3600):
@@ -211,14 +222,30 @@ def resolve_date(ev, today):
     return None, None
 
 
+STATUS = {"blocked": 0, "stale": 0}        # per-process counters, read by callers to explain an empty/old calendar
+
+
+def is_blocked(r):
+    """True if the response is a Cloudflare bot challenge (403/503 + cf-mitigated header or 'Just a moment')."""
+    return r.status_code in (403, 429, 503) and (r.headers.get("cf-mitigated") == "challenge"
+                                                 or "Just a moment" in r.text[:2000])
+
+
 def coin_page(slug, max_age_s=6 * 3600):
-    """Parsed coin page (cached).  None if the page is missing or unparseable."""
+    """Parsed coin page (cached).  None if the page is missing or unparseable.
+    If the site is blocking us (Cloudflare challenge) an older cached copy of any age is used instead."""
     p = _cache_path("coin_" + slug + ".html")
     if os.path.exists(p) and time.time() - os.path.getmtime(p) < max_age_s:
         with open(p, encoding="utf-8") as f:
             return parse_coin_page(f.read())
     r = _get(BASE + "/coin/" + slug)
     if r.status_code != 200:
+        if is_blocked(r):
+            STATUS["blocked"] += 1
+            if os.path.exists(p):
+                STATUS["stale"] += 1
+                with open(p, encoding="utf-8") as f:
+                    return parse_coin_page(f.read())
         return None
     with open(p, "w", encoding="utf-8") as f:
         f.write(r.text)
