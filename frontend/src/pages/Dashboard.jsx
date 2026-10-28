@@ -7,6 +7,7 @@ import { PositionTable } from '../components/PositionCard';
 import PositionCard from '../components/PositionCard';
 import PayoffChart from '../components/PayoffChart';
 import { StrategyGrid } from '../components/StrategyCard';
+import ProxyPcrPanel from '../components/ProxyPcrPanel';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, ArcElement, Tooltip);
 
@@ -139,6 +140,8 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      <ProxyPcrPanel />
 
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 300px', gap: 20, marginBottom: 24 }}>
         <div className="card">

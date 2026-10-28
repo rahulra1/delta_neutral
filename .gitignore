@@ -22,3 +22,4 @@ data/catalyst_watch/
 data/event_strategy/
 alerts_bundle.tar.gz
 logs/
+data/*proxy_pcr_history.json*

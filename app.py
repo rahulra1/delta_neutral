@@ -1902,6 +1902,11 @@ def _resume_once():
     if not _db_resumed:
         _db_resumed = True
         _resume_db_strategies()
+        try:
+            from api.proxy_pcr import start_sampler
+            start_sampler()
+        except Exception as e:
+            logger.error(f"Proxy PCR sampler failed to start: {e}")
 
 def track_strategy(sid, source, name, user_id, details=None):
     """Register a strategy in the unified tracker."""
@@ -7442,6 +7447,40 @@ def api_chain():
     if chain is None:
         return jsonify(error="No data for this expiry"), 500
     return jsonify(chain=chain, spot_price=spot, expiry=exp)
+
+
+@app.route('/api/proxy-pcr')
+@login_required
+def api_proxy_pcr():
+    """Live proxy PCR (top-10 put OI / top-10 call OI around ATM) + history."""
+    from api.proxy_pcr import snapshot, start_sampler
+    start_sampler()
+    try:
+        hours = max(1, min(72, float(request.args.get('hours', 24))))
+    except ValueError:
+        hours = 24
+    return jsonify(snapshot(hours))
+
+
+@app.route('/api/proxy-pcr/calc')
+@login_required
+def api_proxy_pcr_calc():
+    """On-demand proxy PCR with strike breakdown.
+    ?symbol=NIFTY|BANKNIFTY|SENSEX|BTC|ETH  &source=auto|nse|groww  &window=10 &top=10
+    """
+    from api.proxy_pcr import calculate
+    symbol = request.args.get('symbol', 'NIFTY').upper()
+    source = request.args.get('source', 'auto').lower()
+    if source not in ('auto', 'nse', 'groww'):
+        return jsonify(error='source must be auto, nse or groww'), 400
+    try:
+        window = max(1, min(30, int(request.args.get('window', 10))))
+        top = max(1, min(30, int(request.args.get('top', 10))))
+        return jsonify(calculate(symbol, source, window, top))
+    except ValueError:
+        return jsonify(error='window/top must be integers'), 400
+    except Exception as e:
+        return jsonify(error=str(e), symbol=symbol), 502
 
 
 @app.route('/api/place-legs', methods=['POST'])
