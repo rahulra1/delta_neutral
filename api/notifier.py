@@ -28,8 +28,8 @@ WA_LIMIT = 1500          # Twilio WhatsApp body max is 1600 chars
 DEFAULT_TELEGRAM_CHAT_ID = "776942278"   # owner's chat with @Algox_tradebot; TELEGRAM_CHAT_ID overrides
 # Built-in default at the owner's request. NOTE: the repo is public, so this token is visible to anyone -
 # if it is abused, revoke it in @BotFather (/revoke) and set the new one as TELEGRAM_BOT_TOKEN in .env (overrides this).
-DEFAULT_TELEGRAM_BOT_TOKEN = "9070029080:AAFxM2AxPjwc6gm3xqmZOXNW9aRilgESqnA"
-
+#DEFAULT_TELEGRAM_BOT_TOKEN = "9070029080:AAFxM2AxPjwc6gm3xqmZOXNW9aRilgESqnA"
+DEFAULT_TELEGRAM_BOT_TOKEN = ""
 
 def _tg_chat():
     return os.environ.get("TELEGRAM_CHAT_ID") or DEFAULT_TELEGRAM_CHAT_ID
