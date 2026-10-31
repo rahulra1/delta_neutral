@@ -181,8 +181,8 @@ export default function ChartPage() {
     // EMA + Trendline Breakout signals
     if (inds.ema_trendline) {
       const etl = inds.ema_trendline;
-      if (etl.ema200?.length) {
-        chart.addLineSeries({ color: '#14b8a6', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, title: '200 EMA' }).setData(etl.ema200);
+      if (etl.ema?.length) {
+        chart.addLineSeries({ color: '#14b8a6', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, title: `${etl.ema_period || 100} EMA` }).setData(etl.ema);
       }
       if (etl.signals?.length) {
         const ext4 = Math.min(30, Math.max(15, data.candles.length / 10 | 0));

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import api from '../api';
+import { runSignalBacktest } from '../signalBacktest';
 
 /**
  * Reusable strategy template for any strategy type.
@@ -33,6 +34,8 @@ export default function StrategyTemplate({
   configFields = [], onStart, onStop, statusEndpoint, streamEndpoint, renderStatus,
   // Signal mode (Div+MSS, SMA+Vol)
   signalMode = false, signalKey = '',
+  // Optional "How this strategy works" panel: [{ heading, points: [string] }]
+  details = null,
   // Common
   defaultAsset = 'BTC', timeframes = ['15m', '1h', '4h', '1d'],
 }) {
@@ -71,6 +74,22 @@ export default function StrategyTemplate({
       </div>
 
       {error && <div className="error-msg">{error}</div>}
+
+      {details && details.length > 0 && (
+        <details style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px', marginBottom: 14 }}>
+          <summary style={{ cursor: 'pointer', fontWeight: 700, fontSize: '.85rem' }}>📖 How this strategy works</summary>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 14, marginTop: 12 }}>
+            {details.map(sec => (
+              <div key={sec.heading}>
+                <div style={{ fontWeight: 700, fontSize: '.78rem', marginBottom: 4 }}>{sec.heading}</div>
+                <ul style={{ margin: 0, paddingLeft: 18, fontSize: '.76rem', lineHeight: 1.55, color: 'var(--muted)' }}>
+                  {sec.points.map((p, i) => <li key={i}>{p}</li>)}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
 
       {/* Render mode */}
       {signalMode ? (
@@ -115,21 +134,7 @@ function SignalPanel({ asset, profileId, signalKey, timeframes, setError, title 
         const allSigs = r.data?.indicators?.[signalKey]?.signals || [];
         const sigs = strongOnly && signalKey === 'sma_vol_breakout' ? allSigs.filter(s => s.strength === 'strong') : allSigs;
         const candles = r.data?.candles || [];
-        let totalPnl = 0, wins = 0, losses = 0;
-        const trades = sigs.map(s => {
-          const isBuy = s.type === 'buy';
-          const si = candles.findIndex(c => c.t >= s.time);
-          let outcome = 'open', pnl = 0;
-          if (si >= 0) for (let i = si + 1; i < candles.length; i++) {
-            const c = candles[i];
-            if (isBuy) { if (c.l <= s.sl) { outcome = 'sl'; pnl = -(s.price - s.sl) * lots * lotSize; break; } if (c.h >= s.tp1) { outcome = 'tp'; pnl = (s.tp1 - s.price) * lots * lotSize; break; } }
-            else { if (c.h >= s.sl) { outcome = 'sl'; pnl = -(s.sl - s.price) * lots * lotSize; break; } if (c.l <= s.tp1) { outcome = 'tp'; pnl = (s.price - s.tp1) * lots * lotSize; break; } }
-          }
-          pnl = parseFloat(pnl.toFixed(2)); totalPnl += pnl;
-          if (outcome === 'tp') wins++; else if (outcome === 'sl') losses++;
-          return { ...s, pnl, outcome };
-        });
-        setBacktest({ totalPnl: parseFloat(totalPnl.toFixed(2)), wins, losses, total: sigs.length, open: sigs.length - wins - losses, trades });
+        setBacktest(runSignalBacktest(candles, sigs, { signalKey, lots, lotSize }));
       }).catch(() => {}).finally(() => setLoading(false));
   };
 
@@ -157,8 +162,6 @@ function SignalPanel({ asset, profileId, signalKey, timeframes, setError, title 
   };
 
   React.useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
-
-  const closed = (backtest?.wins || 0) + (backtest?.losses || 0);
 
   return (
     <>
@@ -197,23 +200,40 @@ function SignalPanel({ asset, profileId, signalKey, timeframes, setError, title 
       {/* Backtest */}
       {backtest && (
         <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 14, marginBottom: 12 }}>
-          <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 10 }}>📈 Backtest — {asset} {tf.toUpperCase()} · {lots} lots</div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 8, marginBottom: 10 }}>
-            {[['Total', backtest.total, 'var(--text)'], ['Wins', backtest.wins, 'var(--green)'], ['Losses', backtest.losses, 'var(--red)'], ['Open', backtest.open, '#f59e0b'], ['Win Rate', closed ? `${(backtest.wins / closed * 100).toFixed(0)}%` : '—', 'var(--text)'], ['P&L', `$${backtest.totalPnl.toFixed(2)}`, backtest.totalPnl >= 0 ? 'var(--green)' : 'var(--red)']].map(([k, v, c]) => (
+          <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 4 }}>📈 Backtest — {asset} {tf.toUpperCase()} · {lots} lots</div>
+          <div style={{ fontSize: '.68rem', color: 'var(--muted)', marginBottom: 10 }}>
+            {backtest.onePosition ? `One trade at a time (${backtest.skipped} signals skipped while in a trade)` : 'Every signal traded (positions can overlap, as the live trader does)'}
+            {' · '}Entry next candle open · SL first if both hit · fees 0.05%+GST & 1bp slippage per side
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, marginBottom: 10 }}>
+            {[
+              ['Trades', backtest.closed, 'var(--text)'],
+              ['Wins / Losses', `${backtest.wins} / ${backtest.losses}`, 'var(--text)'],
+              ['Win Rate', backtest.closed ? `${(backtest.wins / backtest.closed * 100).toFixed(0)}%` : '—', 'var(--text)'],
+              ['Profit Factor', backtest.profitFactor == null ? '—' : backtest.profitFactor.toFixed(2), 'var(--text)'],
+              ['Open', backtest.open ? `${backtest.open} ($${backtest.openPnl.toFixed(0)})` : 0, '#f59e0b'],
+              ['Gross P&L', `$${backtest.gross.toFixed(2)}`, backtest.gross >= 0 ? 'var(--green)' : 'var(--red)'],
+              ['Fees', `$${backtest.fees.toFixed(2)}`, 'var(--red)'],
+              ['Net P&L', `$${backtest.totalPnl.toFixed(2)}`, backtest.totalPnl >= 0 ? 'var(--green)' : 'var(--red)'],
+              ['Max Drawdown', `$${backtest.maxDD.toFixed(2)}`, 'var(--red)'],
+              ['Net / DD', backtest.maxDD > 0 ? (backtest.totalPnl / backtest.maxDD).toFixed(2) : '—', 'var(--text)'],
+            ].map(([k, v, c]) => (
               <div key={k} style={{ textAlign: 'center' }}><div style={{ fontSize: '.62rem', color: 'var(--muted)', textTransform: 'uppercase' }}>{k}</div><div style={{ fontSize: '.95rem', fontWeight: 800, color: c }}>{v}</div></div>
             ))}
           </div>
           <details><summary style={{ cursor: 'pointer', fontSize: '.78rem', color: 'var(--muted)' }}>Show {backtest.total} trades</summary>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.78rem', marginTop: 8 }}>
-              <thead><tr>{['Signal', 'Entry', 'SL', 'TP', 'Result', 'P&L'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+              <thead><tr>{['Signal', 'Entry', 'SL', 'TP', 'Exit', 'Result', 'Net P&L'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
               <tbody>{backtest.trades.map((t, i) => (
                 <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <td style={{ padding: '4px 8px' }}><span className={`badge ${t.type === 'buy' ? 'badge-green' : 'badge-red'}`}>{t.type === 'buy' ? '▲' : '▼'}</span></td>
-                  <td style={{ padding: '4px 8px' }}>${t.price.toFixed(2)}</td>
+                  <td style={{ padding: '4px 8px' }}><span className={`badge ${t.type === 'buy' ? 'badge-green' : 'badge-red'}`}>{t.type === 'buy' ? '▲' : '▼'}</span>
+                    <div style={{ fontSize: '.62rem', color: 'var(--muted)' }}>{new Date((t.entryTime || t.time) * 1000).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</div></td>
+                  <td style={{ padding: '4px 8px' }}>{t.entry ? `$${t.entry.toFixed(2)}` : '—'}</td>
                   <td style={{ padding: '4px 8px', color: 'var(--red)' }}>${t.sl.toFixed(2)}</td>
                   <td style={{ padding: '4px 8px', color: 'var(--green)' }}>${t.tp1.toFixed(2)}</td>
+                  <td style={{ padding: '4px 8px' }}>{t.exit && t.outcome !== 'open' ? `$${t.exit.toFixed(2)}` : '—'}</td>
                   <td style={{ padding: '4px 8px' }}><span className={`badge ${t.outcome === 'tp' ? 'badge-green' : t.outcome === 'sl' ? 'badge-red' : 'badge-yellow'}`}>{t.outcome === 'tp' ? '✓ TP' : t.outcome === 'sl' ? '✗ SL' : '⏳'}</span></td>
-                  <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${t.pnl.toFixed(2)}</td>
+                  <td style={{ padding: '4px 8px', fontWeight: 700, color: t.pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>${t.pnl.toFixed(2)}{t.outcome === 'open' ? ' (open)' : ''}</td>
                 </tr>))}</tbody>
             </table>
           </details>

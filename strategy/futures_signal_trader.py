@@ -15,6 +15,10 @@ FUTURES_PRODUCTS = {
     'ETH': 'ETHUSD',
 }
 
+# Strategies validated with ONE position at a time (backtest/trendline_optimize.py):
+# while a leg is open, new signals are skipped instead of stacking more legs.
+ONE_POSITION_KEYS = {'ema_trendline'}
+
 
 class FuturesSignalTrader:
     """Scans for signals from any indicator strategy and auto-places futures orders."""
@@ -237,6 +241,13 @@ class FuturesSignalTrader:
         print(f"[FST] {self.signal_key} {self.asset} {self.timeframe} | Scan #{self._scan_count} | Signals: {len(signals)} | New: {'YES ✓' if (is_new and recent) else 'no'} | Trades: {self.trades_today}/{self.max_trades_per_day}")
 
         if not is_new or not recent:
+            return
+
+        if self.signal_key in ONE_POSITION_KEYS and self.legs:
+            self.last_signal_time = latest['time']   # consume it; it must not fire later
+            print(f"[FST] {self.signal_key} | {latest['type'].upper()} signal skipped — position already open (one at a time)")
+            if self.sid:
+                self._persist()
             return
 
         # Price trigger: sma_vol_breakout entry = breakout candle high/low (pending)

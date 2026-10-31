@@ -504,99 +504,99 @@ def calc_box_theory(candles):
     return {'type': 'signals', 'signals': signals}
 
 
-def calc_ema_trendline_breakout(candles, ema_period=200, lb=5, min_rr=2):
-    """200 EMA + Trendline Breakout strategy with volume filter.
-    - Above 200 EMA: only longs (descending TL breakout)
-    - Below 200 EMA: only shorts (ascending TL breakdown)
-    - Breakout candle must have volume > 1.5x 20-period average
-    """
-    if len(candles) < ema_period + lb * 3:
-        return {'type': 'signals', 'signals': [], 'ema200': []}
+def calc_ema_trendline_breakout(candles, ema_period=100, lb=5, window_mult=6, min_rr=2,
+                                min_risk_pct=0.005):
+    """EMA + Trendline Breakout (improved, causal — Oct 2026).
 
-    closes = [c['c'] for c in candles]
-    highs = [c['h'] for c in candles]
-    lows = [c['l'] for c in candles]
-    vols = [c.get('v', 0) for c in candles]
+    - Swing high/low = extreme of the `lb` bars on each side; only usable once those
+      `lb` bars have CLOSED (no look-ahead).
+    - Long line: last two confirmed swing highs with the 2nd lower (falling resistance).
+      Short line: last two confirmed swing lows with the 2nd higher (rising support).
+      Pivots must be >= lb bars apart. A line is live from the 2nd pivot's confirmation
+      until the next same-side pivot is confirmed or window_mult*lb bars after the 2nd pivot.
+    - Signal: a FRESH close through the line (previous close on the other side),
+      longs only above the EMA(ema_period), shorts only below. No volume filter.
+      One attempt per line: if the first close-through fails a filter, the line is dropped.
+    - SL = last confirmed opposite swing (swing low for longs, swing high for shorts).
+      Skip if the stop is closer than min_risk_pct of price (fees would dominate).
+    - TP = min_rr x risk from the signal close. Trade one position at a time
+      (enforced in strategy/futures_signal_trader.py).
+    The last candle is treated as still forming and is ignored.
+    Backtest: backtest/trendline_optimize.py, btc_signal_strategy_report.py --strategy ema_tl.
+    """
+    import bisect
+    empty = {'type': 'signals', 'signals': [], 'ema': [], 'ema_period': ema_period}
+    cs = candles[:-1]                       # drop the forming candle
+    n = len(cs)
+    if n < ema_period + lb * 4:
+        return empty
+
+    closes = [c['c'] for c in cs]
+    highs = [c['h'] for c in cs]
+    lows = [c['l'] for c in cs]
 
     k = 2 / (ema_period + 1)
     ema = [closes[0]]
-    for i in range(1, len(closes)):
+    for i in range(1, n):
         ema.append(closes[i] * k + ema[-1] * (1 - k))
-    ema_data = [{'time': candles[i]['t'], 'value': round(ema[i], 2)} for i in range(ema_period - 1, len(candles))]
-
-    # 20-period average volume
-    avg_vol = [0] * len(vols)
-    for i in range(len(vols)):
-        start = max(0, i - 19)
-        w = vols[start:i + 1]
-        avg_vol[i] = sum(w) / len(w) if w else 1
+    ema_data = [{'time': cs[i]['t'], 'value': round(ema[i], 2)} for i in range(ema_period - 1, n)]
 
     swing_highs, swing_lows = [], []
-    for i in range(lb, len(candles) - lb):
+    for i in range(lb, n - lb):
         if highs[i] == max(highs[i - lb:i + lb + 1]):
             swing_highs.append(i)
         if lows[i] == min(lows[i - lb:i + lb + 1]):
             swing_lows.append(i)
+    window = window_mult * lb
+
+    def last_confirmed(pivots, t):
+        """Index of the latest pivot confirmed by bar t (pivot + lb <= t), or None."""
+        j = bisect.bisect_right(pivots, t - lb) - 1
+        return pivots[j] if j >= 0 else None
 
     signals = []
-
-    def find_trendline_signals(pivots, direction):
-        sigs = []
+    for side, pivots, opp, src in (('buy', swing_highs, swing_lows, highs),
+                                   ('sell', swing_lows, swing_highs, lows)):
         for j in range(1, len(pivots)):
             i1, i2 = pivots[j - 1], pivots[j]
-            if i2 - i1 < lb or i2 >= len(candles) - 2:
+            if i2 - i1 < lb:
                 continue
-            if direction == 'long':
-                p1, p2 = highs[i1], highs[i2]
-                if p2 >= p1:
+            p1, p2 = src[i1], src[i2]
+            if (side == 'buy' and p2 >= p1) or (side == 'sell' and p2 <= p1):
+                continue
+            slope = (p2 - p1) / (i2 - i1)
+            next_conf = pivots[j + 1] + lb if j + 1 < len(pivots) else n
+            for t in range(i2 + lb, min(i2 + window, next_conf - 1, n - 1) + 1):
+                line = p2 + slope * (t - i2)
+                prev_line = p2 + slope * (t - 1 - i2)
+                if side == 'buy':
+                    crossed = closes[t] > line and closes[t - 1] <= prev_line
+                else:
+                    crossed = closes[t] < line and closes[t - 1] >= prev_line
+                if not crossed:
                     continue
-                slope = (p2 - p1) / (i2 - i1)
-                for ki in range(i2 + 1, min(i2 + lb * 3, len(candles) - 1)):
-                    tl_val = p2 + slope * (ki - i2)
-                    if candles[ki]['c'] > tl_val and closes[ki] > ema[ki]:
-                        if avg_vol[ki] > 0 and vols[ki] < avg_vol[ki] * 1.5:
-                            break
-                        sl = candles[ki]['l']
-                        risk = candles[ki]['c'] - sl
-                        if risk <= 0:
-                            break
-                        sigs.append({
-                            'time': candles[ki]['t'], 'type': 'buy',
-                            'price': round(candles[ki]['c'], 2),
-                            'sl': round(sl, 2), 'tp1': round(candles[ki]['c'] + risk * min_rr, 2),
-                            'tl_start_time': candles[i1]['t'], 'tl_start_price': round(p1, 2),
-                            'tl_end_time': candles[i2]['t'], 'tl_end_price': round(p2, 2),
-                        })
-                        break
-            else:
-                p1, p2 = lows[i1], lows[i2]
-                if p2 <= p1:
-                    continue
-                slope = (p2 - p1) / (i2 - i1)
-                for ki in range(i2 + 1, min(i2 + lb * 3, len(candles) - 1)):
-                    tl_val = p2 + slope * (ki - i2)
-                    if candles[ki]['c'] < tl_val and closes[ki] < ema[ki]:
-                        if avg_vol[ki] > 0 and vols[ki] < avg_vol[ki] * 1.5:
-                            break
-                        sl = candles[ki]['h']
-                        risk = sl - candles[ki]['c']
-                        if risk <= 0:
-                            break
-                        sigs.append({
-                            'time': candles[ki]['t'], 'type': 'sell',
-                            'price': round(candles[ki]['c'], 2),
-                            'sl': round(sl, 2), 'tp1': round(candles[ki]['c'] - risk * min_rr, 2),
-                            'tl_start_time': candles[i1]['t'], 'tl_start_price': round(p1, 2),
-                            'tl_end_time': candles[i2]['t'], 'tl_end_price': round(p2, 2),
-                        })
-                        break
-        return sigs
-
-    signals += find_trendline_signals(swing_highs, 'long')
-    signals += find_trendline_signals(swing_lows, 'short')
+                # one attempt per line: any failed filter drops the line
+                if (side == 'buy' and closes[t] <= ema[t]) or (side == 'sell' and closes[t] >= ema[t]):
+                    break
+                sp = last_confirmed(opp, t)
+                if sp is None:
+                    break
+                entry = closes[t]
+                sl = lows[sp] if side == 'buy' else highs[sp]
+                risk = (entry - sl) if side == 'buy' else (sl - entry)
+                if risk <= 0 or risk / entry < min_risk_pct:
+                    break
+                signals.append({
+                    'time': cs[t]['t'], 'type': side, 'price': round(entry, 2),
+                    'sl': round(sl, 2),
+                    'tp1': round(entry + risk * min_rr if side == 'buy' else entry - risk * min_rr, 2),
+                    'tl_start_time': cs[i1]['t'], 'tl_start_price': round(p1, 2),
+                    'tl_end_time': cs[i2]['t'], 'tl_end_price': round(p2, 2),
+                    'label': 'Trendline Breakout',
+                })
+                break
     signals.sort(key=lambda s: s['time'])
-
-    return {'type': 'signals', 'signals': signals, 'ema200': ema_data}
+    return {'type': 'signals', 'signals': signals, 'ema': ema_data, 'ema_period': ema_period}
 
 
 def calc_ema920_pullback(candles, min_rr=2):

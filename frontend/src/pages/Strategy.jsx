@@ -4,6 +4,46 @@ import api from '../api';
 import { StrategySelector } from '../components/StrategyInfoCard';
 import StrategyTemplate from '../components/StrategyTemplate';
 
+// Shown in the "How this strategy works" panel. Keep in sync with
+// api/chart.py calc_ema_trendline_breakout and strategy/futures_signal_trader.py.
+const EMA_TRENDLINE_DETAILS = [
+  { heading: '1. Trend direction', points: [
+    'Longs only when the candle closes above the 100 EMA; shorts only below it.',
+    'Trades the pullback inside the trend, never against it.',
+  ] },
+  { heading: '2. Swing points & trendline', points: [
+    'Swing high/low = highest high / lowest low of 5 candles on each side, used only after those 5 candles have closed (no look-ahead).',
+    'Long: line through the last two falling swing highs (the end of a dip). Short: line through the last two rising swing lows (the end of a bounce).',
+    'A line is watched for up to 30 candles after its 2nd swing point.',
+  ] },
+  { heading: '3. Entry', points: [
+    'Signal = a candle CLOSES through the line after the previous close was on the other side.',
+    'Each line gets one try: if that first break is on the wrong side of the EMA, the line is dropped.',
+    'Order: market, about the next candle open. No volume filter.',
+  ] },
+  { heading: '4. Stop loss & target', points: [
+    'SL at the last swing low (long) / swing high (short): if price goes back past it, the pullback was not over.',
+    'Trade skipped if the SL is closer than 0.5% of price (fees would eat most of the risk).',
+    'TP = 2× the risk (2:1 reward-to-risk). No time exit.',
+  ] },
+  { heading: '5. Live trade handling', points: [
+    'Checks every 30 s: new closed-candle signal → order; mark price beyond SL/TP → close at market.',
+    'One trade at a time: signals that arrive while a trade is open are skipped, not taken later.',
+    'Max 10 entries per day.',
+  ] },
+  { heading: '6. What to expect (backtest, BTC 1H, 100 lots, fees incl.)', points: [
+    '≈70–85 trades a year, ~45% win rate; winners are 2× losers.',
+    'Oct 2024–25: +$1,995 · Oct 2025–26: +$5,412 · untested Jan–Oct 2024: +$1,280.',
+    'Max drawdown $1,250–1,700 (≈13–17% of $10k); losing streaks of 5–7 trades are normal.',
+  ] },
+  { heading: '⚠ Risks & limits', points: [
+    'Struggles in sideways/choppy markets where price keeps crossing the EMA.',
+    'Sensitive to the EMA length: the same rules with a 200 EMA lost money on the untested period.',
+    'Signals use Yahoo prices but orders fill on Delta; ~20% of signals can differ.',
+    'Validated on BTC 1H only — not 15m, other timeframes or ETH.',
+  ] },
+];
+
 const STRATEGIES = [
   { key: 'delta_neutral', label: 'Delta Neutral', icon: '⚡', type: 'Options',
     desc: 'Sells a call and put at matching deltas. Monitors premiums and rebalances when one leg spikes. Auto-exits at target P&L.',
@@ -22,9 +62,9 @@ const STRATEGIES = [
     features: ['Prev Day H/L', 'Buy Zone', 'Sell Zone', 'Mean Revert'],
     rec: '⏱ Best on 1H (84% WR BANKNIFTY) · 1D for crypto' },
   { key: 'ema_trendline', label: 'EMA + Trendline', icon: '📐', type: 'Futures',
-    desc: '200 EMA for trend direction + trendline breakouts. Only longs above EMA, only shorts below.',
-    features: ['200 EMA', 'Trendline', 'Breakout', '1:2+ R:R'],
-    rec: '⏱ Best on 1H (59% WR BTC) · Volume filtered' },
+    desc: 'Trendline breakouts in the direction of the 100 EMA. Stop at the last swing point, 2:1 target, one position at a time.',
+    features: ['100 EMA', 'Swing Trendline', 'Swing Stop', '1:2 R:R'],
+    rec: '⏱ BTC 1H only · backtest 2024-26: ~45% WR, PF 1.2–1.8' },
   { key: 'ema920_pullback', label: '9/20 EMA Pullback', icon: '🔄', type: 'Futures',
     desc: '9 & 20 EMA pullback entries. Buy dips above EMAs, sell rallies below EMAs, skip the chop.',
     features: ['9 EMA', '20 EMA', 'Pullback', 'Directional'],
@@ -455,8 +495,9 @@ export default function Strategy() {
           description="Previous day's high/low box — buy at bottom zone, sell at top zone, skip the middle" profiles={profiles} />
       )}
       {activeTab === 'ema_trendline' && (
-        <StrategyTemplate signalMode signalKey="ema_trendline" title="200 EMA + Trendline Breakout" icon="📐" type="Futures"
-          description="200 EMA trend filter + trendline breakout entries with 1:2 minimum R:R" profiles={profiles} />
+        <StrategyTemplate signalMode signalKey="ema_trendline" title="EMA + Trendline Breakout" icon="📐" type="Futures"
+          description="Fresh close through a confirmed swing trendline, with the 100 EMA trend. SL at last swing (min 0.5%), TP 2R. Use BTC 1H." profiles={profiles}
+          details={EMA_TRENDLINE_DETAILS} />
       )}
       {activeTab === 'ema920_pullback' && (
         <StrategyTemplate signalMode signalKey="ema920_pullback" title="9/20 EMA Pullback" icon="🔄" type="Futures"
