@@ -37,7 +37,7 @@ export default function StrategyTemplate({
   // Optional "How this strategy works" panel: [{ heading, points: [string] }]
   details = null,
   // Common
-  defaultAsset = 'BTC', timeframes = ['15m', '1h', '4h', '1d'],
+  defaultAsset = 'BTC', timeframes = ['15m', '1h', '4h', '1d'], defaultTf = '1h',
 }) {
   const [asset, setAsset] = useState(defaultAsset);
   const [profileId, setProfileId] = useState('');
@@ -93,7 +93,7 @@ export default function StrategyTemplate({
 
       {/* Render mode */}
       {signalMode ? (
-        <SignalPanel asset={asset} profileId={profileId} signalKey={signalKey} timeframes={timeframes} profiles={profiles} setError={setError} title={title} />
+        <SignalPanel asset={asset} profileId={profileId} signalKey={signalKey} timeframes={timeframes} defaultTf={defaultTf} profiles={profiles} setError={setError} title={title} />
       ) : (
         <ConfigPanel asset={asset} profileId={profileId} configFields={configFields} onStart={onStart} onStop={onStop} statusEndpoint={statusEndpoint} streamEndpoint={streamEndpoint} renderStatus={renderStatus} profiles={profiles} setError={setError} />
       )}
@@ -103,8 +103,8 @@ export default function StrategyTemplate({
 
 // ── Signal-based strategy panel ──
 
-function SignalPanel({ asset, profileId, signalKey, timeframes, setError, title }) {
-  const [tf, setTf] = useState('1h');
+function SignalPanel({ asset, profileId, signalKey, timeframes, defaultTf = '1h', setError, title }) {
+  const [tf, setTf] = useState(defaultTf);
   const [lots, setLots] = useState(10);
   const [signals, setSignals] = useState([]);
   const [backtest, setBacktest] = useState(null);

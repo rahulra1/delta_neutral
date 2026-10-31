@@ -41,7 +41,8 @@ import requests
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from api.chart import calc_ema920_pullback, calc_sma_vol_breakout, calc_ema_trendline_breakout  # noqa: E402
+from api.chart import (calc_ema920_pullback, calc_sma_vol_breakout, calc_ema_trendline_breakout,  # noqa: E402
+                       calc_candlestick_patterns)
 
 def calc_sma_vol_breakout_v2(candles, sma_period=50, vol_mult=1.5, rr=4, min_risk_pct=0.005):
     """Improved SMA + Breakout (candidate, NOT live): stronger volume filter
@@ -104,6 +105,15 @@ def _ema_tl_live(cs):
     return {'signals': causal_signals(cs, calc_ema_trendline_breakout)}
 
 
+def _candle_patterns_all(cs):
+    """Live api.chart.calc_candlestick_patterns on the full history. The function treats the
+    last candle as forming, so a copy of the final closed candle is appended."""
+    sigs = calc_candlestick_patterns(cs + [dict(cs[-1])])['signals']
+    for s in sigs:
+        s['pattern'] = s.get('label')
+    return {'signals': sigs}
+
+
 STRATEGIES = {
     # key: (label, signal fn, entry mode)
     'ema920': ('9/20 EMA Pullback', calc_ema920_pullback, 'next_open'),
@@ -113,6 +123,7 @@ STRATEGIES = {
     'ema_tl': ('EMA + Trendline (live fn: EMA100, swing stop, 2R)', calc_ema_trendline_breakout, 'next_open'),
     # bar-by-bar replay = exactly what the live trader sees each scan
     'ema_tl_live': ('EMA + Trendline (bar-by-bar replay)', _ema_tl_live, 'next_open'),
+    'candle': ('Candlestick Patterns (live fn: EMA100 trend, vol >= 1.5x avg20, 1.5 ATR stop, 2R)', _candle_patterns_all, 'next_open'),
 }
 ENTRY_MODE = 'next_open'   # set in main()
 ENTRY_BAR = 'worst'        # stop entries: 'worst' = SL first on fill bar, 'best' = adverse wick before fill

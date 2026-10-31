@@ -17,7 +17,7 @@ FUTURES_PRODUCTS = {
 
 # Strategies validated with ONE position at a time (backtest/trendline_optimize.py):
 # while a leg is open, new signals are skipped instead of stacking more legs.
-ONE_POSITION_KEYS = {'ema_trendline'}
+ONE_POSITION_KEYS = {'ema_trendline', 'candle_patterns'}
 
 
 class FuturesSignalTrader:
@@ -234,7 +234,7 @@ class FuturesSignalTrader:
         recent = False
         if is_new and latest:
             now = time.time()
-            candle_seconds = {'5m': 300, '15m': 900, '1h': 3600, '1d': 86400}
+            candle_seconds = {'5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
             max_age = candle_seconds.get(self.timeframe, 900) * 2
             recent = (now - latest['time']) <= max_age
 

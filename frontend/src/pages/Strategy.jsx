@@ -4,6 +4,40 @@ import api from '../api';
 import { StrategySelector } from '../components/StrategyInfoCard';
 import StrategyTemplate from '../components/StrategyTemplate';
 
+// Keep in sync with api/chart.py calc_candlestick_patterns and strategy/futures_signal_trader.py.
+const CANDLE_PATTERN_DETAILS = [
+  { heading: '1. Patterns', points: [
+    'Bullish Engulfing: a red candle, then a bigger green body that covers it → buy.',
+    'Bearish Engulfing: a green candle, then a bigger red body that covers it → sell.',
+    'Hammer: green candle, lower wick > 2× body, tiny upper wick → buy.',
+    'Shooting Star: red candle, upper wick > 2× body, tiny lower wick → sell.',
+  ] },
+  { heading: '2. Filters', points: [
+    'Trend: buy patterns only when the candle closes above the 100 EMA; sell patterns only below it.',
+    'Volume: the pattern candle must trade at least 1.5× its 20-candle average volume.',
+    'Uses closed candles only; 4H candles and volume come from Delta (the market we trade).',
+  ] },
+  { heading: '3. Entry, stop & target', points: [
+    'Market order at about the next candle open.',
+    'SL = 1.5 × ATR(14) from the close — room for normal 4H noise (the old candle-low stop was hit too often).',
+    'TP = 2× the risk. No time exit.',
+  ] },
+  { heading: '4. Live trade handling', points: [
+    'Checks every 30 s; closes at market when the mark price crosses the SL or TP.',
+    'One trade at a time: signals while a trade is open are skipped, not taken later.',
+  ] },
+  { heading: '5. What to expect (backtest, BTC 4H, 100 lots, fees incl.)', points: [
+    '≈25 trades a year (about 2 a month), ~40–60% win rate.',
+    'Oct 2024–25: +$1,775 · Oct 2025–26: +$873 · untested Jan–Oct 2024: +$2,229.',
+    'Max drawdown $430–1,000 (≈4–10% of $10k).',
+  ] },
+  { heading: '⚠ Risks & limits', points: [
+    'Few trades — results can swing a lot by luck; judge it over many months.',
+    'Early 2024 was a strong trend that suited it (even the old version made money then).',
+    'Depends on the volume filter; validated on BTC 4H only — not 15m/1h or ETH.',
+  ] },
+];
+
 // Shown in the "How this strategy works" panel. Keep in sync with
 // api/chart.py calc_ema_trendline_breakout and strategy/futures_signal_trader.py.
 const EMA_TRENDLINE_DETAILS = [
@@ -86,9 +120,9 @@ const STRATEGIES = [
     features: ['Order Blocks', 'S/D Zones', 'Revisit', '1:2 R:R'],
     rec: '⏱ Best on 1H · All assets' },
   { key: 'candle_patterns', label: 'Candlestick Patterns', icon: '🕯️', type: 'Futures',
-    desc: 'Engulfing, Hammer, Shooting Star patterns with volume confirmation.',
-    features: ['Engulfing', 'Hammer', 'Shooting Star', 'Volume'],
-    rec: '⏱ Best on 1H/1D · All assets' },
+    desc: 'Engulfing, Hammer & Shooting Star in the direction of the 100 EMA, on high volume. ATR stop, 2:1 target, one position at a time.',
+    features: ['Engulfing', 'Hammer / Star', '100 EMA', 'ATR Stop'],
+    rec: '⏱ BTC 4H only · backtest 2024-26: ~40-60% WR, ~25 trades/yr' },
   { key: 'vol_imbalance', label: 'Volume Imbalance', icon: '🐋', type: 'Futures',
     desc: 'Institutional volume spike → consolidation → breakout. 1:4 R:R, only 20-30% win rate needed.',
     features: ['10x Vol Spike', 'Consolidation', 'Breakout', '1:4 R:R'],
@@ -521,7 +555,8 @@ export default function Strategy() {
       )}
       {activeTab === 'candle_patterns' && (
         <StrategyTemplate signalMode signalKey="candle_patterns" title="Candlestick Patterns" icon="🕯️" type="Futures"
-          description="Engulfing, Hammer, Shooting Star patterns with volume confirmation." profiles={profiles} />
+          description="Engulfing / Hammer / Shooting Star with the 100 EMA trend and volume ≥ 1.5× average. SL 1.5 ATR, TP 2R. Use BTC 4H."
+          profiles={profiles} defaultTf="4h" details={CANDLE_PATTERN_DETAILS} />
       )}
       {activeTab === 'vol_imbalance' && (
         <StrategyTemplate signalMode signalKey="vol_imbalance" title="Volume Imbalance" icon="🐋" type="Futures"

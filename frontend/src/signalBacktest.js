@@ -11,7 +11,7 @@
  *    skipped, as the live trader does); others count every signal, like the live trader.
  *  - Max drawdown = largest peak-to-trough fall of the closed-trade equity curve.
  */
-export const ONE_POSITION_KEYS = new Set(['ema_trendline']);
+export const ONE_POSITION_KEYS = new Set(['ema_trendline', 'candle_patterns']);
 export const FEE_RATE = 0.0005 * 1.18;
 export const SLIPPAGE = 0.0001;
 

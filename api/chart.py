@@ -17,6 +17,38 @@ YAHOO_CHART_SYMBOLS = {
 
 RANGES = {'15m': '60d', '1h': '6mo', '1d': '2y'}
 
+# Yahoo has no 4h interval (it fell back to ~30 candles), so crypto 4h comes from Delta's
+# public production market-data endpoint (OHLC + volume of the perp we actually trade).
+DELTA_PUBLIC_URL = 'https://api.india.delta.exchange'
+DELTA_CANDLE_SYMBOLS = {'BTC': 'BTCUSD', 'ETH': 'ETHUSD'}
+DELTA_INTERVALS = {'4h': 14400}
+DELTA_BARS = 2000                     # ~333 days of 4h candles (incl. the forming one)
+_delta_cache = {}                     # (symbol, interval) -> (fetched_at, candles)
+
+
+def _get_delta_candles(symbol, interval):
+    key = (symbol, interval)
+    hit = _delta_cache.get(key)
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
+    sec = DELTA_INTERVALS[interval]
+    end = int(time.time())
+    try:
+        r = requests.get(f'{DELTA_PUBLIC_URL}/v2/history/candles',
+                         params={'resolution': interval, 'symbol': DELTA_CANDLE_SYMBOLS[symbol],
+                                 'start': end - DELTA_BARS * sec, 'end': end}, timeout=15)
+        r.raise_for_status()
+        rows = r.json().get('result') or []
+    except Exception:
+        return hit[1] if hit else None
+    candles = [{'t': int(c['time']), 'o': float(c['open']), 'h': float(c['high']), 'l': float(c['low']),
+                'c': float(c['close']), 'v': float(c.get('volume') or 0)}
+               for c in sorted(rows, key=lambda c: c['time'])]
+    if not candles:
+        return hit[1] if hit else None
+    _delta_cache[key] = (time.time(), candles)
+    return candles
+
 
 def _get_session():
     global _session, _crumb
@@ -36,7 +68,10 @@ def _get_session():
 
 
 def get_candles(symbol, interval='1h'):
-    """Fetch OHLCV candles from Yahoo Finance."""
+    """Fetch OHLCV candles (oldest first; the last one is still forming).
+    Yahoo Finance, except crypto 4h which comes from Delta (Yahoo has no 4h)."""
+    if interval in DELTA_INTERVALS and symbol in DELTA_CANDLE_SYMBOLS:
+        return _get_delta_candles(symbol, interval)
     ysym = YAHOO_CHART_SYMBOLS.get(symbol)
     if not ysym:
         return None
@@ -941,55 +976,86 @@ def calc_supply_demand(candles, min_move_pct=0.5, lb=3):
     return {'type': 'signals', 'signals': signals[-100:]}
 
 
-def calc_candlestick_patterns(candles):
-    """Candlestick Patterns: engulfing, hammer, shooting star with volume confirmation."""
-    if len(candles) < 3:
-        return {'type': 'signals', 'signals': []}
-    signals = []
-    vols = [c.get('v', 0) for c in candles]
-    avg_vol = [0] * len(vols)
-    for i in range(len(vols)):
-        s = max(0, i - 19); w = vols[s:i + 1]; avg_vol[i] = sum(w) / len(w) if w else 1
+def calc_candlestick_patterns(candles, ema_period=100, vol_mult=1.5, atr_period=14, atr_mult=1.5,
+                              min_rr=2, warmup=200):
+    """Candlestick Patterns (improved, Oct 2026 — validated on BTC 4H).
 
-    for i in range(1, len(candles) - 1):
+    Patterns (same rules and precedence as before):
+      Bullish Engulfing, Bearish Engulfing, Hammer, Shooting Star.
+    Filters:
+      - trend: bullish patterns only when the close is above the EMA(ema_period),
+        bearish only below it
+      - volume: candle volume >= vol_mult x its 20-candle average
+    Risk:
+      - SL = close -/+ atr_mult x ATR(atr_period) (room for normal noise),
+        TP = min_rr x risk. Trade one position at a time
+        (enforced in strategy/futures_signal_trader.py).
+    The last candle is treated as still forming and ignored; the first `warmup`
+    candles are skipped so the EMA/ATR are settled.
+    Backtest: backtest/candle_optimize.py (all ctxoff ema100 vol1.5 atr rr2).
+    """
+    n = len(candles)
+    if n < warmup + 2:
+        return {'type': 'signals', 'signals': [], 'ema': [], 'ema_period': ema_period}
+    closes = [c['c'] for c in candles]
+    vols = [c.get('v', 0) for c in candles]
+
+    k = 2 / (ema_period + 1)
+    ema = [closes[0]]
+    for x in closes[1:]:
+        ema.append(x * k + ema[-1] * (1 - k))
+
+    atr = [0.0] * n
+    a = None
+    for i in range(1, n):
+        c, pc = candles[i], closes[i - 1]
+        tr = max(c['h'] - c['l'], abs(c['h'] - pc), abs(c['l'] - pc))
+        a = tr if a is None else (a * (atr_period - 1) + tr) / atr_period
+        atr[i] = a
+
+    avg_vol = [0.0] * n
+    run = 0.0
+    for i in range(n):
+        run += vols[i]
+        if i >= 20:
+            run -= vols[i - 20]
+        avg_vol[i] = max(1.0, run / min(i + 1, 20))
+
+    signals = []
+    for i in range(max(1, warmup), n - 1):
         prev, curr = candles[i - 1], candles[i]
         body = abs(curr['c'] - curr['o'])
         rng = curr['h'] - curr['l']
-        if rng <= 0: continue
+        if rng <= 0:
+            continue
         prev_body = abs(prev['c'] - prev['o'])
-
-        # Volume filter
-        if avg_vol[i] > 0 and vols[i] < avg_vol[i]:
+        if vols[i] < vol_mult * avg_vol[i]:
             continue
 
-        sl = tp = None
-        sig_type = None
-
-        # Bullish Engulfing
+        side = pattern = None
         if prev['c'] < prev['o'] and curr['c'] > curr['o'] and curr['c'] > prev['o'] and curr['o'] < prev['c'] and body > prev_body:
-            sig_type = 'buy'; sl = curr['l']; risk = curr['c'] - sl
-            if risk > 0: tp = curr['c'] + risk * 2
-
-        # Bearish Engulfing
+            side, pattern = 'buy', 'Bullish Engulfing'
         elif prev['c'] > prev['o'] and curr['c'] < curr['o'] and curr['c'] < prev['o'] and curr['o'] > prev['c'] and body > prev_body:
-            sig_type = 'sell'; sl = curr['h']; risk = sl - curr['c']
-            if risk > 0: tp = curr['c'] - risk * 2
-
-        # Hammer (bullish): small body at top, long lower wick
+            side, pattern = 'sell', 'Bearish Engulfing'
         elif curr['c'] > curr['o'] and (min(curr['o'], curr['c']) - curr['l']) > body * 2 and (curr['h'] - max(curr['o'], curr['c'])) < body * 0.5:
-            sig_type = 'buy'; sl = curr['l']; risk = curr['c'] - sl
-            if risk > 0: tp = curr['c'] + risk * 2
-
-        # Shooting Star (bearish): small body at bottom, long upper wick
+            side, pattern = 'buy', 'Hammer'
         elif curr['c'] < curr['o'] and (curr['h'] - max(curr['o'], curr['c'])) > body * 2 and (min(curr['o'], curr['c']) - curr['l']) < body * 0.5:
-            sig_type = 'sell'; sl = curr['h']; risk = sl - curr['c']
-            if risk > 0: tp = curr['c'] - risk * 2
+            side, pattern = 'sell', 'Shooting Star'
+        if not side:
+            continue
+        if (side == 'buy' and curr['c'] <= ema[i]) or (side == 'sell' and curr['c'] >= ema[i]):
+            continue
+        risk = atr_mult * atr[i]
+        if risk <= 0:
+            continue
+        entry = curr['c']
+        sl = entry - risk if side == 'buy' else entry + risk
+        tp = entry + min_rr * risk if side == 'buy' else entry - min_rr * risk
+        signals.append({'time': curr['t'], 'type': side, 'price': round(entry, 2),
+                        'sl': round(sl, 2), 'tp1': round(tp, 2), 'label': pattern})
 
-        if sig_type and sl and tp:
-            signals.append({'time': curr['t'], 'type': sig_type, 'price': round(curr['c'], 2),
-                            'sl': round(sl, 2), 'tp1': round(tp, 2)})
-
-    return {'type': 'signals', 'signals': signals[-100:]}
+    ema_data = [{'time': candles[i]['t'], 'value': round(ema[i], 2)} for i in range(ema_period - 1, n)]
+    return {'type': 'signals', 'signals': signals, 'ema': ema_data, 'ema_period': ema_period}
 
 
 def calc_volume_imbalance(candles, vol_spike_mult=5, consolidation_bars=3, min_rr=4):
