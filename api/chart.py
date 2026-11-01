@@ -311,7 +311,16 @@ def calc_supertrend(candles, period=10, multiplier=3):
 
 
 def calc_rsi_divergence_mss(candles, rsi_period=14, ob=70, os_level=30, lb=5, max_age=50):
-    """Detect RSI divergence + market structure shift signals."""
+    """Detect RSI divergence + market structure shift signals.
+
+    Bearish: two consecutive swing highs with RSI > ob, price higher high + RSI lower high,
+    then SELL on the first CLOSE below the lowest low between them. Bullish mirror (RSI < os).
+    SL = 2nd swing extreme, TP = 1R (1:1).
+    Fixes (Oct 2026): the last (forming) candle is ignored so signals cannot repaint; the
+    break must come after the 2nd swing is confirmed (lb candles later); signals are sorted
+    by time so the live trader's signals[-1] is always the newest one.
+    """
+    candles = candles[:-1]                  # last candle is still forming
     rsi_data = calc_rsi(candles, rsi_period)
     if len(rsi_data) < lb * 2 + 1:
         return {'type': 'signals', 'signals': []}
@@ -352,8 +361,8 @@ def calc_rsi_divergence_mss(candles, rsi_period=14, ob=70, os_level=30, lb=5, ma
         if cd['h'] > pd['h'] and cd['rsi'] < pd['rsi']:
             # Find swing low between the two highs
             swing_low = min(aligned[k]['l'] for k in range(pi, ci + 1))
-            # Look for MSS: close below swing_low within max_age bars
-            for k in range(ci + 1, min(ci + max_age, n)):
+            # Look for MSS: close below swing_low, after the 2nd high is confirmed (lb bars), within max_age bars
+            for k in range(ci + lb, min(ci + max_age, n)):
                 if aligned[k]['c'] < swing_low:
                     signals.append({
                         'time': aligned[k]['t'], 'type': 'sell',
@@ -370,7 +379,7 @@ def calc_rsi_divergence_mss(candles, rsi_period=14, ob=70, os_level=30, lb=5, ma
         ci, cd = os_lows[j]
         if cd['l'] < pd['l'] and cd['rsi'] > pd['rsi']:
             swing_high = max(aligned[k]['h'] for k in range(pi, ci + 1))
-            for k in range(ci + 1, min(ci + max_age, n)):
+            for k in range(ci + lb, min(ci + max_age, n)):
                 if aligned[k]['c'] > swing_high:
                     signals.append({
                         'time': aligned[k]['t'], 'type': 'buy',
@@ -380,6 +389,7 @@ def calc_rsi_divergence_mss(candles, rsi_period=14, ob=70, os_level=30, lb=5, ma
                     })
                     break
 
+    signals.sort(key=lambda s: s['time'])   # newest last (the live trader takes signals[-1])
     return {'type': 'signals', 'signals': signals}
 
 

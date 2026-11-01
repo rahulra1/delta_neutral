@@ -142,12 +142,12 @@ MAX_TRADES_PER_DAY = 10         # FuturesSignalTrader default
 
 
 # ----------------------------------------------------------------------------- data
-def fetch_delta(tf, days):
-    """Forward-paged Delta BTCUSD OHLCV, cached per (tf, start-day, end-day)."""
+def fetch_delta(tf, days, symbol='BTCUSD'):
+    """Forward-paged Delta perp OHLCV, cached per (symbol, tf, start-day, end-day)."""
     sec = TF_SEC[tf]
     end = (int(time.time()) // sec) * sec          # exclude the forming bar
     start = end - days * 86400
-    path = os.path.join(CACHE_DIR, f'ema920_BTCUSD_{tf}_{start // 86400}_{end // 86400}.json')
+    path = os.path.join(CACHE_DIR, f'ema920_{symbol}_{tf}_{start // 86400}_{end // 86400}.json')
     if os.path.exists(path):
         return json.load(open(path))
     out = {}
@@ -157,7 +157,7 @@ def fetch_delta(tf, days):
         for attempt in range(4):
             try:
                 r = requests.get(f'{BASE_URL}/v2/history/candles',
-                                 params={'resolution': tf, 'symbol': 'BTCUSD',
+                                 params={'resolution': tf, 'symbol': symbol,
                                          'start': cur, 'end': nxt}, timeout=30)
                 r.raise_for_status()
                 rows = r.json().get('result', [])
@@ -174,7 +174,7 @@ def fetch_delta(tf, days):
         cur = nxt
     cs = sorted(out.values(), key=lambda x: x['t'])
     expected = (end - start) // sec
-    print(f'  Delta {tf}: {len(cs)} bars ({len(cs) / expected * 100:.1f}% coverage)')
+    print(f'  Delta {symbol} {tf}: {len(cs)} bars ({len(cs) / expected * 100:.1f}% coverage)')
     os.makedirs(CACHE_DIR, exist_ok=True)
     json.dump(cs, open(path, 'w'))
     return cs

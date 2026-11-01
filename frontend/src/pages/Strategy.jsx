@@ -84,9 +84,9 @@ const STRATEGIES = [
     features: ['Short Strangle', 'Auto Rebalance', 'Premium Monitoring', 'WebSocket'],
     rec: '⏱ Any expiry · BTC/ETH' },
   { key: 'rsi_div_mss', label: 'Div + MSS', icon: '📊', type: 'Futures',
-    desc: 'RSI Divergence + Market Structure Shift. High-probability reversal entries with defined risk.',
-    features: ['RSI Divergence', 'Structure Shift', 'Swing Points', '2:1 R:R'],
-    rec: '⏱ Best on 1H · BTC, NIFTY' },
+    desc: 'RSI Divergence + Market Structure Shift. Reversal entry on a close through structure after an RSI divergence. SL at the swing, 1:1 target.',
+    features: ['RSI Divergence', 'Structure Shift', 'Swing Points', '1:1 R:R'],
+    rec: '⚠ Backtest 2024-26: ~breakeven, few trades (BTC 1H ~12/yr) — no proven edge' },
   { key: 'sma_vol_breakout', label: 'SMA + Breakout', icon: '📈', type: 'Futures',
     desc: 'Price Action + SMA50 + Volume. Strong breakouts confirmed by high increasing volume.',
     features: ['SMA 50', 'Volume Confirm', 'Trend Entry', '2:1 R:R'],
@@ -518,7 +518,7 @@ export default function Strategy() {
       )}
       {activeTab === 'rsi_div_mss' && (
         <StrategyTemplate signalMode signalKey="rsi_div_mss" title="RSI Div + MSS" icon="📊" type="Futures"
-          description="Detects RSI divergence with market structure shifts for reversal entries" profiles={profiles} />
+          description="RSI divergence (RSI >70 / <30) + close through market structure. SL at the 2nd swing, TP 1:1. Closed candles only." profiles={profiles} />
       )}
       {activeTab === 'sma_vol_breakout' && (
         <StrategyTemplate signalMode signalKey="sma_vol_breakout" title="SMA + Volume Breakout" icon="📈" type="Futures"
