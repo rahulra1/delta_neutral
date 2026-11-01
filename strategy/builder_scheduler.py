@@ -35,6 +35,17 @@ def _parse_hhmm(s, default_h, default_m):
         return default_h, default_m
 
 
+def _expiry_from_symbol(symbol):
+    """Delta option symbol 'C-BTC-80000-301026' -> expiry 'DD-MM-YYYY' ('30-10-2026'), else None."""
+    try:
+        ddmmyy = str(symbol).split('-')[-1]
+        if len(ddmmyy) == 6 and ddmmyy.isdigit():
+            return f'{ddmmyy[0:2]}-{ddmmyy[2:4]}-20{ddmmyy[4:6]}'
+    except Exception:
+        pass
+    return None
+
+
 class BuilderScheduler:
     """Repeating executor for a Strategy Builder config."""
 
@@ -308,6 +319,7 @@ class BuilderScheduler:
                              args=(entry_id, placed, expiry, mon), daemon=True)
         t.start()
         self._persist_state()
+        self._track_legs(placed)
 
     def _expiry_exit_watch(self, entry_id, placed, expiry, mon):
         from api.orders import place_order
@@ -357,6 +369,7 @@ class BuilderScheduler:
             if mon is not None:
                 mon.running = False
             self._print(f"[Builder Sched] Force-closed {len(placed)} legs (square-off/expiry)")
+            self._untrack_legs(placed)
             self._book_close(entry_id, realized, 'expiry_exit')
             return
 
@@ -396,13 +409,25 @@ class BuilderScheduler:
         (so a racing watcher/duplicate can't double-book or double-close), then
         books the realized PnL."""
         with self._open_lock:
-            claimed = any(p.get('entry_id') == entry_id for p in self._open_positions)
+            pos = next((p for p in self._open_positions if p.get('entry_id') == entry_id), None)
+            claimed = pos is not None
             if claimed:
                 self._open_positions = [p for p in self._open_positions
                                         if p.get('entry_id') != entry_id]
         if not claimed:
             return  # already closed by the expiry watcher or a duplicate loop
+        self._untrack_legs(pos.get('legs', []))
         self._book_close(entry_id, pnl, reason)
+
+    def _untrack_legs(self, legs):
+        try:
+            from api.position_tracker import position_tracker
+            if self._user_id is None:
+                return
+            for l in legs:
+                position_tracker.close(self._user_id, l.get('product_id'))
+        except Exception:
+            pass
 
     def _book_close(self, entry_id, pnl, reason):
         """Book realized PnL, log, and persist. Caller must have already removed
@@ -539,9 +564,60 @@ class BuilderScheduler:
             except Exception as e:
                 logger.warning("[Builder Sched] re-arm failed for %s: %s",
                                pos.get('entry_id'), e)
+            self._track_legs(pos.get('legs', []))
         self._print(f"[Builder Sched] Restored {len(self._open_positions)} open "
                     f"position(s) | Cum ${self.cumulative_pnl:+.2f}")
         return self
+
+    def _track_legs(self, legs):
+        """Register legs with the shared position tracker (dashboard positions view)."""
+        try:
+            from api.position_tracker import position_tracker
+            if self._user_id is None:
+                return
+            have = {p.product_id for p in position_tracker.get_user_positions(self._user_id)}
+            for l in legs:
+                if l.get('product_id') in have:
+                    continue
+                position_tracker.open(self._user_id, l.get('product_id'), l.get('symbol', ''),
+                                      type=l.get('type', ''), strike=str(l.get('strike', '')),
+                                      side=l.get('side', ''), size=int(l.get('size', 0) or 0),
+                                      entry_price=float(l.get('entry_price', 0) or 0),
+                                      asset=self.asset, source='Strategy Builder (Recurring)',
+                                      strategy_sid=self._sid or '')
+        except Exception as e:
+            logger.debug("[Builder Sched] position_tracker register failed: %s", e)
+
+    def owned_product_ids(self):
+        with self._open_lock:
+            return {l.get('product_id') for p in self._open_positions for l in p.get('legs', [])}
+
+    def adopt_positions(self, legs, expiry=None):
+        """Attach EXISTING broker legs (e.g. orphaned after a restart) as one open position:
+        re-arms TP/SL + square-off/expiry watcher exactly like a fresh entry. Places NO orders.
+        legs: [{product_id, symbol, type, strike, side, size, entry_price}]"""
+        legs = [dict(l) for l in legs if l.get('product_id')]
+        if not legs:
+            return None
+        owned = self.owned_product_ids()
+        legs = [l for l in legs if l['product_id'] not in owned]
+        if not legs:
+            return None
+        if not expiry:
+            expiry = _expiry_from_symbol(legs[0].get('symbol', ''))
+        self.total_entries += 1
+        entry_id = self.total_entries
+        pos = {'entry_id': entry_id, 'expiry': expiry, 'legs': legs, 'adopted': True}
+        with self._open_lock:
+            self._open_positions.append(pos)
+        self._print(f"[Builder Sched] 🔗 Re-attached {len(legs)} broker leg(s) as position #{entry_id} "
+                    f"@ {expiry}: " + ', '.join(f"{l['side'].upper()} {l['symbol']} x{l['size']}" for l in legs))
+        self._rearm_position(pos)
+        self._track_legs(legs)
+        self.trade_log.append({'time': datetime.now(IST).isoformat(), 'action': 'ADOPT',
+                               'entry_id': entry_id, 'legs': [l['symbol'] for l in legs]})
+        self._persist_state()
+        return entry_id
 
     def _rearm_position(self, pos):
         """Re-create the TP/SL monitor + expiry watcher for a restored position."""

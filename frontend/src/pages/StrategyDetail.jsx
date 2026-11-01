@@ -3,6 +3,76 @@ import { useParams, useNavigate } from 'react-router-dom';
 import api from '../api';
 import { PositionTable } from '../components/PositionCard';
 
+/** Re-attach broker option legs that a recurring builder lost track of (e.g. after a restart).
+ *  Lists live broker positions for the strategy's profile/asset; only legs not owned by any
+ *  running strategy can be selected. Attaching places NO orders — it re-arms TP/SL and the
+ *  square-off / expiry exit for those legs. */
+function AdoptBrokerLegs({ sid, onDone }) {
+  const [open, setOpen] = useState(false);
+  const [rows, setRows] = useState(null);
+  const [sel, setSel] = useState({});
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const fetchRows = () => {
+    setBusy(true); setMsg('');
+    api.get(`/strategy-builder/orphans/${sid}`)
+      .then(r => { setRows(r.data.positions || []); setSel({}); })
+      .catch(e => setMsg(e.response?.data?.error || 'Could not load broker positions'))
+      .finally(() => setBusy(false));
+  };
+  const toggle = (pid) => setSel(s => ({ ...s, [pid]: !s[pid] }));
+  const chosen = Object.keys(sel).filter(k => sel[k]).map(Number);
+  const adopt = () => {
+    const picked = (rows || []).filter(r => chosen.includes(r.product_id));
+    if (!picked.length) return;
+    const list = picked.map(r => `${r.side.toUpperCase()} ${r.symbol} x${r.size} @ ${r.entry_price}`).join('\n');
+    if (!window.confirm(`Re-attach these ${picked.length} broker leg(s) to this strategy?\n\n${list}\n\nNo orders will be placed. TP/SL and the square-off/expiry exit will manage them from now on, using the broker entry prices.`)) return;
+    setBusy(true);
+    api.post(`/strategy-builder/adopt/${sid}`, { product_ids: chosen })
+      .then(r => { setMsg(`✓ Re-attached ${r.data.legs} leg(s) as position #${(r.data.entries || []).join(', #')}`); fetchRows(); onDone && onDone(); })
+      .catch(e => setMsg(e.response?.data?.error || 'Re-attach failed'))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <div className="card" style={{ borderLeft: '3px solid #f59e0b' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <div style={{ fontWeight: 700 }}>🔗 Re-attach broker positions</div>
+          <div style={{ fontSize: '.75rem', color: 'var(--muted)' }}>Use this if positions from this strategy are still open on the broker but no longer shown here (e.g. after a server restart).</div>
+        </div>
+        <button className="btn btn-outline" disabled={busy} onClick={() => { setOpen(true); fetchRows(); }} style={{ padding: '6px 14px' }}>
+          {busy ? '⏳' : open ? '↻ Refresh' : 'Check broker'}
+        </button>
+      </div>
+      {msg && <div style={{ marginTop: 8, fontSize: '.8rem', color: msg.startsWith('✓') ? 'var(--green)' : 'var(--red)' }}>{msg}</div>}
+      {open && rows && (
+        rows.length === 0 ? <div style={{ marginTop: 10, fontSize: '.8rem', color: 'var(--muted)' }}>No open option positions on the broker for this asset.</div> : (
+          <>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem', marginTop: 10 }}>
+              <thead><tr>{['', 'Symbol', 'Side', 'Size', 'Broker entry', 'Expiry', 'Owned by'].map(h => <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' }}>{h}</th>)}</tr></thead>
+              <tbody>{rows.map(r => (
+                <tr key={r.product_id} style={{ borderBottom: '1px solid var(--border)', opacity: r.adoptable ? 1 : 0.55 }}>
+                  <td style={{ padding: '4px 8px' }}><input type="checkbox" disabled={!r.adoptable} checked={!!sel[r.product_id]} onChange={() => toggle(r.product_id)} aria-label={`select ${r.symbol}`} /></td>
+                  <td style={{ padding: '4px 8px', fontWeight: 600 }}>{r.symbol}</td>
+                  <td style={{ padding: '4px 8px' }}><span className={`badge ${r.side === 'sell' ? 'badge-red' : 'badge-green'}`}>{r.side.toUpperCase()}</span></td>
+                  <td style={{ padding: '4px 8px' }}>{r.size}</td>
+                  <td style={{ padding: '4px 8px' }}>${r.entry_price}</td>
+                  <td style={{ padding: '4px 8px' }}>{r.expiry}</td>
+                  <td style={{ padding: '4px 8px', color: 'var(--muted)' }}>{r.owner || '— (orphaned)'}</td>
+                </tr>))}</tbody>
+            </table>
+            <button className="btn" disabled={busy || !chosen.length} onClick={adopt} style={{ marginTop: 10, background: '#f59e0b', color: '#fff', padding: '6px 16px' }}>
+              Re-attach {chosen.length || ''} selected
+            </button>
+          </>
+        )
+      )}
+    </div>
+  );
+}
+
 export default function StrategyDetail() {
   const { sid } = useParams();
   const nav = useNavigate();
@@ -107,6 +177,7 @@ export default function StrategyDetail() {
       {/* Tab Content */}
       {tab === 'overview' && (
         <>
+          {d.source === 'Strategy Builder (Recurring)' && isRunning && <AdoptBrokerLegs sid={sid} onDone={load} />}
           {legs.length > 0 && (
             <div className="card"><div style={{ fontWeight: 700, marginBottom: 12 }}>Active Legs</div><PositionTable positions={legs} sym="$" /></div>
           )}

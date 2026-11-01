@@ -1589,7 +1589,7 @@ def _resume_db_strategies():
                      'log_queue': queue.Queue(maxsize=500), 'log_history': []}
             builder_scheduler_strategies[sid] = entry
 
-            def _resume_builder_sched(sid=sid, entry=entry, details=details, user_id=user_id):
+            def _resume_builder_sched(sid=sid, entry=entry, details=details, user_id=user_id, legs=legs):
                 try:
                     from strategy.builder_scheduler import BuilderScheduler
                     asset = details.get('underlying', details.get('asset', 'BTC'))
@@ -1615,8 +1615,11 @@ def _resume_db_strategies():
                     sched._running = True  # before exposing it to the dashboard poll
                     entry['strategy'] = sched
                     entry['running'] = True
-                    sched.initialize()
+                    # Restore BEFORE initialize(): initialize() persists the current state,
+                    # and doing it first wrote an EMPTY open_positions/legs/PnL/trade_log over
+                    # the saved row — a second restart then lost every open position.
                     sched.restore_state(details=details, legs=legs)
+                    sched.initialize()
                     sched.monitor()
                 except Exception as e:
                     logger.error(f"[resume] Builder Scheduler {sid} error: {e}")
@@ -7817,6 +7820,95 @@ def api_builder_recurring_status(sid):
     data = strat.status()
     data['running'] = e.get('running', False) and data.get('running', False)
     return jsonify(data)
+
+
+def _builder_broker_option_positions(e, strat):
+    """Live broker option positions for this builder's profile + asset, annotated with
+    who owns them (this strategy / another tracked strategy / nobody)."""
+    import re
+    from api.positions import get_positions
+    from config import set_thread_credentials
+    api_key, api_secret, _, broker = get_profile_creds(e.get('profile_id'))
+    if api_key:
+        set_thread_credentials(api_key, api_secret, broker)
+    elif getattr(strat, '_api_key', None):
+        set_thread_credentials(strat._api_key, strat._api_secret, getattr(strat, '_broker', None))
+    positions = get_positions()
+    if positions is None:
+        return None
+    mine = strat.owned_product_ids()
+    tracked = {p.product_id: (p.source or 'tracked') for p in position_tracker.get_user_positions(e['user_id'])}
+    for sid2, e2 in builder_scheduler_strategies.items():             # other recurring builders
+        s2 = e2.get('strategy')
+        if s2 is not None and s2 is not strat and e2.get('running'):
+            for pid in s2.owned_product_ids():
+                tracked.setdefault(pid, f'Strategy Builder (Recurring) {sid2}')
+    asset = (strat.asset or 'BTC').upper()
+    out = []
+    for p in positions:
+        size = int(p.get('size', 0) or 0)
+        sym = p.get('product_symbol', '') or ''
+        m = re.match(r'^(C|P)-(\w+)-(\d+)-(\d{6})$', sym)
+        if size == 0 or not m or m.group(2).upper() != asset:
+            continue
+        pid = p.get('product_id')
+        owner = 'this strategy' if pid in mine else tracked.get(pid)
+        out.append({'product_id': pid, 'symbol': sym, 'type': 'call' if m.group(1) == 'C' else 'put',
+                    'strike': m.group(3), 'side': 'sell' if size < 0 else 'buy', 'size': abs(size),
+                    'entry_price': float(p.get('entry_price', 0) or 0),
+                    'expiry': f'{m.group(4)[0:2]}-{m.group(4)[2:4]}-20{m.group(4)[4:6]}',
+                    'owner': owner, 'adoptable': owner is None})
+    return out
+
+
+@app.route('/api/strategy-builder/orphans/<sid>')
+@login_required
+def api_builder_recurring_orphans(sid):
+    """Broker option positions that could be re-attached to this recurring builder."""
+    e = builder_scheduler_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id() or not e.get('strategy'):
+        return jsonify(error="Not found"), 404
+    rows = _builder_broker_option_positions(e, e['strategy'])
+    if rows is None:
+        return jsonify(error="Could not fetch broker positions"), 502
+    return jsonify(positions=rows)
+
+
+@app.route('/api/strategy-builder/adopt/<sid>', methods=['POST'])
+@login_required
+def api_builder_recurring_adopt(sid):
+    """Re-attach selected broker legs to this recurring builder (no orders are placed).
+    Body: {product_ids: [...]}. Legs are grouped into one position per expiry and get the
+    strategy's TP/SL monitor + square-off/expiry watcher."""
+    e = builder_scheduler_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id() or not e.get('strategy'):
+        return jsonify(error="Not found"), 404
+    strat = e['strategy']
+    if not (e.get('running') and strat._running):
+        return jsonify(error="Strategy is not running"), 400
+    wanted = {int(x) for x in (request.json or {}).get('product_ids', []) if str(x).isdigit()}
+    if not wanted:
+        return jsonify(error="No positions selected"), 400
+    rows = _builder_broker_option_positions(e, strat)
+    if rows is None:
+        return jsonify(error="Could not fetch broker positions"), 502
+    picked = [r for r in rows if r['product_id'] in wanted]
+    blocked = [r['symbol'] for r in picked if not r['adoptable']]
+    if blocked:
+        return jsonify(error=f"Already owned by a strategy: {', '.join(blocked)}"), 409
+    if len(picked) != len(wanted):
+        return jsonify(error="Some selected positions are no longer open on the broker"), 409
+    by_expiry = {}
+    for r in picked:
+        by_expiry.setdefault(r['expiry'], []).append(
+            {k: r[k] for k in ('product_id', 'symbol', 'type', 'strike', 'side', 'size', 'entry_price')})
+    ids = []
+    for expiry, legs in by_expiry.items():
+        eid = strat.adopt_positions(legs, expiry=expiry)
+        if eid:
+            ids.append(eid)
+    logger.info(f"[builder-sched adopt] {sid}: re-attached {len(picked)} legs as entries {ids}")
+    return jsonify(status='adopted', entries=ids, legs=len(picked))
 
 
 @app.route('/api/strategy-builder/stream/<sid>')
