@@ -196,9 +196,9 @@ const STRATEGIES = [
     features: ['EMA14 Direction', 'Two-Tier TP/SL', '50/50 Scale-Out', 'TP2 / SL2 on remainder'],
     rec: '⏱ Daily 6:30 PM · BTC options · De-risked exits' },
   { key: 'ema_trend', label: 'EMA Trend Follower', icon: '🚀', type: 'Futures',
-    desc: 'Long/short basket over the top-N perpetuals by 24h change. Longs top gainers, shorts top losers, each confirmed by 6h OI change >10% ($100 each). Held until TP +10% / SL -5%. Re-scans hourly.',
-    features: ['Top-N Gainers/Losers', 'Long + Short', '6h OI Filter >10%', 'TP 10% / SL 5%'],
-    rec: '⏱ Hourly · Delta perpetuals · Long/short momentum' },
+    desc: 'Daily EMA10/30 trend following across the 10 most liquid Delta perps. Long above, short below (BTC regime filter). Exits only when the trend flips. Volatility-sized.',
+    features: ['Daily EMA10/30', 'Long + Short', 'Top-10 by OI', 'Exit on Flip'],
+    rec: '⏱ Daily · backtests 2022-26: ~+9-12%/yr, DD ~30% · profit comes in bursts' },
   { key: 'dual_momentum', label: 'Dual Momentum Basket', icon: '⚖️', type: 'Futures',
     desc: 'Twice-daily long/short basket. At 6 AM & 6 PM IST, longs the top-N 24h gainers and shorts the top-N losers ($10 each). Tracks TP +10% / SL -5% per position and closes any coin no longer in its side\'s list.',
     features: ['Top-N Gainers/Losers', 'Long + Short', '6 AM / 6 PM IST', 'TP 10% / SL 5%'],
@@ -307,13 +307,47 @@ const EMA_SPREAD_V2_FIELDS = [
 ];
 
 const EMA_TREND_FIELDS = [
-  { key: 'top_n', label: 'Universe Size (top N by volume)', type: 'number', default: 50 },
-  { key: 'notional_usd', label: 'Notional per Coin ($)', type: 'number', default: 100 },
-  { key: 'ema_fast', label: 'Fast EMA', type: 'number', default: 20 },
-  { key: 'ema_slow', label: 'Slow EMA', type: 'number', default: 50 },
-  { key: 'ema_resolution', label: 'EMA Timeframe', type: 'text', default: '1d', hint: '1d = daily chart' },
-  { key: 'refresh_interval', label: 'Rescan Interval (s)', type: 'number', default: 3600, hint: '3600 = hourly' },
-  { key: 'min_oi_change_pct', label: 'Min 6h OI Change (%)', type: 'number', step: '0.1', default: 10, hint: 'Only enter coins whose 6h open interest rose more than this %. 0 = off' },
+  { key: 'top_n', label: 'Universe Size (top N by 30-day OI)', type: 'number', default: 10, hint: 'Validated with 10' },
+  { key: 'ema_fast', label: 'Fast EMA (daily)', type: 'number', default: 10 },
+  { key: 'ema_slow', label: 'Slow EMA (daily)', type: 'number', default: 30, hint: 'Also used for the BTC regime filter' },
+  { key: 'risk_per_atr_usd', label: 'Risk per ATR move ($)', type: 'number', default: 25, hint: 'Size so one average daily move (ATR20) ≈ this many $' },
+  { key: 'notional_usd', label: 'Max Notional per Coin ($)', type: 'number', default: 500 },
+  { key: 'max_gross_usd', label: 'Max Total Exposure ($)', type: 'number', default: 7500, hint: 'New entries are skipped above this' },
+  { key: 'allow_shorts', label: 'Shorts', type: 'select', options: [{value:true,label:'Long + Short (validated)'},{value:false,label:'Long only'}], default: true, hint: 'Long-only lost heavily in the 2022 crash' },
+  { key: 'btc_regime', label: 'BTC Regime Filter', type: 'select', options: [{value:true,label:'On (validated)'},{value:false,label:'Off'}], default: true },
+  { key: 'dry_run', label: 'Mode', type: 'select', options: [{value:true,label:'Paper (dry run)'},{value:false,label:'Live'}], default: true },
+];
+
+// Keep in sync with strategy/ema_trend_follower.py.
+const EMA_TREND_DETAILS = [
+  { heading: '1. Universe (daily)', points: [
+    'Each day after the 00:00 UTC candle closes, takes the 10 Delta perps with the highest 30-day average open interest (USD).',
+    'This includes Delta\'s gold, silver and stock-index perps (e.g. XAUT, PAXG, SLVON, QQQX, SPYX) when they rank — the Delta backtest included them too.',
+    'A coin needs more than 50 daily candles of history.',
+  ] },
+  { heading: '2. Signal', points: [
+    'Per coin, on daily closes: LONG while EMA10 > EMA30, SHORT while EMA10 < EMA30.',
+    'BTC regime: longs only when BTC closes above its EMA30, shorts only when below.',
+  ] },
+  { heading: '3. Exit', points: [
+    'A position is closed only when its own EMA10/30 state flips — no take-profit, no stop, no time limit. Big trends are allowed to run.',
+    'After a flip the coin can be entered on the other side the same day. Coins that drop out of the top 10 are kept until they flip.',
+  ] },
+  { heading: '4. Size', points: [
+    'Notional = $25 ÷ ATR20% (one average daily move ≈ $25), max $500 per coin, max $7,500 total.',
+    'Market orders, integer lots. One position per coin.',
+  ] },
+  { heading: '5. What to expect (backtests, at these sizes)', points: [
+    'Delta Apr 2024–Oct 2026 (real funding): +$2,414 (+9.5%/yr on $10k), max drawdown $4,510 (29%); positive every year (+$322 / +$612 / +$1,062).',
+    'Binance 2022–Mar 2024 (crypto only, incl. the 2022 crash): +$2,811, max drawdown $3,526.',
+    '~120 trades a year, ~31-35% win rate — a few big trends pay for many small losses.',
+  ] },
+  { heading: '⚠ Risks & limits', points: [
+    'Profit comes in bursts: removing the 5 best trades turns every test negative. Expect long flat or losing stretches.',
+    'Drawdowns of ~30% at these sizes; larger sizes scale both profit and drawdown.',
+    'Gold appears twice (XAUT and PAXG), so gold trends get double weight.',
+    'Displayed P&L excludes fees and funding (backtest funding ≈ −$420 per 2.5 years at this size).',
+  ] },
 ];
 
 const DUAL_MOMENTUM_FIELDS = [
@@ -1379,7 +1413,8 @@ export default function Strategy() {
           )} />
       )}
       {activeTab === 'ema_trend' && (
-        <StrategyTemplate title="EMA Trend Follower" icon="🚀" type="Futures" description="Long/short basket over top-N perpetuals by 24h change. Longs top gainers, shorts top losers, each with 6h OI change >10%. Held until TP +10% / SL -5%. Rescans hourly." profiles={profiles}
+        <StrategyTemplate title="EMA Trend Follower" icon="🚀" type="Futures" description="Daily EMA10/30 long/short trend following over the 10 most liquid Delta perps, with a BTC regime filter. Exits when the trend flips. Evaluates once a day after 00:00 UTC." profiles={profiles}
+          details={EMA_TREND_DETAILS}
           configFields={EMA_TREND_FIELDS}
           onStart={async (config) => { const { data } = await api.post('/ema-trend/start', config); return data; }}
           onStop={async (sid) => { await api.post('/ema-trend/stop', { sid }); }}

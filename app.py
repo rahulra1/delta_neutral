@@ -1003,15 +1003,20 @@ def _resume_db_strategies():
                     return
                 try:
                     from strategy.ema_trend_follower import EmaTrendFollower
+                    # Saved rows from the old gainers/losers version carry incompatible settings
+                    # (top_n=50, EMA20/50, $100) — start those on the validated v2 defaults.
+                    _p = details if details.get('strategy_version') == 'daily_ema_v2' else {}
                     s = EmaTrendFollower(
-                        top_n=int(details.get('top_n', 50)),
-                        notional_usd=float(details.get('notional_usd', 100)),
-                        ema_fast=int(details.get('ema_fast', 20)),
-                        ema_slow=int(details.get('ema_slow', 50)),
-                        ema_resolution=details.get('ema_resolution', '1d'),
-                        refresh_interval=int(details.get('refresh_interval', 3600)),
-                        dry_run=bool(details.get('dry_run', False)),
-                        min_oi_change_pct=float(details.get('min_oi_change_pct', 10.0)),
+                        top_n=int(_p.get('top_n', 10)),
+                        notional_usd=float(_p.get('notional_usd', 500)),
+                        ema_fast=int(_p.get('ema_fast', 10)),
+                        ema_slow=int(_p.get('ema_slow', 30)),
+                        refresh_interval=int(_p.get('refresh_interval', 300)),
+                        risk_per_atr_usd=float(_p.get('risk_per_atr_usd', 25)),
+                        max_gross_usd=float(_p.get('max_gross_usd', 7500)),
+                        allow_shorts=bool(_p.get('allow_shorts', True)),
+                        btc_regime=bool(_p.get('btc_regime', True)),
+                        dry_run=bool(details.get('dry_run', True)),
                     )
                     entry['strategy'] = s
                     s._log_queue = entry['log_queue']
@@ -7034,15 +7039,25 @@ def run_ema_trend(sid, params):
 
     try:
         from strategy.ema_trend_follower import EmaTrendFollower
+
+        def _bool(v, default):
+            if v is None:
+                return default
+            if isinstance(v, str):
+                return v.strip().lower() in ('1', 'true', 'yes', 'on', 'paper')
+            return bool(v)
+
         s = EmaTrendFollower(
-            top_n=int(params.get('top_n', 50)),
-            notional_usd=float(params.get('notional_usd', 100)),
-            ema_fast=int(params.get('ema_fast', 20)),
-            ema_slow=int(params.get('ema_slow', 50)),
-            ema_resolution=params.get('ema_resolution', '1d'),
-            refresh_interval=int(params.get('refresh_interval', 3600)),
-            dry_run=bool(params.get('dry_run', False)),
-            min_oi_change_pct=float(params.get('min_oi_change_pct', 10.0)),
+            top_n=int(params.get('top_n', 10)),
+            notional_usd=float(params.get('notional_usd', 500)),
+            ema_fast=int(params.get('ema_fast', 10)),
+            ema_slow=int(params.get('ema_slow', 30)),
+            refresh_interval=int(params.get('refresh_interval', 300)),
+            risk_per_atr_usd=float(params.get('risk_per_atr_usd', 25)),
+            max_gross_usd=float(params.get('max_gross_usd', 7500)),
+            allow_shorts=_bool(params.get('allow_shorts'), True),
+            btc_regime=_bool(params.get('btc_regime'), True),
+            dry_run=_bool(params.get('dry_run'), True),
         )
         s._log_queue = entry['log_queue']
         s._log_history = entry['log_history']
@@ -7105,7 +7120,7 @@ def ema_trend_start():
     entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
              'running': False, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     ema_trend_strategies[sid] = entry
-    track_strategy(sid, 'EMA Trend', f"Top-{params.get('top_n', 50)} EMA Trend Follower", current_user_id(), details={**params, 'profile_id': profile_id})
+    track_strategy(sid, 'EMA Trend', f"Top-{params.get('top_n', 10)} Daily EMA Trend Follower", current_user_id(), details={**params, 'profile_id': profile_id, 'strategy_version': 'daily_ema_v2'})
     entry['thread'] = threading.Thread(target=run_ema_trend, args=(sid, params), daemon=True)
     entry['thread'].start()
     return jsonify(status="started", sid=sid)

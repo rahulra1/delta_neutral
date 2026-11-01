@@ -1,316 +1,223 @@
-"""Tests for EmaTrendFollower — focus on the exit-on-direction-change rule.
+"""Tests for EmaTrendFollower (daily EMA10/30 long/short trend follower, v2).
 
-The strategy is long-only:
-  - BULLISH coin in universe & not held -> BUY (open long)
-  - held coin turns BEARISH               -> SELL (close long)
-
-These tests mock all network calls (top coins, EMA signal, futures price,
-product metadata) so they run offline and deterministically. dry_run=True
-means no real orders are placed; positions are tracked in strategy.legs.
+All network calls are mocked: _fetch_universe (tickers), _fetch_daily (MARK/OI daily candles),
+get_futures_price and _product_meta. dry_run=True so no orders are placed.
+Decision-logic parity with the validated backtest is checked separately by
+backtest/ema_trend_live_parity.py (295/295 identical trades).
 """
-import pytest
+import threading
 from unittest.mock import patch
 
-from strategy.ema_trend_follower import EmaTrendFollower
+import pytest
+
+from strategy import ema_trend_follower as M
+from strategy.ema_trend_follower import EmaTrendFollower, plan_day, coin_signal, ema_series, atr_pct_series
+
+DAY = 86400
+NOW = 1_800_000_000 // DAY * DAY + 600          # 00:10 UTC of some day
+META = (777, 1.0)                               # (product_id, contract_value)
 
 
-# ---- helpers ---------------------------------------------------------------
-
-def _coin(symbol, coin):
-    return {'symbol': symbol, 'coin': coin, 'turnover_usd': 1e6, 'mark_price': 100.0}
-
-
-def _signal(direction, spread=1.0):
-    return {'direction': direction, 'ema_fast': 101.0, 'ema_slow': 100.0,
-            'spread_pct': spread, 'bars': 200}
+def _candles(closes, end_day=NOW // DAY * DAY - DAY, rng=0.04):
+    """Closed daily candles ending yesterday; high/low = close +/- rng/2."""
+    n = len(closes)
+    return [(end_day - (n - 1 - i) * DAY, c, c * (1 + rng / 2), c * (1 - rng / 2), c)
+            for i, c in enumerate(closes)]
 
 
-def _make_strategy():
-    s = EmaTrendFollower(top_n=5, notional_usd=100, ema_resolution='1d', dry_run=True)
+UP = [100 + i for i in range(80)]                # EMA10 > EMA30
+DOWN = [200 - i for i in range(80)]              # EMA10 < EMA30
+
+
+def _strategy(**kw):
+    s = EmaTrendFollower(dry_run=True, **kw)
     s.initialize()
     return s
 
 
-# A single-coin universe (SOLUSD) keeps the assertions simple.
-UNIVERSE = [_coin('SOLUSD', 'SOL')]
-PRICE = {'mark_price': 100.0, 'delta': 0}
-META = (777, 1.0)  # (product_id, contract_value)
+def _run(s, series, oi_usd=1e6, price=100.0, now=NOW):
+    """evaluate_once with mocked data. series: {symbol: closes}; BTCUSD must be included."""
+    tickers = [{'symbol': sym, 'coin': sym[:-3], 'oi_value_usd': oi_usd, 'contract_value': 1.0}
+               for sym in series]
+
+    def fake_daily(self, symbol, now=None):
+        if symbol not in series:
+            return [], {}
+        cs = _candles(series[symbol])
+        return cs, {c[0]: oi_usd / c[4] for c in cs}          # OI contracts -> $oi_usd per day
+
+    with patch.object(EmaTrendFollower, '_fetch_universe', return_value=tickers), \
+         patch.object(EmaTrendFollower, '_fetch_daily', fake_daily), \
+         patch('strategy.ema_trend_follower.get_futures_price', return_value={'mark_price': price}), \
+         patch.object(EmaTrendFollower, '_product_meta', return_value=META), \
+         patch.object(EmaTrendFollower, '_persist_state', return_value=None):
+        s.evaluate_once(now=now)
 
 
-class TestExitOnDirectionChange:
-
-    def _patched(self, direction_sequence):
-        """Return a context manager that patches the strategy's dependencies.
-        `direction_sequence` is a list of signal directions returned by
-        successive ema_crossover_direction calls."""
-        sigs = iter(direction_sequence)
-
-        def _sig_side_effect(symbol, **kwargs):
-            try:
-                return _signal(next(sigs))
-            except StopIteration:
-                # Repeat the last direction if more calls happen than provided.
-                return _signal(direction_sequence[-1])
-
-        return _sig_side_effect
-
-    def test_position_closed_when_direction_turns_bearish(self):
-        """Core requirement: open a long while BULLISH, then it must be SOLD
-        (closed) on the very next cycle once the signal flips to BEARISH."""
-        s = _make_strategy()
-
-        # Cycle 1: signal BULLISH -> entry pass buys SOLUSD.
-        with patch('strategy.ema_trend_follower.get_top_coins_by_volume', return_value=UNIVERSE), \
-             patch('strategy.ema_trend_follower.ema_crossover_direction', return_value=_signal('BULLISH')), \
-             patch('strategy.ema_trend_follower.get_futures_price', return_value=PRICE), \
-             patch.object(EmaTrendFollower, '_product_meta', return_value=META):
-            s.evaluate_once()
-
-        held = [l['symbol'] for l in s.legs]
-        assert held == ['SOLUSD'], f"expected SOLUSD opened, got {held}"
-        assert s.total_trades == 1
-
-        # Cycle 2: signal now BEARISH -> exit pass must close SOLUSD.
-        with patch('strategy.ema_trend_follower.get_top_coins_by_volume', return_value=UNIVERSE), \
-             patch('strategy.ema_trend_follower.ema_crossover_direction', return_value=_signal('BEARISH')), \
-             patch('strategy.ema_trend_follower.get_futures_price', return_value=PRICE), \
-             patch.object(EmaTrendFollower, '_product_meta', return_value=META):
-            s.evaluate_once()
-
-        assert s.legs == [], f"position should be closed after bearish flip, still holding {s.legs}"
-        # A SELL must have been recorded in the trade log.
-        sells = [t for t in s.trade_log if t['action'] == 'SELL' and t['symbol'] == 'SOLUSD']
-        assert len(sells) == 1
-        assert sells[0]['reason'] == 'turned bearish'
-
-    def test_position_held_while_still_bullish(self):
-        """A coin that stays BULLISH must NOT be closed on subsequent cycles."""
-        s = _make_strategy()
-        common = dict(
-            return_value=None,
-        )
-        with patch('strategy.ema_trend_follower.get_top_coins_by_volume', return_value=UNIVERSE), \
-             patch('strategy.ema_trend_follower.ema_crossover_direction', return_value=_signal('BULLISH')), \
-             patch('strategy.ema_trend_follower.get_futures_price', return_value=PRICE), \
-             patch.object(EmaTrendFollower, '_product_meta', return_value=META):
-            s.evaluate_once()  # open
-            s.evaluate_once()  # still bullish -> keep
-
-        assert [l['symbol'] for l in s.legs] == ['SOLUSD']
-        # No sell should have happened, and it must not double-buy.
-        assert not any(t['action'] == 'SELL' for t in s.trade_log)
-        assert s.total_trades == 1, "should not re-buy a coin already held"
-
-    def test_realized_pnl_booked_on_bearish_exit(self):
-        """When closed, realized PnL = (exit - entry) * lots * contract_value
-        must be added to cumulative_pnl. Entry @100, exit @110, 1 lot, cv=1 -> +10."""
-        s = _make_strategy()
-        entry_price = {'mark_price': 100.0, 'delta': 0}
-        exit_price = {'mark_price': 110.0, 'delta': 0}
-
-        with patch('strategy.ema_trend_follower.get_top_coins_by_volume', return_value=UNIVERSE), \
-             patch('strategy.ema_trend_follower.ema_crossover_direction', return_value=_signal('BULLISH')), \
-             patch('strategy.ema_trend_follower.get_futures_price', return_value=entry_price), \
-             patch.object(EmaTrendFollower, '_product_meta', return_value=META):
-            s.evaluate_once()
-
-        assert len(s.legs) == 1
-        assert s.legs[0]['entry_price'] == pytest.approx(100.0)
-        assert s.legs[0]['size'] == 1  # $100 / (100 * 1) = 1 lot
-
-        with patch('strategy.ema_trend_follower.get_top_coins_by_volume', return_value=UNIVERSE), \
-             patch('strategy.ema_trend_follower.ema_crossover_direction', return_value=_signal('BEARISH')), \
-             patch('strategy.ema_trend_follower.get_futures_price', return_value=exit_price), \
-             patch.object(EmaTrendFollower, '_product_meta', return_value=META):
-            s.evaluate_once()
-
-        assert s.legs == []
-        assert s.cumulative_pnl == pytest.approx(10.0), \
-            f"expected +$10 realized, got {s.cumulative_pnl}"
-
-    def test_neutral_signal_does_not_close(self):
-        """A NEUTRAL signal on a held coin must NOT trigger an exit (only BEARISH does)."""
-        s = _make_strategy()
-        with patch('strategy.ema_trend_follower.get_top_coins_by_volume', return_value=UNIVERSE), \
-             patch('strategy.ema_trend_follower.ema_crossover_direction', return_value=_signal('BULLISH')), \
-             patch('strategy.ema_trend_follower.get_futures_price', return_value=PRICE), \
-             patch.object(EmaTrendFollower, '_product_meta', return_value=META):
-            s.evaluate_once()
-        assert len(s.legs) == 1
-
-        with patch('strategy.ema_trend_follower.get_top_coins_by_volume', return_value=UNIVERSE), \
-             patch('strategy.ema_trend_follower.ema_crossover_direction', return_value=_signal('NEUTRAL')), \
-             patch('strategy.ema_trend_follower.get_futures_price', return_value=PRICE), \
-             patch.object(EmaTrendFollower, '_product_meta', return_value=META):
-            s.evaluate_once()
-
-        assert [l['symbol'] for l in s.legs] == ['SOLUSD'], "NEUTRAL must not close the position"
-        assert not any(t['action'] == 'SELL' for t in s.trade_log)
-
-    def test_close_all_closes_everything(self):
-        """Stopping the strategy (close_all) must flatten all open positions."""
-        multi_universe = [_coin('SOLUSD', 'SOL'), _coin('ETHUSD', 'ETH')]
-        s = _make_strategy()
-        with patch('strategy.ema_trend_follower.get_top_coins_by_volume', return_value=multi_universe), \
-             patch('strategy.ema_trend_follower.ema_crossover_direction', return_value=_signal('BULLISH')), \
-             patch('strategy.ema_trend_follower.get_futures_price', return_value=PRICE), \
-             patch.object(EmaTrendFollower, '_product_meta', return_value=META):
-            s.evaluate_once()
-        assert len(s.legs) == 2
-
-        with patch('strategy.ema_trend_follower.get_futures_price', return_value=PRICE):
-            s.close_all()
-
-        assert s.legs == []
-        assert s._running is False
-        sells = [t for t in s.trade_log if t['action'] == 'SELL']
-        assert len(sells) == 2
-        assert all(t['reason'] == 'shutdown' for t in sells)
+# ---- pure helpers ----------------------------------------------------------------------------
+def test_ema_seeded_with_first_close():
+    e = ema_series([10, 10, 10, 20], 3)
+    assert e[0] == 10 and e[-1] == pytest.approx(15.0)
 
 
-class TestThreadSafety:
-    """The strategy guards self.legs with self._legs_lock because WebSocket/monitor
-    callbacks and the eval loop touch shared state. These tests exercise concurrent
-    access to confirm there are no crashes, lost/duplicated legs, or lock issues."""
+def test_atr_pct_first_bar_uses_range():
+    a = atr_pct_series([110], [90], [100])
+    assert a[0] == pytest.approx(0.20)
 
-    def test_concurrent_enter_exit_no_corruption(self):
-        """Hammer _enter and _exit from many threads and confirm legs stays
-        internally consistent (no duplicate symbols, no leftover after balanced ops)."""
-        import threading
-        s = _make_strategy()
 
-        symbols = [f'C{i}USD' for i in range(20)]
+def test_coin_signal_state_and_liquidity():
+    g = coin_signal(_candles(UP), {}, 10, 30)
+    assert g['state'] == 1 and g['age'] == 80
+    g = coin_signal(_candles(DOWN), {}, 10, 30)
+    assert g['state'] == -1
 
-        def do_enter(sym):
-            with patch('strategy.ema_trend_follower.get_futures_price', return_value=PRICE), \
-                 patch.object(EmaTrendFollower, '_product_meta', return_value=META):
-                s._enter(sym, sym[:-3], _signal('BULLISH'))
 
-        def do_exit(sym):
-            with patch('strategy.ema_trend_follower.get_futures_price', return_value=PRICE):
-                s._exit(sym, reason='test')
+CFG = {'top_n': 10, 'ema_slow': 30, 'allow_shorts': True, 'btc_regime': True,
+       'risk_per_atr_usd': 25.0, 'max_notional': 500.0, 'max_gross': 7500.0}
 
-        # Phase 1: concurrent entries
-        threads = [threading.Thread(target=do_enter, args=(sym,)) for sym in symbols]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
 
-        held = [l['symbol'] for l in s.legs]
-        assert sorted(held) == sorted(symbols), "all concurrent entries should be recorded"
-        assert len(held) == len(set(held)), "no duplicate legs under concurrency"
+def _sig(state, liq=1e6, atr=0.05, age=80):
+    return {'state': state, 'atr_pct': atr, 'liq30': liq, 'age': age, 'day': 0}
 
-        # Phase 2: concurrent exits (balanced) -> everything closed
-        threads = [threading.Thread(target=do_exit, args=(sym,)) for sym in symbols]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
 
-        assert s.legs == [], f"all positions should be closed, leftover: {s.legs}"
+def test_plan_day_regime_gates_direction():
+    sigs = {'AUSD': _sig(1), 'BUSD': _sig(-1)}
+    _, e = plan_day(sigs, {}, {'_above_slow': True}, CFG)
+    assert [(s, side) for s, side, _ in e] == [('AUSD', 1)]          # BTC up -> longs only
+    _, e = plan_day(sigs, {}, {'_above_slow': False}, CFG)
+    assert [(s, side) for s, side, _ in e] == [('BUSD', -1)]         # BTC down -> shorts only
 
-    def test_pnl_read_during_concurrent_mutation(self):
-        """Reading the pnl property while legs are being mutated must never raise
-        (it snapshots under the lock before iterating)."""
-        import threading
-        s = _make_strategy()
-        stop = threading.Event()
-        errors = []
 
-        def mutate():
-            i = 0
-            while not stop.is_set():
-                sym = f'M{i % 10}USD'
-                with patch('strategy.ema_trend_follower.get_futures_price', return_value=PRICE), \
-                     patch.object(EmaTrendFollower, '_product_meta', return_value=META):
-                    s._enter(sym, sym[:-3], _signal('BULLISH'))
-                with patch('strategy.ema_trend_follower.get_futures_price', return_value=PRICE):
-                    s._exit(sym, reason='churn')
-                i += 1
+def test_plan_day_sizing_and_caps():
+    _, e = plan_day({'AUSD': _sig(1, atr=0.10)}, {}, {'_above_slow': True}, CFG)
+    assert e[0][2] == pytest.approx(250.0)                           # $25 / 10% ATR
+    _, e = plan_day({'AUSD': _sig(1, atr=0.01)}, {}, {'_above_slow': True}, CFG)
+    assert e[0][2] == pytest.approx(500.0)                           # capped per coin
+    many = {f'C{i}USD': _sig(1, liq=1e6 - i, atr=0.01) for i in range(20)}
+    _, e = plan_day(many, {}, {'_above_slow': True}, dict(CFG, max_gross=1200.0))
+    assert len(e) == 2                                               # gross cap 1200 / 500
 
-        def read_pnl():
+
+def test_plan_day_universe_is_top_n_by_liquidity_and_age():
+    sigs = {f'C{i}USD': _sig(1, liq=i) for i in range(15)}
+    sigs['NEWUSD'] = _sig(1, liq=1e9, age=40)                        # too young (<= 50 days)
+    _, e = plan_day(sigs, {}, {'_above_slow': True}, CFG)
+    assert [s for s, _, _ in e] == [f'C{i}USD' for i in range(14, 4, -1)]
+
+
+def test_plan_day_flip_exit_then_reentry_other_side():
+    held = {'AUSD': {'side': 1, 'notional': 300}}
+    x, e = plan_day({'AUSD': _sig(-1)}, held, {'_above_slow': False}, CFG)
+    assert x == ['AUSD'] and [(s, side) for s, side, _ in e] == [('AUSD', -1)]
+
+
+def test_plan_day_long_only():
+    _, e = plan_day({'BUSD': _sig(-1)}, {}, {'_above_slow': False}, dict(CFG, allow_shorts=False))
+    assert e == []
+
+
+# ---- strategy integration ----------------------------------------------------------------------
+def test_evaluate_opens_long_and_records_trade():
+    s = _strategy()
+    _run(s, {'BTCUSD': UP, 'SOLUSD': UP})
+    syms = {l['symbol']: l for l in s.legs}
+    assert set(syms) == {'BTCUSD', 'SOLUSD'}
+    assert syms['SOLUSD']['side'] == 'buy'
+    assert s.trade_log[-1]['action'] == 'BUY'
+    assert s.last_eval_day == NOW // DAY * DAY
+
+
+def test_flip_closes_and_books_pnl():
+    s = _strategy()
+    _run(s, {'BTCUSD': UP, 'SOLUSD': UP}, price=100.0)
+    lots = next(l for l in s.legs if l['symbol'] == 'SOLUSD')['size']
+    _run(s, {'BTCUSD': UP, 'SOLUSD': DOWN}, price=110.0, now=NOW + DAY)
+    assert 'SOLUSD' not in {l['symbol'] for l in s.legs}             # long closed, BTC up -> no short
+    close = [t for t in s.trade_log if t['action'] == 'CLOSE_BUY' and t['symbol'] == 'SOLUSD']
+    assert close and close[0]['reason'] == 'ema_flip'
+    assert s.cumulative_pnl == pytest.approx(10.0 * lots)
+
+
+def test_skips_coin_when_one_lot_exceeds_cap():
+    s = _strategy(notional_usd=50)
+    _run(s, {'BTCUSD': UP, 'SOLUSD': UP}, price=100.0)                # 1 lot = $100 > $50 cap
+    assert s.legs == []
+
+
+def test_due_once_per_day_after_delay():
+    s = _strategy()
+    day = NOW // DAY * DAY
+    assert s._due(day + 60) is False                                 # 00:01 UTC, before delay
+    assert s._due(day + 6 * 60) is True
+    s.last_eval_day = day
+    assert s._due(day + 3600) is False                               # already done today
+    assert s._due(day + DAY + 6 * 60) is True
+
+
+def test_no_entries_without_btc_data():
+    s = _strategy()
+    _run(s, {'SOLUSD': UP})                                          # no BTCUSD candles
+    assert s.legs == [] and s.last_eval_day == 0
+
+
+def test_legacy_kwargs_accepted():
+    s = EmaTrendFollower(top_n=50, min_oi_change_pct=10.0, tp_pct=0.1, sl_pct=0.05,
+                         ema_resolution='1d', dry_run=True)
+    assert s.top_n == 50 and s.ema_resolution == '1d'
+
+
+def test_restore_state_roundtrip_and_version_gate():
+    s = _strategy()
+    legs = [{'symbol': 'SOLUSD', 'product_id': 1, 'coin': 'SOL', 'side': 'sell', 'size': 3,
+             'entry_price': 150.0, 'contract_value': 1.0, 'opened_at': ''}]
+    s.restore_state({'cumulative_pnl': 12.5, 'total_trades': 4, 'last_eval_day': 123,
+                     'strategy_version': 'daily_ema_v2'}, legs)
+    assert s.cumulative_pnl == 12.5 and s.total_trades == 4 and s.last_eval_day == 123
+    assert s.legs[0]['notional'] == pytest.approx(450.0)
+    s2 = _strategy()
+    s2.restore_state({'last_eval_day': 123}, [])                     # old-version row
+    assert s2.last_eval_day == 0
+
+
+def test_close_all_flattens_and_stops():
+    s = _strategy()
+    _run(s, {'BTCUSD': UP, 'SOLUSD': UP, 'ETHUSD': UP})
+    assert len(s.legs) == 3
+    with patch('strategy.ema_trend_follower.get_futures_price', return_value={'mark_price': 100.0}), \
+         patch.object(EmaTrendFollower, '_persist_state', return_value=None):
+        s.close_all()
+    assert s.legs == [] and s._running is False
+    assert all(t['reason'] == 'shutdown' for t in s.trade_log if t['action'].startswith('CLOSE'))
+
+
+def test_tracker_registration_source():
+    s = _strategy()
+    s._user_id = 42
+    with patch('strategy.ema_trend_follower.position_tracker') as pt:
+        _run(s, {'BTCUSD': UP, 'SOLUSD': UP})
+    kwargs = [c.kwargs for c in pt.open.call_args_list]
+    assert kwargs and all(k['source'] == 'EMA Trend' for k in kwargs)
+
+
+def test_pnl_read_during_concurrent_mutation():
+    s = _strategy()
+    errors, stop = [], threading.Event()
+
+    def reader():
+        with patch('api.pricing.get_futures_prices_bulk', return_value={}):
             while not stop.is_set():
                 try:
-                    with patch('strategy.ema_trend_follower.get_futures_price', return_value=PRICE):
-                        _ = s.pnl
-                except Exception as e:  # pragma: no cover
+                    _ = s.pnl
+                except Exception as e:      # pragma: no cover
                     errors.append(e)
 
-        writers = [threading.Thread(target=mutate) for _ in range(3)]
-        readers = [threading.Thread(target=read_pnl) for _ in range(3)]
-        for t in writers + readers:
-            t.start()
-        import time as _t
-        _t.sleep(0.3)
-        stop.set()
-        for t in writers + readers:
-            t.join()
-
-        assert not errors, f"pnl read raised under concurrency: {errors[:3]}"
-
-    def test_close_all_during_concurrent_entries(self):
-        """close_all() while entries are still streaming in must not crash and must
-        end with _running False (the shutdown signal wins)."""
-        import threading
-        s = _make_strategy()
-        errors = []
-
-        def enter_many():
-            for i in range(30):
-                try:
-                    with patch('strategy.ema_trend_follower.get_futures_price', return_value=PRICE), \
-                         patch.object(EmaTrendFollower, '_product_meta', return_value=META):
-                        s._enter(f'X{i}USD', f'X{i}', _signal('BULLISH'))
-                except Exception as e:  # pragma: no cover
-                    errors.append(e)
-
-        writer = threading.Thread(target=enter_many)
-        writer.start()
-        with patch('strategy.ema_trend_follower.get_futures_price', return_value=PRICE):
-            s.close_all()
-        writer.join()
-
-        assert not errors, f"concurrent close/enter raised: {errors[:3]}"
-        assert s._running is False
-
-
-class TestDashboardIntegration:
-    """Positions must be registered with the shared position_tracker so they
-    appear in the dashboard 'open positions' panel, and removed on exit."""
-
-    def test_entry_registers_with_position_tracker(self):
-        from api.position_tracker import position_tracker
-        uid = 9901
-        s = _make_strategy()
-        s._user_id = uid
-        s._sid = 'dashtest'
-
-        # Clean any leftover for this uid
-        for p in list(position_tracker.get_user_positions(uid)):
-            position_tracker.close(uid, p.product_id)
-
-        with patch('strategy.ema_trend_follower.get_top_coins_by_volume', return_value=UNIVERSE), \
-             patch('strategy.ema_trend_follower.ema_crossover_direction', return_value=_signal('BULLISH')), \
-             patch('strategy.ema_trend_follower.get_futures_price', return_value=PRICE), \
+    t = threading.Thread(target=reader)
+    t.start()
+    for i in range(30):
+        with patch('strategy.ema_trend_follower.get_futures_price', return_value={'mark_price': 10.0}), \
              patch.object(EmaTrendFollower, '_product_meta', return_value=META):
-            s.evaluate_once()
-
-        tracked = position_tracker.get_user_positions(uid)
-        syms = [p.symbol for p in tracked]
-        assert 'SOLUSD' in syms, "entry should register the position with position_tracker"
-        sol = next(p for p in tracked if p.symbol == 'SOLUSD')
-        assert sol.source == 'EMA Trend'
-        assert sol.side == 'buy'
-
-        # Exit must deregister it
-        with patch('strategy.ema_trend_follower.get_top_coins_by_volume', return_value=UNIVERSE), \
-             patch('strategy.ema_trend_follower.ema_crossover_direction', return_value=_signal('BEARISH')), \
-             patch('strategy.ema_trend_follower.get_futures_price', return_value=PRICE), \
-             patch.object(EmaTrendFollower, '_product_meta', return_value=META):
-            s.evaluate_once()
-
-        tracked_after = [p.symbol for p in position_tracker.get_user_positions(uid)]
-        assert 'SOLUSD' not in tracked_after, "exit should remove the position from the tracker"
-
-
+            s._enter(f'C{i}USD', 'C', 'buy', 100.0)
+            s._exit(f'C{i}USD', reason='test')
+    stop.set()
+    t.join()
+    assert errors == [] and s.legs == []
