@@ -3173,22 +3173,11 @@ def api_all_strategies():
                         update_tracked(sid, status='completed')
                         continue
                     entry['running'] = True
-                    # Compute live P&L
-                    from api.pricing import get_futures_price
-                    from strategy.futures_signal_trader import FUTURES_PRODUCTS as FP
-                    from config import get_contract_value
-                    sym = FP.get(trader.asset)
-                    pd = get_futures_price(sym) if sym else None
-                    mark = pd['mark_price'] if pd else 0
-                    cv = get_contract_value(trader.asset)
-                    total_pnl = 0
-                    legs_out = []
-                    for l in trader.legs:
-                        lpnl = ((mark - l['entry_price']) if l['side'] == 'buy' else (l['entry_price'] - mark)) * l['size'] * cv if mark else 0
-                        total_pnl += lpnl
-                        legs_out.append({'symbol': l['symbol'], 'side': l['side'], 'size': l['size'], 'entry_price': l['entry_price'], 'current_mark': round(mark, 2), 'current_pnl': round(lpnl, 2)})
-                    entry['pnl'] = round(total_pnl, 2)
-                    entry['legs'] = legs_out
+                    # Realized + open P&L at the trader's own last mark (priced on the trader thread,
+                    # i.e. the profile's venue; this request thread would default to the testnet).
+                    entry['pnl'] = round(trader.pnl, 2)
+                    entry['cumulative_pnl'] = round(trader.cumulative_pnl, 2)
+                    entry['legs'] = trader.legs_view()
                 elif sid in builder_scheduler_strategies and builder_scheduler_strategies[sid].get('strategy'):
                     s = builder_scheduler_strategies[sid]['strategy']
                     if not builder_scheduler_strategies[sid].get('running', False) or not s._running:
@@ -4113,36 +4102,14 @@ def api_strategy_detail(sid):
         elif sid in _futures_traders:
             trader = _futures_traders[sid]['trader']
             entry['running'] = trader.running
-            logs = [f"[{t['time']}] {t['side'].upper()} @ {t['price']} | SL: {t['sl']} | TP: {t['tp']} | {'✓ Filled' if t['success'] else '✗ Failed'}" for t in trader.trade_log]
-            logs = [f"[FST] {trader.signal_key} {trader.asset} {trader.timeframe} | Scans: {trader._scan_count} | Trades: {trader.trades_today}/{trader.max_trades_per_day}"] + logs
-            total_pnl = 0
-            from api.pricing import get_futures_price
-            from strategy.futures_signal_trader import FUTURES_PRODUCTS as FP
-            from config import get_contract_value
-            symbol = FP.get(trader.asset)
-            price_data = get_futures_price(symbol) if symbol else None
-            mark = price_data['mark_price'] if price_data else 0
-            cv = get_contract_value(trader.asset)
-            for leg in trader.legs:
-                leg_pnl = 0
-                if mark > 0:
-                    if leg['side'] == 'buy':
-                        leg_pnl = (mark - leg['entry_price']) * leg['size'] * cv
-                    else:
-                        leg_pnl = (leg['entry_price'] - mark) * leg['size'] * cv
-                total_pnl += leg_pnl
-                live_legs.append({
-                    'symbol': leg['symbol'],
-                    'side': leg['side'],
-                    'size': leg['size'],
-                    'entry_price': leg['entry_price'],
-                    'current_mark': round(mark, 2),
-                    'current_pnl': round(leg_pnl, 2),
-                    'sl': leg.get('sl'),
-                    'tp': leg.get('tp'),
-                    'type': 'futures',
-                })
-            entry['pnl'] = round(total_pnl, 2)
+            logs = [f"[FST] {trader.signal_key} {trader.asset} {trader.timeframe} | Scans: {trader._scan_count} | "
+                    f"Trades today: {trader.trades_today}/{trader.max_trades_per_day} | closed {trader.closed_count} "
+                    f"(W {trader.wins} / L {trader.losses}) | realized ${trader.cumulative_pnl:+.2f}"]
+            logs += [trader.format_log(t) for t in trader.trade_log]
+            entry['trade_log'] = trader.trade_log[-50:]
+            entry['cumulative_pnl'] = round(trader.cumulative_pnl, 2)
+            live_legs.extend(trader.legs_view())
+            entry['pnl'] = round(trader.pnl, 2)
         elif sid in builder_scheduler_strategies and builder_scheduler_strategies[sid].get('strategy'):
             bse = builder_scheduler_strategies[sid]
             strat = bse['strategy']
@@ -9112,8 +9079,11 @@ def futures_signal_logs(sid):
     if not entry or entry['user_id'] != current_user_id():
         return jsonify(logs=[], running=False)
     trader = entry['trader']
-    return jsonify(logs=trader.trade_log[-20:], running=trader.running,
-                   scan_count=trader._scan_count, trades_today=trader.trades_today)
+    st = trader.status
+    return jsonify(logs=trader.trade_log[-50:], running=trader.running, scan_count=trader._scan_count,
+                   **{k: st[k] for k in ('trades_today', 'max_trades_per_day', 'closed_trades', 'wins', 'losses',
+                                         'cumulative_pnl', 'open_pnl', 'total_pnl', 'total_fees', 'last_mark',
+                                         'legs', 'signal_key', 'asset', 'timeframe', 'lots')})
 
 
 @app.route('/api/futures-signal/stream/<sid>')

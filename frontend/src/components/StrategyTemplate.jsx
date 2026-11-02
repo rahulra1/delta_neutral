@@ -138,17 +138,39 @@ function SignalPanel({ asset, profileId, signalKey, timeframes, defaultTf = '1h'
       }).catch(() => {}).finally(() => setLoading(false));
   };
 
+  const startPolling = sid => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    const load = () => api.get(`/futures-signal/logs/${sid}`).then(r => {
+      setLiveStatus(r.data);
+      if (r.data && r.data.running === false) { setDeployed(false); setLiveSid(null); clearInterval(pollRef.current); pollRef.current = null; }
+    }).catch(() => {});
+    load();
+    pollRef.current = setInterval(load, 5000);
+  };
+
+  // Re-attach to a trader that is already running (after a page reload or a server restart/resume)
+  React.useEffect(() => {
+    let cancelled = false;
+    api.get('/futures-signal/status').then(r => {
+      if (cancelled) return;
+      const t = (r.data?.traders || []).find(x => x.running && x.signal_key === signalKey && x.asset === asset);
+      if (t) {
+        setDeployed(true); setLiveSid(t.sid);
+        if (t.timeframe) setTf(t.timeframe);
+        if (t.lots) setLots(t.lots);
+        startPolling(t.sid);
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [signalKey, asset]);
+
   const deploy = () => {
     if (!window.confirm(`Deploy ${title} ${asset} ${tf} with ${lots} lots?`)) return;
     api.post('/futures-signal/start', { signal_key: signalKey, asset, timeframe: tf, lots, scan_interval: 30, max_trades_per_day: 10, profile_id: profileId })
       .then(r => {
         const sid = r.data?.sid;
         setDeployed(true); setLiveSid(sid);
-        if (sid) {
-          pollRef.current = setInterval(() => {
-            api.get(`/futures-signal/logs/${sid}`).then(r => setLiveStatus(r.data)).catch(() => {});
-          }, 5000);
-        }
+        if (sid) startPolling(sid);
       })
       .catch(e => setError(e.response?.data?.error || 'Deploy failed'));
   };
@@ -186,16 +208,44 @@ function SignalPanel({ asset, profileId, signalKey, timeframes, defaultTf = '1h'
       </div>
 
       {/* Live Status */}
-      {deployed && liveStatus && (
-        <div style={{ background: '#0a0a0a', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12, fontFamily: 'monospace', fontSize: '.75rem' }}>
-          <div style={{ fontWeight: 700, marginBottom: 8, color: '#22c55e' }}>🟢 LIVE — {signalKey} {asset} {tf} | Scans: {liveStatus.scan_count || 0} | Trades: {liveStatus.trades_today || 0}/3</div>
-          {(liveStatus.logs || []).length > 0 ? liveStatus.logs.slice(-5).map((t, i) => (
-            <div key={i} style={{ padding: '3px 0', borderBottom: '1px solid #222', color: t.success ? '#22c55e' : '#ef4444' }}>
-              {t.time} | {t.side?.toUpperCase()} @ {t.price} | SL: {t.sl} | TP: {t.tp} | {t.success ? '✓ Filled' : '✗ Failed'}
+      {deployed && liveStatus && (() => {
+        const ls = liveStatus;
+        const money = v => `${(v || 0) >= 0 ? '+' : '−'}$${Math.abs(v || 0).toFixed(2)}`;
+        const col = v => ((v || 0) >= 0 ? '#22c55e' : '#ef4444');
+        const when = t => (t.ts ? new Date(t.ts).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : t.time);
+        return (
+          <div style={{ background: '#0a0a0a', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12, fontFamily: 'monospace', fontSize: '.75rem', color: '#ddd' }}>
+            <div style={{ fontWeight: 700, marginBottom: 6, color: '#22c55e' }}>
+              🟢 LIVE — {ls.signal_key || signalKey} {ls.asset || asset} {ls.timeframe || tf} · {ls.lots ?? lots} lots | Scans: {ls.scan_count || 0} | Entries today: {ls.trades_today || 0}/{ls.max_trades_per_day ?? '–'}
             </div>
-          )) : <div style={{ color: '#666' }}>Scanning for signals... no trades yet</div>}
-        </div>
-      )}
+            <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginBottom: 8 }}>
+              <span>Realized: <b style={{ color: col(ls.cumulative_pnl) }}>{money(ls.cumulative_pnl)}</b></span>
+              <span>Open: <b style={{ color: col(ls.open_pnl) }}>{money(ls.open_pnl)}</b></span>
+              <span>Total: <b style={{ color: col(ls.total_pnl) }}>{money(ls.total_pnl)}</b></span>
+              <span>Closed: {ls.closed_trades || 0} (W {ls.wins || 0} / L {ls.losses || 0})</span>
+              <span>Fees: ${(ls.total_fees || 0).toFixed(2)}</span>
+              {ls.last_mark && <span>Mark: ${Number(ls.last_mark).toFixed(2)}</span>}
+            </div>
+            {(ls.legs || []).length > 0 ? ls.legs.map((l, i) => (
+              <div key={`l${i}`} style={{ padding: '4px 0', borderBottom: '1px solid #222', color: '#f59e0b' }}>
+                OPEN {l.side === 'buy' ? 'LONG' : 'SHORT'} {l.size} lots @ {l.entry_price} | SL {l.sl} | TP {l.tp} | mark {l.current_mark} | P&L <b style={{ color: col(l.current_pnl) }}>{money(l.current_pnl)}</b>{l.opened_at ? ` | since ${when({ ts: l.opened_at })} IST` : ''}
+              </div>
+            )) : <div style={{ color: '#666', padding: '4px 0' }}>No open position</div>}
+            <div style={{ marginTop: 8, color: '#888' }}>Trade history (IST)</div>
+            {(ls.logs || []).length > 0 ? ls.logs.slice(-20).reverse().map((t, i) => (
+              t.action === 'CLOSE' ? (
+                <div key={i} style={{ padding: '3px 0', borderBottom: '1px solid #222', color: col(t.pnl) }}>
+                  {when(t)} | CLOSE {t.position_side === 'buy' ? 'LONG' : 'SHORT'} {t.size} @ {t.price} ({t.reason}) | entry {t.entry_price} | net {money(t.pnl)} (fees ${(t.fees || 0).toFixed(2)})
+                </div>
+              ) : (
+                <div key={i} style={{ padding: '3px 0', borderBottom: '1px solid #222', color: t.success ? '#93c5fd' : '#ef4444' }}>
+                  {when(t)} | OPEN {t.side === 'buy' ? 'LONG' : 'SHORT'} {t.size ?? ''} @ {t.price} | SL: {t.sl} | TP: {t.tp} | {t.success ? '✓ Filled' : '✗ Failed'}
+                </div>
+              )
+            )) : <div style={{ color: '#666' }}>Scanning for signals... no trades yet</div>}
+          </div>
+        );
+      })()}
 
       {/* Backtest */}
       {backtest && (
