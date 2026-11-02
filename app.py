@@ -61,6 +61,7 @@ pivot_st_strategies = {}
 nse_dn_strategies = {}
 nse_ema_strategies = {}
 nse_dual_momentum_strategies = {}
+nse_sector_options_strategies = {}
 _futures_traders = {}
 
 # Resume strategies from DB on startup
@@ -152,7 +153,7 @@ def _resume_db_strategies():
             if source not in ('EMA Spread', 'EMA Spread Scheduled', 'EMA Spread V2', 'EMA Trend', 'Dual Momentum', 'OI Strategy', 'Daily Strangle', 'Weekly DN',
                               'Portfolio Strangle', 'Hybrid Switch', 'Pivot SuperTrend',
                               'NSE Strangle', 'NSE Delta Neutral', 'NSE EMA Spread', 'NSE Dual Momentum',
-                              'Strategy Builder (Recurring)'):
+                              'NSE Sector Options', 'Strategy Builder (Recurring)'):
                 continue
 
         # Skip strategies where all legs have no product_id (invalid/empty data)
@@ -161,7 +162,7 @@ def _resume_db_strategies():
                                               'Weekly DN', 'Portfolio Strangle', 'Hybrid Switch',
                                               'Pivot SuperTrend', 'NSE Strangle',
                                               'NSE Delta Neutral', 'NSE EMA Spread', 'NSE Dual Momentum',
-                                              'Strategy Builder (Recurring)'):
+                                              'NSE Sector Options', 'Strategy Builder (Recurring)'):
             logger.warning(f"[resume] Skipping {sid} — no valid legs (missing product_id)")
             all_tracked[sid]['status'] = 'closed'
             try:
@@ -1582,6 +1583,18 @@ def _resume_db_strategies():
             t.start()
             logger.info(f"[resume] Resumed NSE Dual Momentum {sid}")
 
+        # Resume NSE Sector Options (paper)
+        elif source == 'NSE Sector Options':
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
+                     'log_history': [], 'running': False, 'params': details,
+                     'user_id': user_id, 'profile_id': profile_id}
+            nse_sector_options_strategies[sid] = entry
+            t = threading.Thread(target=_sector_options_thread,
+                                 args=(sid, entry, details, legs, True), daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed NSE Sector Options {sid}")
+
         # Resume recurring Strategy Builder
         elif source == 'Strategy Builder (Recurring)':
             entry = {'thread': None, 'strategy': None, 'running': False,
@@ -2586,6 +2599,15 @@ def dashboard_live_pnl():
                             total_live_pnl += pnl
                             active_pnls.append({'sid': sid, 'name': 'NSE Dual Momentum', 'pnl': pnl})
 
+                    for sid, e in nse_sector_options_strategies.items():
+                        if e.get('user_id') != uid or not e.get('running'):
+                            continue
+                        s = e.get('strategy')
+                        if s:
+                            pnl = round(s.pnl, 2)
+                            total_live_pnl += pnl
+                            active_pnls.append({'sid': sid, 'name': 'NSE Sector Options', 'pnl': pnl})
+
                 for rs in registry.get_running(uid):
                     pnl = round(rs.current_pnl, 4)
                     total_live_pnl += pnl
@@ -2769,6 +2791,10 @@ def api_dashboard():
                     s = nse_dual_momentum_strategies[sid]['strategy']
                     t['pnl'] = round(s.pnl, 2)
                     t['cumulative_pnl'] = round(s.cumulative_pnl, 2)
+                elif sid in nse_sector_options_strategies and nse_sector_options_strategies[sid].get('strategy'):
+                    s = nse_sector_options_strategies[sid]['strategy']
+                    t['pnl'] = round(s.pnl, 2)
+                    t['cumulative_pnl'] = round(s.cumulative_pnl, 2)
                 # Check unified tracker
                 rs = registry.get(sid)
                 if rs and rs.running:
@@ -2791,6 +2817,7 @@ def api_dashboard():
         running_count += sum(1 for sid, e in nse_dn_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in nse_ema_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in nse_dual_momentum_strategies.items() if e.get('user_id') == uid and e.get('running'))
+        running_count += sum(1 for sid, e in nse_sector_options_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in pivot_st_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in portfolio_strangle_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in hybrid_strategies.items() if e.get('user_id') == uid and e.get('running'))
@@ -3027,6 +3054,22 @@ def api_all_strategies():
                              'stopped': l.get('stopped', False)}
                             for l in s.legs
                         ]
+                elif sid in nse_sector_options_strategies and nse_sector_options_strategies[sid].get('strategy'):
+                    s = nse_sector_options_strategies[sid]['strategy']
+                    entry['pnl'] = round(s.pnl, 2)
+                    if not s._running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.cumulative_pnl, 2))
+                        continue
+                    with s._legs_lock:
+                        entry['legs'] = [
+                            {'symbol': l.get('symbol', ''), 'side': 'buy', 'type': l.get('type', ''),
+                             'strike': l.get('strike', ''), 'qty': l.get('qty', 0), 'size': l.get('size', 0),
+                             'entry_price': round(l.get('entry_price', 0), 2),
+                             'current_mark': round(l.get('current_mark', l.get('entry_price', 0)), 2),
+                             'current_pnl': round(l.get('current_pnl', 0), 2), 'stopped': False}
+                            for l in s.legs if not l.get('stopped')
+                        ]
                 elif sid in pivot_st_strategies and pivot_st_strategies[sid].get('strategy'):
                     s = pivot_st_strategies[sid]['strategy']
                     entry['pnl'] = round(s.pnl, 4)
@@ -3208,6 +3251,8 @@ def api_close_strategy(sid):
             profile_id = nse_dn_strategies[sid].get('profile_id')
         elif sid in nse_dual_momentum_strategies:
             profile_id = nse_dual_momentum_strategies[sid].get('profile_id')
+        elif sid in nse_sector_options_strategies:
+            profile_id = nse_sector_options_strategies[sid].get('profile_id')
         elif sid in strangle_strategies:
             profile_id = strangle_strategies[sid].get('profile_id')
         elif sid in pivot_st_strategies:
@@ -3333,6 +3378,16 @@ def api_close_strategy(sid):
                 ndm['strategy'].close_all()
             except Exception as e:
                 logger.error(f"[close] NSE Dual Momentum {sid} close_all error: {e}")
+        closed = True
+    # NSE Sector Options (paper)
+    if not closed and sid in nse_sector_options_strategies:
+        nso = nse_sector_options_strategies[sid]
+        if nso.get('strategy'):
+            try:
+                nso['strategy'].close_all()
+            except Exception as e:
+                logger.error(f"[close] NSE Sector Options {sid} close_all error: {e}")
+        nso['running'] = False
         closed = True
     # Daily Strangle
     if not closed and sid in strangle_strategies:
@@ -3470,6 +3525,8 @@ def api_close_all_strategies():
                 profile_id = nse_dn_strategies[sid].get('profile_id')
             elif sid in nse_dual_momentum_strategies:
                 profile_id = nse_dual_momentum_strategies[sid].get('profile_id')
+            elif sid in nse_sector_options_strategies:
+                profile_id = nse_sector_options_strategies[sid].get('profile_id')
             elif sid in strangle_strategies:
                 profile_id = strangle_strategies[sid].get('profile_id')
             elif sid in pivot_st_strategies:
@@ -3551,6 +3608,12 @@ def api_close_all_strategies():
             ndm = nse_dual_momentum_strategies[sid]
             if ndm.get('strategy'):
                 ndm['strategy'].close_all()
+            closed = True
+        if not closed and sid in nse_sector_options_strategies:
+            nso = nse_sector_options_strategies[sid]
+            if nso.get('strategy'):
+                nso['strategy'].close_all()
+            nso['running'] = False
             closed = True
         if not closed and sid in strangle_strategies:
             st = strangle_strategies[sid]
@@ -3860,6 +3923,25 @@ def api_strategy_detail(sid):
                     'current_pnl': round(leg.get('current_pnl', 0), 2),
                     'stopped': leg.get('stopped', False)})
             if hasattr(strat, '_pnl_history') and strat._pnl_history:
+                pnl_history = list(strat._pnl_history[-500:])
+        elif sid in nse_sector_options_strategies and nse_sector_options_strategies[sid].get('strategy'):
+            nso = nse_sector_options_strategies[sid]
+            strat = nso['strategy']
+            entry['pnl'] = round(strat.pnl, 2)
+            entry['cumulative_pnl'] = round(strat.cumulative_pnl, 2)
+            entry['running'] = nso.get('running', False)
+            logs = nso.get('log_history', [])
+            entry['trade_log'] = strat.trade_log[-20:]
+            entry['days_traded'] = strat.total_days_traded
+            for leg in strat.legs:
+                if leg.get('stopped'):
+                    continue
+                live_legs.append({'symbol': leg['symbol'], 'type': leg.get('type', ''),
+                    'strike': leg.get('strike', ''), 'side': 'buy', 'size': leg.get('qty', 0),
+                    'entry_price': round(leg['entry_price'], 2),
+                    'current_mark': round(leg.get('current_mark', 0), 2),
+                    'current_pnl': round(leg.get('current_pnl', 0), 2), 'stopped': False})
+            if strat._pnl_history:
                 pnl_history = list(strat._pnl_history[-500:])
         elif sid in nse_dn_strategies and nse_dn_strategies[sid].get('strategy'):
             ndn = nse_dn_strategies[sid]
@@ -4383,6 +4465,8 @@ def api_pnl_series():
                 t['pnl'] = round(nse_ema_strategies[sid]['strategy'].pnl, 2)
             elif sid in nse_dual_momentum_strategies and nse_dual_momentum_strategies[sid].get('strategy'):
                 t['pnl'] = round(nse_dual_momentum_strategies[sid]['strategy'].pnl, 2)
+            elif sid in nse_sector_options_strategies and nse_sector_options_strategies[sid].get('strategy'):
+                t['pnl'] = round(nse_sector_options_strategies[sid]['strategy'].pnl, 2)
 
     # Apply date filters
     if since:
@@ -5430,6 +5514,152 @@ def nse_dual_momentum_status(sid):
         trade_log=s.trade_log[-10:],
         legs=enriched_legs,
     )
+
+
+# ── NSE Sector Options (paper) Routes ──
+
+def _as_bool(v):
+    if isinstance(v, str):
+        return v.strip().lower() in ('1', 'true', 'yes', 'on')
+    return bool(v)
+
+
+def _build_sector_options(params, resume=False):
+    from strategy.nse_sector_options import NseSectorOptions
+    days = params.get('trading_days', [0, 1, 2, 3, 4])
+    if isinstance(days, str):
+        days = [int(d) for d in days.replace('[', '').replace(']', '').split(',') if d.strip()]
+    return NseSectorOptions(
+        entry_hour=int(params.get('entry_hour', 9)), entry_minute=int(params.get('entry_minute', 45)),
+        exit_hour=int(params.get('exit_hour', 15)), exit_minute=int(params.get('exit_minute', 15)),
+        stop_pct=float(params.get('stop_pct', 0.5)), target_pct=float(params.get('target_pct', 0.75)),
+        lots=int(params.get('lots', 1)), min_dte=int(params.get('min_dte', 10)),
+        max_premium=float(params.get('max_premium', 100000)),
+        entry_window_min=int(params.get('entry_window_min', 30)),
+        sector_group=params.get('sector_group', 'Sectoral'), trading_days=days,
+        monitor_interval=int(params.get('monitoring_interval', 15)),
+        # never re-fire the one-off test entry after a restart
+        run_immediately=False if resume else _as_bool(params.get('run_immediately', False)),
+    )
+
+
+def _sector_options_thread(sid, entry, details=None, legs=None, resume=False):
+    uid = entry['user_id']
+    if resume:
+        for attempt in range(5):
+            if _setup_strategy_thread(entry):
+                break
+            logger.warning(f"[resume] NSE Sector Options {sid} — setup failed ({attempt + 1}/5), retrying in 30s")
+            entry['running'] = False
+            time.sleep(30)
+        else:
+            logger.error(f"[resume] NSE Sector Options {sid} — setup failed after 5 attempts")
+            return
+    elif not _setup_strategy_thread(entry):
+        update_tracked(sid, status='completed', exit_reason='setup_failed')
+        entry['log_queue'].put("__STOPPED__")
+        return
+    try:
+        s = _build_sector_options(details or entry['params'], resume=resume)
+        s._log_queue, s._log_history = entry['log_queue'], entry['log_history']
+        s._sid, s._user_id = sid, uid
+        entry['strategy'] = s
+        entry['running'] = True
+        if resume:
+            s.restore_state(details=details, legs=legs)
+        else:
+            record_start(sid, entry['params'], user_id=uid)
+        s.initialize()
+        s._persist_state()
+        s.monitor()
+    except Exception as e:
+        entry['log_queue'].put(f"❌ Error: {e}")
+        logger.error(f"[NSE Sector Options] {sid} error: {e}")
+    finally:
+        s = entry.get('strategy')
+        if s and not s._running:
+            pnl = round(s.cumulative_pnl, 2)
+            record_end(sid, pnl, s.total_days_traded)
+            update_tracked(sid, status='completed', pnl=pnl, exit_reason='intentional_close')
+        elif s:
+            logger.warning(f"[NSE Sector Options] {sid} thread exited unexpectedly — keeping 'running' for resume")
+        _teardown_strategy_thread(entry)
+
+
+@app.route('/api/nse-sector-options/start', methods=['POST'])
+@login_required
+def nse_sector_options_start():
+    params = dict(request.json or {})
+    profile_id = params.pop('profile_id', None)
+    params['dry_run'] = True                       # paper only
+    sid = str(uuid.uuid4())[:8]
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
+             'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    nse_sector_options_strategies[sid] = entry
+    name = (f"NSE Sector Options (SL {params.get('stop_pct', 0.5)}% / TP {params.get('target_pct', 0.75)}%, "
+            f"{params.get('lots', 1)} lot, paper)")
+    track_strategy(sid, 'NSE Sector Options', name, current_user_id(),
+                   details={**params, 'profile_id': profile_id, 'asset': 'NSE'})
+    entry['thread'] = threading.Thread(target=_sector_options_thread, args=(sid, entry), daemon=True)
+    entry['thread'].start()
+    return jsonify(status='started', sid=sid)
+
+
+@app.route('/api/nse-sector-options/stop', methods=['POST'])
+@login_required
+def nse_sector_options_stop():
+    sid = (request.json or {}).get('sid')
+    e = nse_sector_options_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error='Not found'), 404
+    if e.get('strategy'):
+        try:
+            p = get_profile(int(e['profile_id']), e['user_id']) if e.get('profile_id') else None
+            if p:
+                from config import set_thread_credentials
+                set_thread_credentials(p['api_key'], p['api_secret'], p.get('broker'))
+            e['strategy'].close_all()
+        except Exception as ex:
+            logger.error(f"[nse_sector_options_stop] {sid} error: {ex}")
+    e['running'] = False
+    return jsonify(status='stopped')
+
+
+@app.route('/api/nse-sector-options/stream/<sid>')
+@login_required
+def nse_sector_options_stream(sid):
+    e = nse_sector_options_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
+    q, history = e['log_queue'], e.get('log_history', [])
+
+    def generate():
+        for msg in list(history):
+            yield f"data: {msg}\n\n"
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                if msg == "__STOPPED__":
+                    yield "event: stopped\ndata: done\n\n"
+                    break
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield ": heartbeat\n\n"
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/nse-sector-options/status/<sid>')
+@login_required
+def nse_sector_options_status(sid):
+    e = nse_sector_options_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id() or not e.get('running'):
+        return jsonify(running=False)
+    s = e.get('strategy')
+    if not s:
+        return jsonify(running=True, total_pnl=0, cumulative_pnl=0, total_charges=0, days_traded=0,
+                       total_trades=0, trade_log=[], legs=[], last_scan=None)
+    return jsonify(running=True, **s.status())
 
 
 # ── NSE Delta Neutral Routes ──
@@ -8404,7 +8634,7 @@ def api_tracker_logs(sid):
         pnl = round(strat.total_pnl, 2) if strat else 0
         return jsonify(sid=sid, logs=logs[-last:], running=e.get('running', False), pnl=pnl, status='running' if e.get('running') else 'completed')
     # Check new strategy dicts
-    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_scheduled_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, nse_dual_momentum_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies, builder_scheduler_strategies):
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_scheduled_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, nse_dual_momentum_strategies, nse_sector_options_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies, builder_scheduler_strategies):
         e = dct.get(sid)
         if e and e.get('user_id') == current_user_id():
             logs = list(e.get('log_history', []))
@@ -8442,7 +8672,7 @@ def api_tracker_close(sid):
         e['strategy'].close_all_positions()
         return jsonify(status='closed')
     # New strategy dicts
-    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_scheduled_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, nse_dual_momentum_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies, builder_scheduler_strategies):
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_scheduled_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, nse_dual_momentum_strategies, nse_sector_options_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies, builder_scheduler_strategies):
         e = dct.get(sid)
         if e and e.get('user_id') == current_user_id() and e.get('strategy'):
             e['strategy'].close_all()

@@ -207,6 +207,10 @@ const STRATEGIES = [
     desc: 'Intraday long/short NSE stock basket. Buys top-N gainers, shorts top-N losers (₹10,000 each, whole shares). TP +5% / SL -3% side-aware, squared off at 3:15 PM. Paper or live.',
     features: ['Top-N Gainers/Losers', 'Long + Short Stocks', 'Intraday Square-off', 'Paper Trading'],
     rec: '⏱ Intraday 9:30–3:15 IST · NSE equities' },
+  { key: 'nse_sector_options', label: 'NSE Sector Options (Paper)', icon: '🧭🇮🇳', type: 'Options',
+    desc: 'Paper-trades 1 lot of the ATM stock option picked by the Sector Scanner at 09:45: CALL for the top LONG setup, PUT for the top SHORT, in the strongest green/red sector. Exits when the STOCK hits its SL/TP or at 15:15. Prices from the Groww option chain.',
+    features: ['Sector Scanner pick', 'ATM CE / PE · 1 lot', 'Stock-based SL / TP', 'Paper only · Groww chain'],
+    rec: '⏱ Intraday 9:45–3:15 IST · NSE stock options · needs a Groww profile' },
 ];
 
 const DN_FIELDS = [
@@ -399,6 +403,45 @@ const NSE_DUAL_MOMENTUM_FIELDS = [
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 30 },
   { key: 'dry_run', label: 'Mode', type: 'select', options: [{value:true,label:'Paper'},{value:false,label:'Live'}], default: true },
   { key: 'run_immediately', label: 'Run Immediately (test)', type: 'select', options: [{value:false,label:'No — wait for entry time'},{value:true,label:'Yes — enter now once'}], default: false, hint: 'Testing: enter now on start, then daily at entry time' },
+];
+
+const NSE_SECTOR_OPTIONS_FIELDS = [
+  { key: 'stop_pct', label: 'Stock Stop-Loss (%)', type: 'number', step: '0.05', default: 0.5, hint: 'Sell the option when the STOCK moves this % against the trade' },
+  { key: 'target_pct', label: 'Stock Target (%)', type: 'number', step: '0.05', default: 0.75, hint: 'Sell the option when the STOCK moves this % in favour (0.75 = 1.5 × 0.5)' },
+  { key: 'lots', label: 'Lots', type: 'number', default: 1, hint: 'Lot size comes from the Groww instruments list' },
+  { key: 'max_premium', label: 'Max Premium per Trade (₹)', type: 'number', default: 100000, hint: 'Skip a contract if lots × lot size × premium is above this' },
+  { key: 'min_dte', label: 'Min Days to Expiry', type: 'number', default: 10, hint: 'Nearest expiry until it is closer than this many days, then the next month' },
+  { key: 'sector_group', label: 'Sector Group', type: 'select', options: [{value:'Sectoral',label:'Sectoral (21)'},{value:'Thematic',label:'Thematic (41)'}], default: 'Sectoral' },
+  { key: 'trading_days', label: 'Trading Days', type: 'text', default: '0,1,2,3,4', hint: '0=Mon..4=Fri' },
+  { key: 'entry_hour', label: 'Entry Hour (24h IST)', type: 'number', default: 9 },
+  { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 45 },
+  { key: 'entry_window_min', label: 'Entry Window (min)', type: 'number', default: 30, hint: 'Keep rescanning this long if no setup is found at the entry time' },
+  { key: 'exit_hour', label: 'Square-off Hour (24h IST)', type: 'number', default: 15 },
+  { key: 'exit_minute', label: 'Square-off Minute', type: 'number', default: 15 },
+  { key: 'monitoring_interval', label: 'Price Check Interval (s)', type: 'number', default: 15 },
+  { key: 'run_immediately', label: 'Run Immediately (test)', type: 'select', options: [{value:false,label:'No — wait for entry time'},{value:true,label:'Yes — scan & enter now once'}], default: false, hint: 'Testing: ignores the entry time and market-open check once' },
+];
+
+// Keep in sync with strategy/nse_sector_options.py.
+const NSE_SECTOR_OPTIONS_DETAILS = [
+  { heading: '1. Pick (at the entry time, default 09:45 IST)', points: [
+    'Reads the live NSE sectors. Only BULLISH/BEARISH sectors count: |change| ≥ 0.5% and breadth ≥ 30% net advancers/decliners. They are walked from the biggest move down.',
+    'In each sector it takes the top-ranked LONG/SHORT setup from the Sector Scanner (RS vs sector + price on the right side of VWAP + RVOL ≥ 1.5) that has listed stock options.',
+    'If nothing qualifies it rescans every minute for the entry window (default 30 min), then skips the day.',
+  ] },
+  { heading: '2. Trade (paper)', points: [
+    'LONG → buys the ATM CALL, SHORT → buys the ATM PUT. Expiry: the nearest (current-month) expiry until it is less than 10 days away (setting), then the next month. Strike nearest the stock price.',
+    'Price = Groww option-chain LTP. Lot size and contract symbols come from Groww\'s instruments list. No real orders are placed.',
+  ] },
+  { heading: '3. Exit (decided by the STOCK price)', points: [
+    'Stop: the stock moves the stop % against the entry stock price. Target: it moves the target % in favour.',
+    'Otherwise the option is sold at the square-off time (default 15:15). One trade per day.',
+    'Realized P&L is after estimated Groww F&O charges (₹40 brokerage + STT 0.1% on sell premium + exchange/SEBI/stamp + GST).',
+  ] },
+  { heading: '4. What to expect', points: [
+    'In the Aug–Oct 2026 backtest of this exact rule (55 sessions, modelled option prices) it LOST money: 53 trades, 39.6% wins, −₹19,555 with SL 0.5% / TP 0.75%, and −₹37,495 with SL 1% / TP 2%. Treat the paper run as a forward test, not as an expected profit.',
+    'Needs a Groww profile with a valid API token — without it the option chain is unavailable and no trade is taken.',
+  ] },
 ];
 
 const NSE_DN_FIELDS = [
@@ -985,6 +1028,76 @@ export default function Strategy() {
               )}
             </>
           )} />
+      )}
+      {activeTab === 'nse_sector_options' && (
+        <StrategyTemplate title="NSE Sector Options (Paper)" icon="🧭🇮🇳" type="Options"
+          description="Paper-buys 1 lot of the ATM CALL (LONG) or PUT (SHORT) of the Sector Scanner's top pick at 09:45, exits when the stock hits its SL/TP or at 15:15. Select a Groww profile." profiles={profiles}
+          configFields={NSE_SECTOR_OPTIONS_FIELDS} details={NSE_SECTOR_OPTIONS_DETAILS}
+          onStart={async (config) => {
+            const c = { ...config };
+            if (typeof c.trading_days === 'string') c.trading_days = c.trading_days.split(',').map(d => parseInt(d.trim(), 10)).filter(n => !isNaN(n));
+            const { data } = await api.post('/nse-sector-options/start', c);
+            return data;
+          }}
+          onStop={async (sid) => { await api.post('/nse-sector-options/stop', { sid }); }}
+          statusEndpoint="/nse-sector-options/status" streamEndpoint="/nse-sector-options/stream"
+          renderStatus={(s) => {
+            const money = v => `${(v || 0) >= 0 ? '+' : '−'}₹${Math.abs(Math.round(v || 0)).toLocaleString('en-IN')}`;
+            const col = v => ((v || 0) >= 0 ? 'var(--green)' : 'var(--red)');
+            const th = { textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' };
+            const td = { padding: '4px 8px' };
+            const reasons = { take_profit: 'Target', stop_loss: 'Stop', square_off: '15:15', manual_stop: 'Manual' };
+            return (
+              <>
+                <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                  <div className="stat-card"><div className="label">Realized P&L (net)</div><div className="value" style={{ color: col(s.cumulative_pnl) }}>{money(s.cumulative_pnl)}</div><div className="sub">charges ₹{Math.round(s.total_charges || 0).toLocaleString('en-IN')}</div></div>
+                  <div className="stat-card"><div className="label">Total (incl. open)</div><div className="value" style={{ color: col(s.total_pnl) }}>{money(s.total_pnl)}</div></div>
+                  <div className="stat-card"><div className="label">Trades</div><div className="value">{s.total_trades || 0}</div></div>
+                  <div className="stat-card"><div className="label">Last scan</div><div className="value" style={{ fontSize: '.95rem' }}>{s.last_scan ? (s.last_scan.stock || 'No setup') : '—'}</div><div className="sub">{s.last_scan?.sector ? `${s.last_scan.sector} ${s.last_scan.sector_pchg > 0 ? '+' : ''}${s.last_scan.sector_pchg}%` : (s.entered_day ? `done for ${s.entered_day}` : 'waiting for entry time')}</div></div>
+                </div>
+                {s.legs && s.legs.length > 0 && (
+                  <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                    <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Open Paper Position</div>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                      <thead><tr>{['Option', 'Qty', 'Buy', 'LTP', 'P&L', 'Stock', 'Stock now', 'Stock SL', 'Stock TP'].map(h => <th key={h} scope="col" style={th}>{h}</th>)}</tr></thead>
+                      <tbody>{s.legs.map((l, i) => (
+                        <tr key={i}>
+                          <td style={{ ...td, fontWeight: 700 }}>{l.symbol}<div style={{ fontSize: '.66rem', color: 'var(--muted)', fontWeight: 400 }}>{l.direction} · {l.sector}</div></td>
+                          <td style={td}>{l.qty}</td>
+                          <td style={td}>₹{(l.entry_price || 0).toFixed(2)}</td>
+                          <td style={{ ...td, fontWeight: 600 }}>₹{(l.current_mark || 0).toFixed(2)}</td>
+                          <td style={{ ...td, fontWeight: 700, color: col(l.current_pnl) }}>{money(l.current_pnl)}</td>
+                          <td style={td}>{l.underlying} @ {l.stock_entry}</td>
+                          <td style={{ ...td, fontWeight: 600 }}>{l.stock_mark}</td>
+                          <td style={{ ...td, color: 'var(--red)' }}>{l.stock_stop}</td>
+                          <td style={{ ...td, color: 'var(--green)' }}>{l.stock_target}</td>
+                        </tr>))}</tbody>
+                    </table>
+                  </div>
+                )}
+                {(s.trade_log || []).length > 0 && (
+                  <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                    <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Paper Trade Log</div>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                      <thead><tr>{['Date', 'Time', 'Action', 'Option', 'Qty', 'Premium', 'Stock', 'Exit', 'Net P&L'].map(h => <th key={h} scope="col" style={th}>{h}</th>)}</tr></thead>
+                      <tbody>{(s.trade_log || []).slice(-20).reverse().map((t, i) => (
+                        <tr key={i}>
+                          <td style={td}>{t.date}</td>
+                          <td style={td}>{(t.ts || '').slice(11, 16)}</td>
+                          <td style={td}><span className={`badge ${t.action === 'BUY' ? 'badge-green' : 'badge-red'}`}>{t.action}</span></td>
+                          <td style={{ ...td, fontWeight: 600 }}>{t.symbol}</td>
+                          <td style={td}>{t.qty}</td>
+                          <td style={td}>₹{(t.price || 0).toFixed(2)}</td>
+                          <td style={td}>{t.underlying} {t.stock_price ?? ''}</td>
+                          <td style={td}>{t.reason ? (reasons[t.reason] || t.reason) : '—'}</td>
+                          <td style={{ ...td, fontWeight: 700, color: col(t.pnl) }}>{t.pnl != null ? money(t.pnl) : '—'}</td>
+                        </tr>))}</tbody>
+                    </table>
+                  </div>
+                )}
+              </>
+            );
+          }} />
       )}
       {activeTab === 'pivot_supertrend' && (
         <StrategyTemplate title="Pivot + SuperTrend (0DTE)" icon="📡" type="Options" description="Directional ATM option selling: SuperTrend(7,3) + Pivot R1/S1. Exit on ST flip or 5 PM." profiles={profiles}

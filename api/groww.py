@@ -5,6 +5,7 @@ Authentication: TOTP token → access_token, or pre-generated access_token store
 """
 
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timezone, timedelta
@@ -605,3 +606,71 @@ def reset_client():
         _client = None
         _client_token = None
         _client_created_at = 0
+
+
+# ── Public instruments master (no auth) — lot sizes / expiries for stock options ──
+
+INSTRUMENTS_URL = 'https://growwapi-assets.groww.in/instruments/instrument.csv'
+_INSTRUMENTS_CACHE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                  '.nse_cache', 'groww_instruments.csv')
+_INSTRUMENTS_MAX_AGE = 12 * 3600
+_stock_opts = {'ts': 0, 'by_symbol': {}}
+_stock_opts_lock = threading.Lock()
+
+
+def _load_stock_options():
+    """Parse Groww's public instruments CSV into {underlying: {lot_size, contracts}} for
+    NSE stock options (CE/PE). Downloaded at most every 12 h and cached on disk."""
+    import csv
+    import requests
+    with _stock_opts_lock:
+        if _stock_opts['by_symbol'] and time.time() - _stock_opts['ts'] < _INSTRUMENTS_MAX_AGE:
+            return _stock_opts['by_symbol']
+        path = _INSTRUMENTS_CACHE
+        fresh = os.path.exists(path) and time.time() - os.path.getmtime(path) < _INSTRUMENTS_MAX_AGE
+        if not fresh:
+            try:
+                r = requests.get(INSTRUMENTS_URL, timeout=60)
+                r.raise_for_status()
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, 'wb') as f:
+                    f.write(r.content)
+            except Exception as e:
+                logger.warning(f"Groww instruments download failed: {e}")
+                if not os.path.exists(path):
+                    return _stock_opts['by_symbol']
+        out = {}
+        index_names = {'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX', 'BANKEX'}
+        with open(path, newline='') as f:
+            for row in csv.DictReader(f):
+                if (row.get('exchange') != 'NSE' or row.get('segment') != 'FNO'
+                        or row.get('instrument_type') not in ('CE', 'PE')):
+                    continue
+                und = row.get('underlying_symbol') or ''
+                if not und or und in index_names:
+                    continue
+                try:
+                    strike = float(row['strike_price'])
+                    lot = int(float(row['lot_size']))
+                except (TypeError, ValueError, KeyError):
+                    continue
+                d = out.setdefault(und, {'lot_size': lot, 'contracts': {}})
+                d['contracts'][(row['expiry_date'], row['instrument_type'], strike)] = row['trading_symbol']
+        _stock_opts.update(ts=time.time(), by_symbol=out)
+        logger.info(f"Groww instruments: {len(out)} stock-option underlyings loaded")
+        return out
+
+
+def get_stock_option_meta(symbol):
+    """F&O metadata for a stock from Groww's public instruments master.
+
+    Returns {'lot_size': int, 'expiries': ['YYYY-MM-DD', ...] (future, sorted),
+             'contracts': {(expiry, 'CE'|'PE', strike): trading_symbol}}
+    or None if the stock has no listed options.
+    """
+    d = _load_stock_options().get(symbol)
+    if not d:
+        return None
+    today = datetime.now(IST).strftime('%Y-%m-%d')
+    expiries = sorted({e for e, _, _ in d['contracts'] if e >= today})
+    return {'lot_size': d['lot_size'], 'expiries': expiries, 'contracts': d['contracts']}
