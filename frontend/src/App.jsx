@@ -17,6 +17,7 @@ import ChartPage from './pages/ChartPage';
 import Admin from './pages/Admin';
 import StrategyLogs from './pages/StrategyLogs';
 import SectorScanner from './pages/SectorScanner';
+import CryptoScanner from './pages/CryptoScanner';
 
 function PrivateRoute({ children }) {
   const { user } = useAuth();
@@ -42,6 +43,7 @@ export default function App() {
           <Route path="/broker/setup" element={<BrokerSetup />} />
           <Route path="/chart" element={<ChartPage />} />
           <Route path="/sector-scanner" element={<SectorScanner />} />
+          <Route path="/crypto-scanner" element={<CryptoScanner />} />
           <Route path="/admin" element={<Admin />} />
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>

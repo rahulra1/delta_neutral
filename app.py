@@ -7762,6 +7762,64 @@ def api_sector_scanner_stocks():
         return jsonify(error=str(e), index=index), 502
 
 
+@app.route('/api/crypto-scanner')
+@login_required
+def api_crypto_scanner():
+    """Delta crypto perps grouped into sectors (Delta tags) ranked by 24h move, breadth, majors, movers."""
+    from api.crypto_scanner import get_overview
+    try:
+        return jsonify(get_overview())
+    except Exception as e:
+        logger.error(f"Crypto scanner error: {e}")
+        return jsonify(error=str(e)), 502
+
+
+@app.route('/api/crypto-scanner/coins')
+@login_required
+def api_crypto_scanner_coins():
+    """Coins of one crypto sector with VWAP / RVOL / OI build-up / funding checks. ?sector=Layer 1"""
+    from api.crypto_scanner import get_sector_coins
+    sector = (request.args.get('sector') or '').strip()
+    if not sector:
+        return jsonify(error='sector is required'), 400
+    try:
+        return jsonify(get_sector_coins(sector))
+    except ValueError as e:
+        return jsonify(error=str(e)), 404
+    except Exception as e:
+        logger.error(f"Crypto scanner coins error ({sector}): {e}")
+        return jsonify(error=str(e), sector=sector), 502
+
+
+@app.route('/api/crypto-scanner/news')
+@login_required
+def api_crypto_scanner_news():
+    """Graded crypto headlines (RSS) + Upbit listing/delisting notices, newest first."""
+    from api.crypto_scanner import get_news
+    try:
+        return jsonify(get_news())
+    except Exception as e:
+        logger.error(f"Crypto scanner news error: {e}")
+        return jsonify(error=str(e)), 502
+
+
+@app.route('/api/crypto-scanner/coin-news')
+@login_required
+def api_crypto_scanner_coin_news():
+    """Headlines, upcoming CoinMarketCal events and listing notices for one coin. ?ticker=SOL"""
+    from api.crypto_scanner import get_coin_news
+    ticker = (request.args.get('ticker') or '').strip()
+    if not ticker:
+        return jsonify(error='ticker is required'), 400
+    try:
+        return jsonify(get_coin_news(ticker))
+    except ValueError as e:
+        return jsonify(error=str(e)), 404
+    except Exception as e:
+        logger.error(f"Crypto scanner coin news error ({ticker}): {e}")
+        return jsonify(error=str(e)), 502
+
+
 @app.route('/api/place-legs', methods=['POST'])
 @login_required
 @credits_required('place_legs')

@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { to: '/strategy-builder', icon: '🛠', label: 'Strategy Builder' },
   { to: '/chart', icon: '📉', label: 'Chart' },
   { to: '/sector-scanner', icon: '🧭', label: 'Sector Scanner' },
+  { to: '/crypto-scanner', icon: '🪙', label: 'Crypto Scanner' },
   { to: '/broker', icon: '🔗', label: 'Broker' },
   { to: '/profile', icon: '👤', label: 'Settings' },
 ];
