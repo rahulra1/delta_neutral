@@ -10,6 +10,7 @@ const NAV_ITEMS = [
   { to: '/performance', icon: '📈', label: 'Performance' },
   { to: '/strategy-builder', icon: '🛠', label: 'Strategy Builder' },
   { to: '/chart', icon: '📉', label: 'Chart' },
+  { to: '/sector-scanner', icon: '🧭', label: 'Sector Scanner' },
   { to: '/broker', icon: '🔗', label: 'Broker' },
   { to: '/profile', icon: '👤', label: 'Settings' },
 ];

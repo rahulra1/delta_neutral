@@ -7501,6 +7501,37 @@ def api_proxy_pcr_calc():
         return jsonify(error=str(e), symbol=symbol), 502
 
 
+@app.route('/api/sector-scanner')
+@login_required
+def api_sector_scanner():
+    """NSE sectoral indices ranked by % change, breadth, FII/DII and market status."""
+    from api.sector_scanner import get_sectors
+    try:
+        return jsonify(get_sectors())
+    except Exception as e:
+        logger.error(f"Sector scanner error: {e}")
+        return jsonify(error=str(e)), 502
+
+
+@app.route('/api/sector-scanner/stocks')
+@login_required
+def api_sector_scanner_stocks():
+    """Constituents of one sector with VWAP / ORB / relative volume / OI build-up checks.
+    ?index=NIFTY METAL
+    """
+    from api.sector_scanner import get_sector_stocks
+    index = (request.args.get('index') or '').strip()
+    if not index:
+        return jsonify(error='index is required'), 400
+    try:
+        return jsonify(get_sector_stocks(index))
+    except ValueError as e:
+        return jsonify(error=str(e)), 404
+    except Exception as e:
+        logger.error(f"Sector scanner stocks error ({index}): {e}")
+        return jsonify(error=str(e), index=index), 502
+
+
 @app.route('/api/place-legs', methods=['POST'])
 @login_required
 @credits_required('place_legs')
