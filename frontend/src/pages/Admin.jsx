@@ -16,6 +16,7 @@ const ALL_STRATEGIES = [
   { key: 'dual_momentum', label: 'Dual Momentum Basket' },
   { key: 'nse_dual_momentum', label: 'NSE Dual Momentum' },
   { key: 'nse_sector_options', label: 'NSE Sector Options (Paper)' },
+  { key: 'crypto_futures', label: 'Crypto Scanner Futures' },
   { key: 'iv_crush', label: 'IV Crush' },
   { key: 'call_ratio', label: 'Call Ratio Spread' },
   { key: 'rsi_div_mss', label: 'Div + MSS' },

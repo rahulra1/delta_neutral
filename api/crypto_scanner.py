@@ -117,6 +117,7 @@ def _products():
         base = p['underlying_asset']['symbol']
         out[p['symbol']] = {'name': (p['underlying_asset'].get('name') or base).strip(),
                             'contract_value': _f(p.get('contract_value'), 1.0),
+                            'product_id': p.get('id'),
                             'ticker': re.sub(r'^(1000|1M)', '', base)}
     return out
 
@@ -135,6 +136,7 @@ def _tickers():
         prev = oi_usd - oi6
         rows.append({
             'symbol': sym, 'ticker': prods[sym]['ticker'], 'name': prods[sym]['name'],
+            'product_id': prods[sym].get('product_id'),
             'contract_value': prods[sym]['contract_value'], 'price': price,
             'pchange': round(_f(t.get('mark_change_24h')), 2),          # already a % (not a fraction)
             'high': _f(t.get('high')), 'low': _f(t.get('low')),

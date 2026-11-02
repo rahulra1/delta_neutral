@@ -211,6 +211,10 @@ const STRATEGIES = [
     desc: 'Paper-trades 1 lot of the ATM stock option picked by the Sector Scanner at 09:45: CALL for the top LONG setup, PUT for the top SHORT, in the strongest green/red sector. Exits when the STOCK hits its SL/TP or at 15:15. Prices from the Groww option chain.',
     features: ['Sector Scanner pick', 'ATM CE / PE · 1 lot', 'Stock-based SL / TP', 'Paper only · Groww chain'],
     rec: '⏱ Intraday 9:45–3:15 IST · NSE stock options · needs a Groww profile' },
+  { key: 'crypto_futures', label: 'Crypto Scanner Futures', icon: '🪙⚡', type: 'Futures',
+    desc: 'Trades Delta Exchange perpetual futures picked by the Crypto Scanner: top LONG/SHORT setups (RS + 24h VWAP + volume) in the strongest green/red crypto sectors. You set the dollars per trade; lots = dollars ÷ (price × coins per lot). Stop at VWAP or a fixed %, target in R, time stop. Paper or LIVE.',
+    features: ['Crypto Scanner pick', '$ per trade → lots', 'Stop / target / time stop', 'Paper or Live (Delta)'],
+    rec: '⏱ 24/7 · Delta perps · Live needs a Delta Exchange profile' },
 ];
 
 const DN_FIELDS = [
@@ -403,6 +407,50 @@ const NSE_DUAL_MOMENTUM_FIELDS = [
   { key: 'monitoring_interval', label: 'Monitor Interval (s)', type: 'number', default: 30 },
   { key: 'dry_run', label: 'Mode', type: 'select', options: [{value:true,label:'Paper'},{value:false,label:'Live'}], default: true },
   { key: 'run_immediately', label: 'Run Immediately (test)', type: 'select', options: [{value:false,label:'No — wait for entry time'},{value:true,label:'Yes — enter now once'}], default: false, hint: 'Testing: enter now on start, then daily at entry time' },
+];
+
+const CRYPTO_FUTURES_FIELDS = [
+  { key: 'dry_run', label: 'Mode', type: 'select', options: [{value:true,label:'Paper (simulated fills)'},{value:false,label:'LIVE (real orders on Delta)'}], default: true, hint: 'LIVE places real market orders with the selected Delta Exchange profile' },
+  { key: 'amount_usd', label: 'Dollars per Trade ($)', type: 'number', default: 100, hint: 'Position size in USD. Lots = $ ÷ (price × coins per lot), rounded down; coins whose 1 lot costs more are skipped' },
+  { key: 'max_positions', label: 'Max Open Positions', type: 'number', default: 3, hint: 'Total exposure ≈ dollars per trade × this' },
+  { key: 'max_trades_per_day', label: 'Max Entries per Day (IST)', type: 'number', default: 6 },
+  { key: 'stop_mode', label: 'Stop-Loss', type: 'select', options: [{value:'vwap',label:'24h VWAP (scanner, 0.75–3%)'},{value:'fixed',label:'Fixed %'}], default: 'vwap' },
+  { key: 'stop_pct', label: 'Fixed Stop (%)', type: 'number', step: '0.1', default: 1.5, hint: 'Used only when Stop-Loss = Fixed %' },
+  { key: 'rr', label: 'Target (R multiple)', type: 'number', step: '0.1', default: 2, hint: '2 = target is twice the stop distance' },
+  { key: 'max_hold_hours', label: 'Max Hold (hours)', type: 'number', default: 24, hint: 'Close at market after this long if neither stop nor target hit' },
+  { key: 'min_turnover_usd', label: 'Min 24h Turnover ($)', type: 'number', default: 1000000, hint: 'Skip thin coins (bad fills, noisy signals)' },
+  { key: 'require_sector_bias', label: 'Sectors Used', type: 'select', options: [{value:true,label:'Only BULLISH / BEARISH sectors'},{value:false,label:'All sectors (incl. MIXED)'}], default: true },
+  { key: 'sectors', label: 'Only These Sectors (optional)', type: 'text', default: '', placeholder: 'e.g. Layer 1, DeFi, AI', hint: 'Comma-separated: Layer 1, Layer 2, Smart Contracts, DeFi, AI, Meme, Gaming, NFT, New Listings, Other (untagged). Empty = all' },
+  { key: 'allow_long', label: 'Longs', type: 'select', options: [{value:true,label:'Allowed'},{value:false,label:'Off'}], default: true },
+  { key: 'allow_short', label: 'Shorts', type: 'select', options: [{value:true,label:'Allowed'},{value:false,label:'Off'}], default: true },
+  { key: 'cooldown_hours', label: 'Re-entry Cooldown (h)', type: 'number', default: 24, hint: 'Do not trade the same coin again within this many hours' },
+  { key: 'scan_interval_min', label: 'Scan Every (min)', type: 'number', default: 15 },
+  { key: 'price_check_sec', label: 'Price Check (s)', type: 'number', default: 15 },
+];
+
+// Keep in sync with strategy/crypto_scanner_futures.py.
+const CRYPTO_FUTURES_DETAILS = [
+  { heading: '1. Pick (every scan, default 15 min, 24/7)', points: [
+    'Reads the Crypto Scanner: Delta perps grouped by Delta\'s sector tags. By default only BULLISH/BEARISH sectors (median 24h move ≥ 1.5% with breadth ≥ 30%), biggest move first.',
+    'Takes LONG/SHORT setups: stronger/weaker than the sector, on the right side of the 24h VWAP, 24h volume ≥ 1.5× its 7-day average, and 24h turnover ≥ the minimum.',
+    'Skips coins already held or traded within the cooldown. Stops when max open positions or max entries per day is reached.',
+  ] },
+  { heading: '2. Size — your dollars → lots', points: [
+    'Lots = Dollars per Trade ÷ (price × coins per lot), rounded down. Example: $100 on SOL at $94 with 1 SOL/lot = 1 lot; on DOGE at $0.075 with 100 DOGE/lot ($7.53 a lot) = 13 lots.',
+    'If a single lot costs more than the dollars set, the coin is skipped (no rounding up). Margin used depends on the leverage set for that product in your Delta account.',
+  ] },
+  { heading: '3. Exit', points: [
+    'Stop at the 24h VWAP (clamped 0.75–3% from entry) or a fixed %. Target = R multiple × stop distance. Time stop after Max Hold hours. Checked on the Delta mark price every price check.',
+    'Stopping the strategy closes all its open positions (market orders in LIVE).',
+  ] },
+  { heading: '4. Paper vs LIVE', points: [
+    'Paper: fills at the live Delta mark price, no orders. A profile is optional.',
+    'LIVE: real market orders on Delta Exchange (production) through the selected Delta Exchange profile; fills use Delta\'s average fill price. If a close order fails, the position is kept and retried every price check — watch the log.',
+    'P&L = (exit − entry) × lots × coins per lot minus estimated taker fees (0.05% + 18% GST each side). Funding is NOT included.',
+  ] },
+  { heading: '5. What to expect', points: [
+    'These scanner rules are NOT backtested on crypto. The NSE version of the same idea lost money in its backtest, and earlier research here showed strong crypto news tends to fade. Run Paper first and judge it on its own results.',
+  ] },
 ];
 
 const NSE_SECTOR_OPTIONS_FIELDS = [
@@ -1028,6 +1076,80 @@ export default function Strategy() {
               )}
             </>
           )} />
+      )}
+      {activeTab === 'crypto_futures' && (
+        <StrategyTemplate title="Crypto Scanner Futures" icon="🪙⚡" type="Futures"
+          description="Delta Exchange perpetual futures from the Crypto Scanner. Set the dollars per trade — lots are calculated from it. Paper or LIVE (LIVE needs your Delta Exchange profile)." profiles={profiles}
+          configFields={CRYPTO_FUTURES_FIELDS} details={CRYPTO_FUTURES_DETAILS}
+          onStart={async (config) => {
+            const live = String(config.dry_run) === 'false';
+            if (live && !window.confirm(`Start LIVE trading on Delta Exchange?\n\nReal market orders, $${config.amount_usd} per trade, up to ${config.max_positions} positions at once.`)) {
+              return { error: 'Cancelled — LIVE start not confirmed' };
+            }
+            const { data } = await api.post('/crypto-futures/start', config);
+            return data;
+          }}
+          onStop={async (sid) => { await api.post('/crypto-futures/stop', { sid }); }}
+          statusEndpoint="/crypto-futures/status" streamEndpoint="/crypto-futures/stream"
+          renderStatus={(s) => {
+            const money = v => `${(v || 0) >= 0 ? '+' : '−'}$${Math.abs(v || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+            const col = v => ((v || 0) >= 0 ? 'var(--green)' : 'var(--red)');
+            const px = v => (v == null ? '–' : Number(v).toPrecision(6).replace(/\.?0+$/, ''));
+            const th = { textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' };
+            const td = { padding: '4px 8px' };
+            const reasons = { take_profit: 'Target', stop_loss: 'Stop', time_stop: 'Time stop', manual_stop: 'Manual' };
+            return (
+              <>
+                <div style={{ marginBottom: 8 }}><span className={s.mode === 'LIVE' ? 'badge badge-red' : 'badge badge-yellow'}>{s.mode === 'LIVE' ? '🔴 LIVE — real orders' : '📝 PAPER'}</span>
+                  {s.next_scan_in_s != null && <span style={{ fontSize: '.72rem', color: 'var(--muted)', marginLeft: 8 }}>next scan in {Math.ceil(s.next_scan_in_s / 60)} min</span>}</div>
+                <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                  <div className="stat-card"><div className="label">Realized P&L (net)</div><div className="value" style={{ color: col(s.cumulative_pnl) }}>{money(s.cumulative_pnl)}</div><div className="sub">fees ${(s.total_fees || 0).toFixed(2)}</div></div>
+                  <div className="stat-card"><div className="label">Total (incl. open)</div><div className="value" style={{ color: col(s.total_pnl) }}>{money(s.total_pnl)}</div></div>
+                  <div className="stat-card"><div className="label">Trades</div><div className="value">{s.total_trades || 0}</div><div className="sub">{s.win_rate != null ? `${s.win_rate}% win of ${s.closed_trades} closed` : 'none closed yet'}</div></div>
+                  <div className="stat-card"><div className="label">Last scan</div><div className="value" style={{ fontSize: '.9rem' }}>{s.last_scan ? (s.last_scan.taken?.length ? s.last_scan.taken.join(', ') : 'no entry') : '—'}</div><div className="sub">{s.last_scan ? new Date(s.last_scan.time).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' }) + ' IST' : 'starting…'}</div></div>
+                </div>
+                {s.legs && s.legs.length > 0 && (
+                  <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12, overflowX: 'auto' }}>
+                    <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Open Positions</div>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                      <thead><tr>{['Symbol', 'Side', 'Lots', 'Notional', 'Entry', 'Mark', 'Stop', 'Target', 'P&L'].map(h => <th key={h} scope="col" style={th}>{h}</th>)}</tr></thead>
+                      <tbody>{s.legs.map((l, i) => (
+                        <tr key={i}>
+                          <td style={{ ...td, fontWeight: 700 }}>{l.symbol}<div style={{ fontSize: '.64rem', color: 'var(--muted)', fontWeight: 400 }}>{l.sector}</div></td>
+                          <td style={td}><span className={`badge ${l.side === 'buy' ? 'badge-green' : 'badge-red'}`}>{l.side === 'buy' ? 'LONG' : 'SHORT'}</span></td>
+                          <td style={td} title={`${l.contract_value} coin(s) per lot`}>{l.lots}</td>
+                          <td style={td}>${(l.notional || 0).toFixed(2)}</td>
+                          <td style={td}>{px(l.entry_price)}</td>
+                          <td style={{ ...td, fontWeight: 600 }}>{px(l.current_mark)}</td>
+                          <td style={{ ...td, color: 'var(--red)' }}>{px(l.stop)}</td>
+                          <td style={{ ...td, color: 'var(--green)' }}>{px(l.target)}</td>
+                          <td style={{ ...td, fontWeight: 700, color: col(l.current_pnl) }}>{money(l.current_pnl)}</td>
+                        </tr>))}</tbody>
+                    </table>
+                  </div>
+                )}
+                {(s.trade_log || []).length > 0 && (
+                  <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, overflowX: 'auto' }}>
+                    <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Trade Log</div>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                      <thead><tr>{['Time (IST)', 'Action', 'Symbol', 'Lots', 'Price', 'Notional', 'Exit', 'Net P&L'].map(h => <th key={h} scope="col" style={th}>{h}</th>)}</tr></thead>
+                      <tbody>{(s.trade_log || []).slice(-20).reverse().map((t, i) => (
+                        <tr key={i}>
+                          <td style={td}>{new Date(t.ts).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</td>
+                          <td style={td}><span className={`badge ${t.action === 'BUY' ? 'badge-green' : t.action === 'SELL' ? 'badge-red' : ''}`}>{t.action.startsWith('CLOSE') ? 'CLOSE' : t.action === 'BUY' ? 'LONG' : 'SHORT'}</span></td>
+                          <td style={{ ...td, fontWeight: 600 }}>{t.symbol}</td>
+                          <td style={td}>{t.lots}</td>
+                          <td style={td}>{px(t.price)}</td>
+                          <td style={td}>{t.notional != null ? `$${t.notional.toFixed(2)}` : '—'}</td>
+                          <td style={td}>{t.reason ? (reasons[t.reason] || t.reason) : '—'}{t.held_h != null ? ` · ${t.held_h}h` : ''}</td>
+                          <td style={{ ...td, fontWeight: 700, color: col(t.pnl) }}>{t.pnl != null ? money(t.pnl) : '—'}</td>
+                        </tr>))}</tbody>
+                    </table>
+                  </div>
+                )}
+              </>
+            );
+          }} />
       )}
       {activeTab === 'nse_sector_options' && (
         <StrategyTemplate title="NSE Sector Options (Paper)" icon="🧭🇮🇳" type="Options"

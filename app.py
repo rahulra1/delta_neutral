@@ -62,6 +62,7 @@ nse_dn_strategies = {}
 nse_ema_strategies = {}
 nse_dual_momentum_strategies = {}
 nse_sector_options_strategies = {}
+crypto_futures_strategies = {}
 _futures_traders = {}
 
 # Resume strategies from DB on startup
@@ -153,7 +154,7 @@ def _resume_db_strategies():
             if source not in ('EMA Spread', 'EMA Spread Scheduled', 'EMA Spread V2', 'EMA Trend', 'Dual Momentum', 'OI Strategy', 'Daily Strangle', 'Weekly DN',
                               'Portfolio Strangle', 'Hybrid Switch', 'Pivot SuperTrend',
                               'NSE Strangle', 'NSE Delta Neutral', 'NSE EMA Spread', 'NSE Dual Momentum',
-                              'NSE Sector Options', 'Strategy Builder (Recurring)'):
+                              'NSE Sector Options', 'Crypto Scanner Futures', 'Strategy Builder (Recurring)'):
                 continue
 
         # Skip strategies where all legs have no product_id (invalid/empty data)
@@ -162,7 +163,7 @@ def _resume_db_strategies():
                                               'Weekly DN', 'Portfolio Strangle', 'Hybrid Switch',
                                               'Pivot SuperTrend', 'NSE Strangle',
                                               'NSE Delta Neutral', 'NSE EMA Spread', 'NSE Dual Momentum',
-                                              'NSE Sector Options', 'Strategy Builder (Recurring)'):
+                                              'NSE Sector Options', 'Crypto Scanner Futures', 'Strategy Builder (Recurring)'):
             logger.warning(f"[resume] Skipping {sid} — no valid legs (missing product_id)")
             all_tracked[sid]['status'] = 'closed'
             try:
@@ -1595,6 +1596,18 @@ def _resume_db_strategies():
             t.start()
             logger.info(f"[resume] Resumed NSE Sector Options {sid}")
 
+        # Resume Crypto Scanner Futures (paper / live)
+        elif source == 'Crypto Scanner Futures':
+            entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500),
+                     'log_history': [], 'running': False, 'params': details,
+                     'user_id': user_id, 'profile_id': profile_id}
+            crypto_futures_strategies[sid] = entry
+            t = threading.Thread(target=_crypto_futures_thread,
+                                 args=(sid, entry, details, legs, True), daemon=True)
+            entry['thread'] = t
+            t.start()
+            logger.info(f"[resume] Resumed Crypto Scanner Futures {sid}")
+
         # Resume recurring Strategy Builder
         elif source == 'Strategy Builder (Recurring)':
             entry = {'thread': None, 'strategy': None, 'running': False,
@@ -2608,6 +2621,15 @@ def dashboard_live_pnl():
                             total_live_pnl += pnl
                             active_pnls.append({'sid': sid, 'name': 'NSE Sector Options', 'pnl': pnl})
 
+                    for sid, e in crypto_futures_strategies.items():
+                        if e.get('user_id') != uid or not e.get('running'):
+                            continue
+                        s = e.get('strategy')
+                        if s:
+                            pnl = round(s.pnl, 2)
+                            total_live_pnl += pnl
+                            active_pnls.append({'sid': sid, 'name': 'Crypto Scanner Futures', 'pnl': pnl})
+
                 for rs in registry.get_running(uid):
                     pnl = round(rs.current_pnl, 4)
                     total_live_pnl += pnl
@@ -2795,6 +2817,10 @@ def api_dashboard():
                     s = nse_sector_options_strategies[sid]['strategy']
                     t['pnl'] = round(s.pnl, 2)
                     t['cumulative_pnl'] = round(s.cumulative_pnl, 2)
+                elif sid in crypto_futures_strategies and crypto_futures_strategies[sid].get('strategy'):
+                    s = crypto_futures_strategies[sid]['strategy']
+                    t['pnl'] = round(s.pnl, 2)
+                    t['cumulative_pnl'] = round(s.cumulative_pnl, 2)
                 # Check unified tracker
                 rs = registry.get(sid)
                 if rs and rs.running:
@@ -2818,6 +2844,7 @@ def api_dashboard():
         running_count += sum(1 for sid, e in nse_ema_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in nse_dual_momentum_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in nse_sector_options_strategies.items() if e.get('user_id') == uid and e.get('running'))
+        running_count += sum(1 for sid, e in crypto_futures_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in pivot_st_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in portfolio_strangle_strategies.items() if e.get('user_id') == uid and e.get('running'))
         running_count += sum(1 for sid, e in hybrid_strategies.items() if e.get('user_id') == uid and e.get('running'))
@@ -3070,6 +3097,21 @@ def api_all_strategies():
                              'current_pnl': round(l.get('current_pnl', 0), 2), 'stopped': False}
                             for l in s.legs if not l.get('stopped')
                         ]
+                elif sid in crypto_futures_strategies and crypto_futures_strategies[sid].get('strategy'):
+                    s = crypto_futures_strategies[sid]['strategy']
+                    entry['pnl'] = round(s.pnl, 2)
+                    if not s._running:
+                        entry['status'] = 'completed'
+                        update_tracked(sid, status='completed', pnl=round(s.cumulative_pnl, 2))
+                        continue
+                    with s._legs_lock:
+                        entry['legs'] = [
+                            {'symbol': l['symbol'], 'side': l['side'], 'type': 'long' if l['side'] == 'buy' else 'short',
+                             'strike': '', 'qty': l['lots'], 'size': l['lots'],
+                             'entry_price': l['entry_price'], 'current_mark': l.get('current_mark', l['entry_price']),
+                             'current_pnl': round(l.get('current_pnl', 0), 2), 'stopped': False}
+                            for l in s.legs
+                        ]
                 elif sid in pivot_st_strategies and pivot_st_strategies[sid].get('strategy'):
                     s = pivot_st_strategies[sid]['strategy']
                     entry['pnl'] = round(s.pnl, 4)
@@ -3253,6 +3295,8 @@ def api_close_strategy(sid):
             profile_id = nse_dual_momentum_strategies[sid].get('profile_id')
         elif sid in nse_sector_options_strategies:
             profile_id = nse_sector_options_strategies[sid].get('profile_id')
+        elif sid in crypto_futures_strategies:
+            profile_id = crypto_futures_strategies[sid].get('profile_id')
         elif sid in strangle_strategies:
             profile_id = strangle_strategies[sid].get('profile_id')
         elif sid in pivot_st_strategies:
@@ -3388,6 +3432,16 @@ def api_close_strategy(sid):
             except Exception as e:
                 logger.error(f"[close] NSE Sector Options {sid} close_all error: {e}")
         nso['running'] = False
+        closed = True
+    # Crypto Scanner Futures (paper / live)
+    if not closed and sid in crypto_futures_strategies:
+        cfs = crypto_futures_strategies[sid]
+        if cfs.get('strategy'):
+            try:
+                cfs['strategy'].close_all()
+            except Exception as e:
+                logger.error(f"[close] Crypto Scanner Futures {sid} close_all error: {e}")
+        cfs['running'] = False
         closed = True
     # Daily Strangle
     if not closed and sid in strangle_strategies:
@@ -3527,6 +3581,8 @@ def api_close_all_strategies():
                 profile_id = nse_dual_momentum_strategies[sid].get('profile_id')
             elif sid in nse_sector_options_strategies:
                 profile_id = nse_sector_options_strategies[sid].get('profile_id')
+            elif sid in crypto_futures_strategies:
+                profile_id = crypto_futures_strategies[sid].get('profile_id')
             elif sid in strangle_strategies:
                 profile_id = strangle_strategies[sid].get('profile_id')
             elif sid in pivot_st_strategies:
@@ -3614,6 +3670,12 @@ def api_close_all_strategies():
             if nso.get('strategy'):
                 nso['strategy'].close_all()
             nso['running'] = False
+            closed = True
+        if not closed and sid in crypto_futures_strategies:
+            cfs = crypto_futures_strategies[sid]
+            if cfs.get('strategy'):
+                cfs['strategy'].close_all()
+            cfs['running'] = False
             closed = True
         if not closed and sid in strangle_strategies:
             st = strangle_strategies[sid]
@@ -3940,6 +4002,22 @@ def api_strategy_detail(sid):
                     'strike': leg.get('strike', ''), 'side': 'buy', 'size': leg.get('qty', 0),
                     'entry_price': round(leg['entry_price'], 2),
                     'current_mark': round(leg.get('current_mark', 0), 2),
+                    'current_pnl': round(leg.get('current_pnl', 0), 2), 'stopped': False})
+            if strat._pnl_history:
+                pnl_history = list(strat._pnl_history[-500:])
+        elif sid in crypto_futures_strategies and crypto_futures_strategies[sid].get('strategy'):
+            cfs = crypto_futures_strategies[sid]
+            strat = cfs['strategy']
+            entry['pnl'] = round(strat.pnl, 2)
+            entry['cumulative_pnl'] = round(strat.cumulative_pnl, 2)
+            entry['running'] = cfs.get('running', False)
+            logs = cfs.get('log_history', [])
+            entry['trade_log'] = strat.trade_log[-20:]
+            entry['days_traded'] = len(strat._day_trades)
+            for leg in list(strat.legs):
+                live_legs.append({'symbol': leg['symbol'], 'type': 'long' if leg['side'] == 'buy' else 'short',
+                    'strike': '', 'side': leg['side'], 'size': leg['lots'],
+                    'entry_price': leg['entry_price'], 'current_mark': leg.get('current_mark', 0),
                     'current_pnl': round(leg.get('current_pnl', 0), 2), 'stopped': False})
             if strat._pnl_history:
                 pnl_history = list(strat._pnl_history[-500:])
@@ -4467,6 +4545,8 @@ def api_pnl_series():
                 t['pnl'] = round(nse_dual_momentum_strategies[sid]['strategy'].pnl, 2)
             elif sid in nse_sector_options_strategies and nse_sector_options_strategies[sid].get('strategy'):
                 t['pnl'] = round(nse_sector_options_strategies[sid]['strategy'].pnl, 2)
+            elif sid in crypto_futures_strategies and crypto_futures_strategies[sid].get('strategy'):
+                t['pnl'] = round(crypto_futures_strategies[sid]['strategy'].pnl, 2)
 
     # Apply date filters
     if since:
@@ -5659,6 +5739,175 @@ def nse_sector_options_status(sid):
     if not s:
         return jsonify(running=True, total_pnl=0, cumulative_pnl=0, total_charges=0, days_traded=0,
                        total_trades=0, trade_log=[], legs=[], last_scan=None)
+    return jsonify(running=True, **s.status())
+
+
+# ── Crypto Scanner Futures (paper / live, Delta Exchange) Routes ──
+
+def _build_crypto_futures(params):
+    from strategy.crypto_scanner_futures import CryptoScannerFutures
+    return CryptoScannerFutures(
+        amount_usd=float(params.get('amount_usd', 100)), max_positions=int(params.get('max_positions', 3)),
+        max_trades_per_day=int(params.get('max_trades_per_day', 6)), stop_mode=params.get('stop_mode', 'vwap'),
+        stop_pct=float(params.get('stop_pct', 1.5)), rr=float(params.get('rr', 2)),
+        max_hold_hours=float(params.get('max_hold_hours', 24)),
+        min_turnover_usd=float(params.get('min_turnover_usd', 1_000_000)),
+        require_sector_bias=_as_bool(params.get('require_sector_bias', True)), sectors=params.get('sectors', ''),
+        allow_long=_as_bool(params.get('allow_long', True)), allow_short=_as_bool(params.get('allow_short', True)),
+        cooldown_hours=float(params.get('cooldown_hours', 24)),
+        scan_interval_min=int(params.get('scan_interval_min', 15)),
+        price_check_sec=int(params.get('price_check_sec', 15)),
+        dry_run=_as_bool(params.get('dry_run', True)))
+
+
+def _crypto_futures_setup(entry, live):
+    """LIVE needs the selected Delta profile (and a working signed connection). PAPER only needs public
+    production market data, so a profile is optional and no connection check is done."""
+    if live:
+        return _setup_strategy_thread(entry)
+    LogCapture._local.log_queue = entry['log_queue']
+    LogCapture._local.log_history = entry['log_history']
+    from config import set_thread_credentials
+    p = get_profile(int(entry['profile_id']), entry['user_id']) if entry.get('profile_id') else None
+    set_thread_credentials((p or {}).get('api_key', '') or '', (p or {}).get('api_secret', '') or '', 'delta_exchange')
+    return True
+
+
+def _crypto_futures_thread(sid, entry, details=None, legs=None, resume=False):
+    uid = entry['user_id']
+    params = details or entry['params']
+    live = not _as_bool(params.get('dry_run', True))
+    for attempt in range(5 if resume else 1):
+        if _crypto_futures_setup(entry, live):
+            break
+        if not resume:
+            update_tracked(sid, status='completed', exit_reason='setup_failed')
+            entry['log_queue'].put("__STOPPED__")
+            return
+        logger.warning(f"[resume] Crypto Scanner Futures {sid} — setup failed ({attempt + 1}/5), retrying in 30s")
+        entry['running'] = False
+        time.sleep(30)
+    else:
+        if resume:
+            logger.error(f"[resume] Crypto Scanner Futures {sid} — setup failed after 5 attempts")
+            return
+    try:
+        s = _build_crypto_futures(params)
+        s._log_queue, s._log_history = entry['log_queue'], entry['log_history']
+        s._sid, s._user_id = sid, uid
+        entry['strategy'] = s
+        entry['running'] = True
+        if resume:
+            s.restore_state(details=details, legs=legs)
+        else:
+            record_start(sid, entry['params'], user_id=uid)
+        if not s.initialize():
+            entry['running'] = False
+            update_tracked(sid, status='completed', exit_reason='init_failed')
+            return
+        s._persist_state()
+        s.monitor()
+    except Exception as e:
+        entry['log_queue'].put(f"❌ Error: {e}")
+        logger.error(f"[Crypto Scanner Futures] {sid} error: {e}")
+    finally:
+        s = entry.get('strategy')
+        if s and not s._running:
+            pnl = round(s.cumulative_pnl, 2)
+            record_end(sid, pnl, len(s._day_trades))
+            if all_tracked.get(sid, {}).get('status') == 'running':
+                update_tracked(sid, status='completed', pnl=pnl, exit_reason='intentional_close')
+        elif s:
+            logger.warning(f"[Crypto Scanner Futures] {sid} thread exited unexpectedly — keeping 'running' for resume")
+        _teardown_strategy_thread(entry)
+
+
+@app.route('/api/crypto-futures/start', methods=['POST'])
+@login_required
+def crypto_futures_start():
+    params = dict(request.json or {})
+    profile_id = params.pop('profile_id', None) or None
+    params['dry_run'] = _as_bool(params.get('dry_run', True))
+    try:
+        amount = float(params.get('amount_usd', 100))
+    except (TypeError, ValueError):
+        return jsonify(error='amount_usd must be a number'), 400
+    if amount <= 0:
+        return jsonify(error='amount_usd must be > 0'), 400
+    if not params['dry_run']:
+        p = get_profile(int(profile_id), current_user_id()) if profile_id else None
+        if not p:
+            return jsonify(error='LIVE mode needs an API profile — select your Delta Exchange profile'), 400
+        if p.get('broker') != 'delta_exchange':
+            return jsonify(error=f"LIVE mode needs a Delta Exchange (production) profile; '{p.get('name')}' is "
+                                 f"'{p.get('broker')}'"), 400
+    sid = str(uuid.uuid4())[:8]
+    entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
+             'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
+    crypto_futures_strategies[sid] = entry
+    mode = 'paper' if params['dry_run'] else 'LIVE'
+    name = f"Crypto Scanner Futures (${amount:,.0f}/trade, max {params.get('max_positions', 3)} open, {mode})"
+    track_strategy(sid, 'Crypto Scanner Futures', name, current_user_id(),
+                   details={**params, 'profile_id': profile_id, 'asset': 'CRYPTO'})
+    entry['thread'] = threading.Thread(target=_crypto_futures_thread, args=(sid, entry), daemon=True)
+    entry['thread'].start()
+    return jsonify(status='started', sid=sid, mode=mode)
+
+
+@app.route('/api/crypto-futures/stop', methods=['POST'])
+@login_required
+def crypto_futures_stop():
+    sid = (request.json or {}).get('sid')
+    e = crypto_futures_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return jsonify(error='Not found'), 404
+    if e.get('strategy'):
+        try:
+            p = get_profile(int(e['profile_id']), e['user_id']) if e.get('profile_id') else None
+            from config import set_thread_credentials
+            set_thread_credentials((p or {}).get('api_key', '') or '', (p or {}).get('api_secret', '') or '',
+                                   (p or {}).get('broker') or 'delta_exchange')
+            e['strategy'].close_all()
+        except Exception as ex:
+            logger.error(f"[crypto_futures_stop] {sid} error: {ex}")
+    e['running'] = False
+    return jsonify(status='stopped')
+
+
+@app.route('/api/crypto-futures/stream/<sid>')
+@login_required
+def crypto_futures_stream(sid):
+    e = crypto_futures_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id():
+        return Response("data: Not found\n\n", mimetype='text/event-stream')
+    q, history = e['log_queue'], e.get('log_history', [])
+
+    def generate():
+        for msg in list(history):
+            yield f"data: {msg}\n\n"
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                if msg == "__STOPPED__":
+                    yield "event: stopped\ndata: done\n\n"
+                    break
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield ": heartbeat\n\n"
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/crypto-futures/status/<sid>')
+@login_required
+def crypto_futures_status(sid):
+    e = crypto_futures_strategies.get(sid)
+    if not e or e.get('user_id') != current_user_id() or not e.get('running'):
+        return jsonify(running=False)
+    s = e.get('strategy')
+    if not s:
+        return jsonify(running=True, total_pnl=0, cumulative_pnl=0, total_fees=0, total_trades=0, legs=[],
+                       trade_log=[], last_scan=None)
     return jsonify(running=True, **s.status())
 
 
@@ -8692,7 +8941,7 @@ def api_tracker_logs(sid):
         pnl = round(strat.total_pnl, 2) if strat else 0
         return jsonify(sid=sid, logs=logs[-last:], running=e.get('running', False), pnl=pnl, status='running' if e.get('running') else 'completed')
     # Check new strategy dicts
-    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_scheduled_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, nse_dual_momentum_strategies, nse_sector_options_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies, builder_scheduler_strategies):
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_scheduled_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, nse_dual_momentum_strategies, nse_sector_options_strategies, crypto_futures_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies, builder_scheduler_strategies):
         e = dct.get(sid)
         if e and e.get('user_id') == current_user_id():
             logs = list(e.get('log_history', []))
@@ -8730,7 +8979,7 @@ def api_tracker_close(sid):
         e['strategy'].close_all_positions()
         return jsonify(status='closed')
     # New strategy dicts
-    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_scheduled_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, nse_dual_momentum_strategies, nse_sector_options_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies, builder_scheduler_strategies):
+    for dct in (iv_crush_strategies, call_ratio_strategies, oi_strategies, weekly_dn_strategies, ema_spread_strategies, ema_spread_scheduled_strategies, ema_spread_v2_strategies, ema_trend_strategies, dual_momentum_strategies, strangle_strategies, nse_strangle_strategies, nse_ema_strategies, nse_dn_strategies, nse_dual_momentum_strategies, nse_sector_options_strategies, crypto_futures_strategies, portfolio_strangle_strategies, hybrid_strategies, pivot_st_strategies, builder_scheduler_strategies):
         e = dct.get(sid)
         if e and e.get('user_id') == current_user_id() and e.get('strategy'):
             e['strategy'].close_all()
