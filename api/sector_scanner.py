@@ -9,7 +9,8 @@ Sources (all public, no broker login needed):
   NSE  /api/live-analysis-oi-spurts-underlyings   F&O open-interest change per underlying
   NSE  /api/snapshot-capital-market-largedeal     last session's bulk / block deals
   NSE  /api/fiidiiTradeReact                      last session's FII / DII net cash flow
-  Yahoo 5m candles (5 days)                        VWAP, 15-min opening range, relative volume
+  Yahoo 5m candles (5 days)                        VWAP, 30-min opening range (09:15-09:45), ORB / VWAP
+                                                   LONG/SHORT on the last completed 5m close, relative volume
 
 "Big player" activity can't be observed directly, so it is inferred from:
   relative volume vs the same time of day on prior sessions, price vs VWAP,
@@ -20,7 +21,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -39,7 +40,7 @@ _UA = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
 BIAS_PCT = 0.5          # |sector % change| needed to call it green/red
 BIAS_BREADTH = 0.3      # (adv - dec) / (adv + dec) needed to confirm it is broad-based
 RVOL_HOT = 1.5          # relative volume that counts as "unusual"
-OR_END = dtime(9, 30)   # 15-minute opening range: 09:15-09:30
+OR_END = dtime(9, 45)   # 30-minute opening range: 09:15-09:45 (same as the NSE Sector Options strategy)
 LATE_ENTRY = dtime(14, 30)
 STOP_MIN_PCT, STOP_MAX_PCT = 0.4, 1.5   # clamp VWAP-based stop distance (% of entry)
 
@@ -208,7 +209,13 @@ def _constituents(index):
 # --------------------------------------------------------------------------- Yahoo intraday
 
 def _intraday(symbol):
-    """VWAP, opening range and time-of-day relative volume from Yahoo 5m candles."""
+    """VWAP, opening range, ORB / VWAP signals and time-of-day relative volume from Yahoo 5m candles.
+
+    Same rules as the NSE Sector Options strategy:
+      opening range = high / low of 09:15-09:45 (30 min)
+      ORB signal    = last COMPLETED 5m close above the range high (LONG) / below the low (SHORT), else INSIDE
+      VWAP          = session VWAP from the completed 5m bars; signal = last 5m close above (LONG) / below (SHORT)
+    Yahoo's newest bar is the still-forming one (its timestamp is the last trade, not a 5m boundary) -> excluded."""
     s, crumb = _yahoo_session()
     r = s.get(f'https://query2.finance.yahoo.com/v8/finance/chart/{quote(symbol)}.NS',
               params={'interval': '5m', 'range': '5d', 'crumb': crumb or ''}, timeout=10)
@@ -217,12 +224,15 @@ def _intraday(symbol):
     if not res or not res.get('timestamp'):
         return None
     q = res['indicators']['quote'][0]
+    now = datetime.now(IST)
     days = {}
     for i, ts in enumerate(res['timestamp']):
         c, v = q['close'][i], q['volume'][i]
         if c is None or q['high'][i] is None or q['low'][i] is None:
             continue
         t = datetime.fromtimestamp(ts, IST)
+        if t.second or t.minute % 5 or t + timedelta(minutes=5) > now:
+            continue                                         # still-forming 5m bar
         days.setdefault(t.date(), []).append((t.time(), q['high'][i], q['low'][i], c, v or 0))
     if not days:
         return None
@@ -232,7 +242,14 @@ def _intraday(symbol):
     vol = sum(v for *_, v in today)
     vwap = pv / vol if vol else None
     orb = [b for b in today if b[0] < OR_END]
-    now_t = today[-1][0]
+    now_t, close5 = today[-1][0], today[-1][3]
+    or_complete = now_t >= OR_END                            # at least one completed bar after the range
+    or_high = round(max(b[1] for b in orb), 2) if orb else None
+    or_low = round(min(b[2] for b in orb), 2) if orb else None
+    orb_signal = None
+    if orb and or_complete:
+        orb_signal = 'LONG' if close5 > or_high else 'SHORT' if close5 < or_low else 'INSIDE'
+    vwap_signal = None if not vwap else ('LONG' if close5 > vwap else 'SHORT' if close5 < vwap else None)
     # relative volume: today's volume so far vs prior sessions' volume up to the same clock time
     prior = [sum(b[4] for b in days[d] if b[0] <= now_t) for d in dates[:-1]]
     prior = [p for p in prior if p > 0]
@@ -240,11 +257,15 @@ def _intraday(symbol):
     return {
         'session_date': dates[-1].isoformat(),
         'vwap': round(vwap, 2) if vwap else None,
-        'or_high': round(max(b[1] for b in orb), 2) if orb else None,
-        'or_low': round(min(b[2] for b in orb), 2) if orb else None,
-        'or_complete': now_t >= OR_END,
+        'or_high': or_high,
+        'or_low': or_low,
+        'or_complete': or_complete,
+        'close_5m': round(close5, 2),
+        'orb_signal': orb_signal,
+        'vwap_signal': vwap_signal,
         'rvol': rvol,
-        'bar_time': now_t.strftime('%H:%M'),
+        # end time of the last completed 5m bar
+        'bar_time': (datetime.combine(dates[-1], now_t) + timedelta(minutes=5)).strftime('%H:%M'),
     }
 
 
@@ -275,15 +296,16 @@ def _analyse(stock, sector_pchg, sector_bias, oi, deals, intra, late):
     orh = intra.get('or_high') if intra else None
     orl = intra.get('or_low') if intra else None
     rvol = intra.get('rvol') if intra else None
+    orb_sig = intra.get('orb_signal') if intra else None       # LONG / SHORT / INSIDE / None (range forming)
+    vwap_sig = intra.get('vwap_signal') if intra else None     # LONG / SHORT on the last completed 5m close
     oi_pct = oi.get('oi_pct') if oi else None
     buildup = _buildup(pchg, oi_pct)
 
     good_oi = {'LONG': ('Long build-up', 'Short covering'), 'SHORT': ('Short build-up', 'Long unwinding')}
     checks = {
         'rel_strength': sign * (pchg - sector_pchg) > 0,
-        'vwap': None if vwap is None else sign * (ltp - vwap) > 0,
-        'orb': None if orh is None or not intra.get('or_complete') else
-               (ltp > orh if direction == 'LONG' else ltp < orl),
+        'vwap': None if vwap is None else (vwap_sig == direction if vwap_sig else sign * (ltp - vwap) > 0),
+        'orb': None if orb_sig is None else orb_sig == direction,
         'rvol': None if rvol is None else rvol >= RVOL_HOT,
         'oi': None if oi is None else buildup in good_oi[direction],
     }
@@ -313,6 +335,8 @@ def _analyse(stock, sector_pchg, sector_bias, oi, deals, intra, late):
         'volume': _num(stock.get('totalTradedVolume')),
         'value_cr': round(_num(stock.get('totalTradedValue')) / 1e7, 2),
         'vwap': vwap, 'or_high': orh, 'or_low': orl, 'rvol': rvol,
+        'close_5m': intra.get('close_5m') if intra else None,
+        'orb_signal': orb_sig, 'vwap_signal': vwap_sig,
         'fno': oi is not None,
         'oi_pct': oi_pct,
         'buildup': buildup,

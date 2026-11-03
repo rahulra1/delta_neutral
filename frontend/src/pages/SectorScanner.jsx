@@ -7,8 +7,8 @@ const DEFAULT_SIZING = { capital: 100000, riskPct: 0.5, rr: 1.5, leverage: 1 };
 
 const CHECKS = [
   { key: 'rel_strength', label: 'RS', title: 'Stronger (long) / weaker (short) than its sector today' },
-  { key: 'vwap', label: 'VWAP', title: 'Price above VWAP (long) / below VWAP (short)' },
-  { key: 'orb', label: 'ORB', title: 'Broke the 09:15-09:30 opening range high (long) / low (short)' },
+  { key: 'vwap', label: 'VWAP', title: 'Last completed 5-min close above VWAP (long) / below VWAP (short)' },
+  { key: 'orb', label: 'ORB', title: 'Last completed 5-min close above the 09:15-09:45 range high (long) / below the low (short)' },
   { key: 'rvol', label: 'RVOL', title: 'Volume ≥ 1.5× its average up to this time on the prior sessions' },
   { key: 'oi', label: 'OI', title: 'F&O OI confirms: long build-up / short covering (long), short build-up / long unwinding (short)' },
 ];
@@ -249,6 +249,25 @@ function CheckDots({ checks }) {
   );
 }
 
+// LONG / SHORT badge for the ORB and VWAP signals (last completed 5-minute close).
+function SignalBadge({ sig, kind, r }) {
+  const at = r.bar_time ? ` (5m close ${fmtNum(r.close_5m)} @ ${r.bar_time})` : '';
+  if (!sig) {
+    const why = kind === 'ORB' ? 'opening range 09:15–09:45 still forming' : 'no VWAP yet';
+    return <span style={{ color: 'var(--muted)', fontSize: '.6rem' }} title={why}>–</span>;
+  }
+  if (sig === 'INSIDE') {
+    return <span className="badge" style={{ fontSize: '.58rem', padding: '1px 5px' }}
+      title={`Inside the 09:15–09:45 range${at}`}>INSIDE</span>;
+  }
+  const long = sig === 'LONG';
+  const title = kind === 'ORB'
+    ? `5m close ${long ? 'above the range high' : 'below the range low'}${at}`
+    : `5m close ${long ? 'above' : 'below'} VWAP${at}`;
+  return <span className={long ? 'badge badge-green' : 'badge badge-red'} style={{ fontSize: '.58rem', padding: '1px 5px' }}
+    title={title} aria-label={`${kind} ${sig}`}>{sig}</span>;
+}
+
 function SetupBadge({ setup }) {
   if (!setup) return <span style={{ color: 'var(--muted)' }}>–</span>;
   const cls = setup === 'LONG' ? 'badge badge-green' : setup === 'SHORT' ? 'badge badge-red' : 'badge badge-yellow';
@@ -313,8 +332,8 @@ function StocksTable({ data, sizing, onlySetups, onNews }) {
             <th scope="col" style={th}>Chg</th>
             <th scope="col" style={th} title="Stock % change minus sector % change">vs Sector</th>
             <th scope="col" style={th} title="Volume so far vs average up to the same time on prior sessions">RVOL</th>
-            <th scope="col" style={th}>VWAP</th>
-            <th scope="col" style={th} title="09:15-09:30 opening range">OR H / L</th>
+            <th scope="col" style={th} title="Session VWAP from 5-min bars · LONG/SHORT = last completed 5-min close above/below it">VWAP</th>
+            <th scope="col" style={th} title="30-min opening range 09:15-09:45 · LONG/SHORT = last completed 5-min close above the high / below the low">ORB (H / L)</th>
             <th scope="col" style={th}>Value</th>
             <th scope="col" style={{ ...th, textAlign: 'left' }}>OI</th>
             <th scope="col" style={{ ...th, textAlign: 'left' }} title={`Bulk / block deals on ${data.deals_as_on || 'last session'}`}>Deals</th>
@@ -344,8 +363,14 @@ function StocksTable({ data, sizing, onlySetups, onNews }) {
                 <td style={{ ...td, fontWeight: r.rvol >= data.params.rvol_hot ? 800 : 400, color: r.rvol >= data.params.rvol_hot ? 'var(--purple)' : 'var(--text)' }}>
                   {r.rvol == null ? '–' : `${r.rvol.toFixed(2)}×`}
                 </td>
-                <td style={{ ...td, color: r.vwap == null ? 'var(--muted)' : pctColor(r.ltp - r.vwap) }}>{fmtNum(r.vwap)}</td>
-                <td style={{ ...td, fontSize: '.7rem' }}>{fmtNum(r.or_high)} / {fmtNum(r.or_low)}</td>
+                <td style={td}>
+                  <div style={{ color: r.vwap == null ? 'var(--muted)' : pctColor((r.close_5m ?? r.ltp) - r.vwap) }}>{fmtNum(r.vwap)}</div>
+                  <SignalBadge sig={r.vwap_signal} kind="VWAP" r={r} />
+                </td>
+                <td style={{ ...td, fontSize: '.7rem' }}>
+                  <div>{fmtNum(r.or_high)} / {fmtNum(r.or_low)}</div>
+                  <SignalBadge sig={r.orb_signal} kind="ORB" r={r} />
+                </td>
                 <td style={td}>{fmtNum(r.value_cr, 0)} cr</td>
                 <td style={{ ...td, textAlign: 'left', fontSize: '.7rem' }}>
                   {r.fno ? (

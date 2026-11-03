@@ -208,7 +208,7 @@ const STRATEGIES = [
     features: ['Top-N Gainers/Losers', 'Long + Short Stocks', 'Intraday Square-off', 'Paper Trading'],
     rec: '⏱ Intraday 9:30–3:15 IST · NSE equities' },
   { key: 'nse_sector_options', label: 'NSE Sector Options (Paper)', icon: '🧭🇮🇳', type: 'Options',
-    desc: 'Watches the Sector Scanner\'s picks from green/red sectors and paper-buys the ATM CALL / PUT when a stock\'s 5-min candle closes beyond its 09:15–09:45 range (and the 5-min VWAP). Max 5 open, 6 entries a day. Exits when the STOCK hits its SL/TP or at 15:15.',
+    desc: 'Rotates a watchlist every minute from the current top green/red sectors (Sector Scanner) and paper-buys the ATM CALL / PUT when a stock\'s 5-min candle closes beyond its 09:15–09:45 range (and the 5-min VWAP). Max 5 open, 6 entries a day. Exits when the STOCK hits its SL/TP or at 15:15.',
     features: ['30-min range breakout', '5m candle close + 5m VWAP', 'Max 5 open · 6 a day', 'Paper only · Groww chain'],
     rec: '⏱ Intraday 9:45–3:15 IST · NSE stock options · needs a Groww profile' },
   { key: 'crypto_futures', label: 'Crypto Scanner Futures', icon: '🪙⚡', type: 'Futures',
@@ -470,7 +470,7 @@ const NSE_SECTOR_OPTIONS_FIELDS = [
   { key: 'entry_minute', label: 'Range End / Watchlist Minute', type: 'number', default: 45 },
   { key: 'last_entry_hour', label: 'Last Entry Candle Hour', type: 'number', default: 14 },
   { key: 'last_entry_minute', label: 'Last Entry Candle Minute', type: 'number', default: 45, hint: 'No new entries on 15m candles closing after this' },
-  { key: 'entry_window_min', label: 'Watchlist Retry (min)', type: 'number', default: 30, hint: 'Keep rescanning this long if no watchlist stocks are found at 09:45' },
+  { key: 'rescan_sec', label: 'Watchlist Rescan (s)', type: 'number', default: 60, hint: 'Rebuild the watchlist from the current top bullish/bearish sectors this often (min 30)' },
   { key: 'exit_hour', label: 'Square-off Hour (24h IST)', type: 'number', default: 15 },
   { key: 'exit_minute', label: 'Square-off Minute', type: 'number', default: 15 },
   { key: 'monitoring_interval', label: 'Price Check Interval (s)', type: 'number', default: 15 },
@@ -479,13 +479,14 @@ const NSE_SECTOR_OPTIONS_FIELDS = [
 
 // Keep in sync with strategy/nse_sector_options.py.
 const NSE_SECTOR_OPTIONS_DETAILS = [
-  { heading: '1. Watchlist (09:45 IST)', points: [
-    'Reads the live NSE sectors. Only BULLISH/BEARISH sectors count: |change| ≥ 0.5% and breadth ≥ 30% net advancers/decliners. They are walked from the biggest move down.',
-    'From those sectors it takes the Sector Scanner\'s LONG / SHORT / WATCH stocks (direction = sector bias) that have listed stock options, up to the watchlist size (default 15).',
-    'For each stock it records the 30-minute opening range: high and low of 09:15–09:45 (5-minute bars).',
+  { heading: '1. Watchlist (rotated every minute from 09:45 IST)', points: [
+    'Every minute (setting) it re-reads the live NSE sectors. Only BULLISH/BEARISH sectors count: |change| ≥ 0.5% and breadth ≥ 30% net advancers/decliners. They are walked from the biggest move down.',
+    'From those sectors it takes the Sector Scanner\'s LONG / SHORT / WATCH stocks (direction = sector bias) that have listed stock options, up to the watchlist size (default 15). Stocks whose sector drops out of the top leave the list; stocks of newly strong sectors join it. Stocks already traded today are not re-added.',
+    'For each stock it uses the 30-minute opening range: high and low of 09:15–09:45 (5-minute bars).',
   ] },
   { heading: '2. Entry — 5-minute candle breakout (09:50 to 14:45)', points: [
     'After every 5-minute candle closes: a bullish stock whose candle CLOSES above its 30-min high (and above the 5-minute VWAP) → buys the ATM CALL; a bearish stock closing below its 30-min low (and below the 5-minute VWAP) → buys the ATM PUT. A wick through the level without a close beyond it does not count.',
+    'Late joiners: a stock that joins the watchlist after 09:50 and is ALREADY beyond its range (and the 5-minute VWAP) at the live price is bought immediately — no wait for a candle close. The Groww spot used for the fill must confirm it.',
     'Max 5 positions open at once and max 6 entries a day; each stock is traded at most once a day. A breakout skipped because the slots are full can still be taken on a later candle if it is still beyond the range.',
     'Expiry: the nearest expiry with at least 10 days left (setting), else the next month. Strike nearest the stock price. Price = Groww option-chain LTP. No real orders are placed.',
   ] },
@@ -1161,7 +1162,7 @@ export default function Strategy() {
       )}
       {activeTab === 'nse_sector_options' && (
         <StrategyTemplate title="NSE Sector Options (Paper)" icon="🧭🇮🇳" type="Options"
-          description="Builds a watchlist from the Sector Scanner at 09:45 and paper-buys the ATM CALL / PUT when a stock's 5-min candle closes beyond its 09:15–09:45 range and the 5-min VWAP (max 5 open, 6 a day). Exits on the stock's SL/TP or at 15:15. Select a Groww profile." profiles={profiles}
+          description="Rebuilds the watchlist every minute from the current top bullish/bearish sectors and paper-buys the ATM CALL / PUT when a stock's 5-min candle closes beyond its 09:15–09:45 range and the 5-min VWAP (max 5 open, 6 a day). Exits on the stock's SL/TP or at 15:15. Select a Groww profile." profiles={profiles}
           configFields={NSE_SECTOR_OPTIONS_FIELDS} details={NSE_SECTOR_OPTIONS_DETAILS}
           onStart={async (config) => {
             const c = { ...config };
@@ -1183,7 +1184,7 @@ export default function Strategy() {
                   <div className="stat-card"><div className="label">Realized P&L (net)</div><div className="value" style={{ color: col(s.cumulative_pnl) }}>{money(s.cumulative_pnl)}</div><div className="sub">charges ₹{Math.round(s.total_charges || 0).toLocaleString('en-IN')}</div></div>
                   <div className="stat-card"><div className="label">Total (incl. open)</div><div className="value" style={{ color: col(s.total_pnl) }}>{money(s.total_pnl)}</div></div>
                   <div className="stat-card"><div className="label">Trades</div><div className="value">{s.total_trades || 0}</div></div>
-                  <div className="stat-card"><div className="label">Today</div><div className="value" style={{ fontSize: '.95rem' }}>{(s.watchlist || []).length} watching · {s.entries_today || 0}/{s.params?.max_entries ?? 6} entries</div><div className="sub">{s.entered_day && s.entered_day === s.last_scan?.day ? `done for ${s.entered_day}` : (s.last_candle ? `last ${s.params?.candle_min ?? 5}m candle ${s.last_candle}` : 'waiting for 09:45')}</div></div>
+                  <div className="stat-card"><div className="label">Today</div><div className="value" style={{ fontSize: '.95rem' }}>{(s.watchlist || []).filter(w => w.status === 'watching').length} watching · {s.entries_today || 0}/{s.params?.max_entries ?? 6} entries</div><div className="sub">{s.entered_day && s.entered_day === s.last_scan?.day ? `done for ${s.entered_day}` : (s.last_scan?.top_sectors ? `${(s.last_scan.time || '').slice(11, 16)} top: ${s.last_scan.top_sectors}` : 'waiting for 09:45')}</div></div>
                 </div>
                 {(s.watchlist || []).length > 0 && (
                   <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>

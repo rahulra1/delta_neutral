@@ -5582,7 +5582,7 @@ def _build_sector_options(params, resume=False):
         stop_pct=float(params.get('stop_pct', 0.5)), target_pct=float(params.get('target_pct', 0.75)),
         lots=int(params.get('lots', 1)), min_dte=int(params.get('min_dte', 10)),
         max_premium=float(params.get('max_premium', 100000)),
-        entry_window_min=int(params.get('entry_window_min', 30)),
+        rescan_sec=int(params.get('rescan_sec', 60)),
         sector_group=params.get('sector_group', 'Sectoral'), trading_days=days,
         monitor_interval=int(params.get('monitoring_interval', 15)),
         max_open=int(params.get('max_open', 5)), max_entries=int(params.get('max_entries', 6)),

@@ -2,13 +2,18 @@
 
 Daily flow (IST, trading days only):
   1. Opening range = the stock's high / low of the first 30 minutes, 09:15-09:45 (5m Yahoo bars).
-  2. At 09:45 (entry_hour:entry_minute) read the live NSE sectors (api.sector_scanner). Walk the
-     BULLISH / BEARISH sectors from the biggest |% change| down and put their LONG / SHORT / WATCH
-     stocks that have listed stock options on a watchlist (max max_watchlist). Direction = sector bias.
+  2. From 09:45 (entry_hour:entry_minute) until the last entry time, EVERY rescan_sec (default 60 s)
+     re-read the live NSE sectors (api.sector_scanner) and rebuild the watchlist: walk the CURRENT
+     BULLISH / BEARISH sectors from the biggest |% change| down and take their LONG / SHORT / WATCH
+     stocks that have listed stock options (max max_watchlist). Direction = sector bias. Stocks that
+     leave the top sectors drop off; new ones join. Stocks already traded today are not re-added.
   3. Every completed 5-minute candle (candle_min, default 5: 09:50, 09:55 ... last entry, default 14:45):
        bullish stock: 5m close > 30-min high  (and > the 5-minute VWAP)  -> paper-BUY the ATM CALL
        bearish stock: 5m close < 30-min low   (and < the 5-minute VWAP)  -> paper-BUY the ATM PUT
      Expiry = nearest with >= min_dte (default 10) days left. Price = Groww option-chain LTP.
+     LATE JOINERS: a stock that joins the rotating watchlist after 09:50 and is ALREADY beyond its range
+     (and the 5m VWAP) on the live price is entered immediately, without waiting for a candle close
+     (the Groww spot used for the fill must confirm it).
      Limits: max_open (5) positions at a time, max_entries (6) per day, one entry per stock per day.
   4. Each position exits ONLY on the STOCK price (Groww CASH LTP), checked every monitor_interval s:
        stop   = stock moves stop_pct % against the entry stock price
@@ -106,7 +111,7 @@ class NseSectorOptions(BaseStrategy):
 
     def __init__(self, entry_hour=9, entry_minute=45, exit_hour=15, exit_minute=15,
                  stop_pct=0.5, target_pct=0.75, lots=1, min_dte=10, max_premium=100000.0,
-                 entry_window_min=30, sector_group='Sectoral', trading_days=None,
+                 rescan_sec=60, sector_group='Sectoral', trading_days=None,
                  monitor_interval=15, run_immediately=False,
                  max_open=5, max_entries=6, max_watchlist=15, last_entry_hour=14, last_entry_minute=45,
                  use_vwap=True, candle_min=5):
@@ -117,7 +122,7 @@ class NseSectorOptions(BaseStrategy):
         self.lots = max(1, int(lots))
         self.min_dte = int(min_dte)
         self.max_premium = float(max_premium)
-        self.entry_window_min = int(entry_window_min)   # keep retrying the watchlist scan this long
+        self.rescan_sec = max(30, int(rescan_sec))      # rotate the watchlist this often (default 1 min)
         self.sector_group = sector_group
         self.trading_days = trading_days if trading_days is not None else [0, 1, 2, 3, 4]
         self.monitor_interval = max(5, int(monitor_interval))
@@ -141,6 +146,8 @@ class NseSectorOptions(BaseStrategy):
         self._entries_today = 0
         self._last_candle = None          # 'HH:MM' end of the last breakout candle evaluated
         self._last_scan = None            # summary of the last scan for the UI
+        self._or_cache = {}               # symbol -> today's 09:15-09:45 range (None if incomplete)
+        self._next_scan_ts = 0.0
         self._running = False
         self._pnl_history = []
         self._price_failures = 0
@@ -160,7 +167,7 @@ class NseSectorOptions(BaseStrategy):
             'last_entry_hour': self.last_entry_hour, 'last_entry_minute': self.last_entry_minute,
             'stop_pct': self.stop_pct, 'target_pct': self.target_pct, 'lots': self.lots,
             'min_dte': self.min_dte, 'max_premium': self.max_premium,
-            'entry_window_min': self.entry_window_min, 'sector_group': self.sector_group,
+            'rescan_sec': self.rescan_sec, 'sector_group': self.sector_group,
             'trading_days': self.trading_days, 'monitoring_interval': self.monitor_interval,
             'max_open': self.max_open, 'max_entries': self.max_entries,
             'max_watchlist': self.max_watchlist, 'use_vwap': self.use_vwap, 'candle_min': self.candle_min,
@@ -178,7 +185,8 @@ class NseSectorOptions(BaseStrategy):
         print(f"{TAG} Started [PAPER] | 30-min range 09:15-{self.entry_hour:02d}:{self.entry_minute:02d}, "
               f"{self.candle_min}m breakouts until {self.last_entry_hour:02d}:{self.last_entry_minute:02d}, "
               f"square-off {self.exit_hour:02d}:{self.exit_minute:02d} IST | days {days}")
-        print(f"{TAG} Watchlist: up to {self.max_watchlist} {self.sector_group.lower()} LONG/SHORT/WATCH stocks | "
+        print(f"{TAG} Watchlist: up to {self.max_watchlist} {self.sector_group.lower()} LONG/SHORT/WATCH stocks, "
+              f"rotated every {self.rescan_sec}s from the current top sectors | "
               f"entry: {self.candle_min}m close beyond the range" + (" + 5m VWAP" if self.use_vwap else "") +
               f" | max {self.max_open} open / {self.max_entries} entries a day | {self.lots} lot ATM CE/PE | "
               f"exit on STOCK: SL -{self.stop_pct}% / TP +{self.target_pct}% | min {self.min_dte}d to expiry"
@@ -202,8 +210,9 @@ class NseSectorOptions(BaseStrategy):
                 if self._open_legs():
                     self._manage_positions(now)
                 if force or self._entries_allowed(now):
-                    if not self._watchlist and (force or self._watchlist_due(now)):
-                        self._build_watchlist(now, force=force)
+                    if force or time.time() >= self._next_scan_ts:
+                        self._next_scan_ts = time.time() + self.rescan_sec
+                        self._refresh_watchlist(now, force=force)
                     if self._watchlist:
                         self._check_breakouts(now, force=force)
                 first = False
@@ -244,6 +253,7 @@ class NseSectorOptions(BaseStrategy):
         if self._day != today:
             self._day = today
             self._watchlist, self._entries_today, self._last_candle = [], 0, None
+            self._or_cache = {}
             self._persist_state()
 
     def _entries_allowed(self, now):
@@ -254,10 +264,6 @@ class NseSectorOptions(BaseStrategy):
             self._finish_day(now, f"entry window closed ({self._entries_today} entries)")
             return False
         return now >= self._entry_time(now)
-
-    def _watchlist_due(self, now):
-        return now < self._entry_time(now) + timedelta(minutes=self.entry_window_min) \
-            or self._last_scan is None or self._last_scan.get('day') != self._day
 
     def _finish_day(self, now, why):
         if self._entered_day != self._day:
@@ -272,7 +278,7 @@ class NseSectorOptions(BaseStrategy):
             start = self._entry_time(now)
             if now < start:
                 return max(5, min((start - now).total_seconds(), 60))
-            return 60
+            return min(60, self.rescan_sec)
         return 300
 
     def _interruptible_sleep(self, seconds):
@@ -280,8 +286,12 @@ class NseSectorOptions(BaseStrategy):
         while self._running and time.time() < end:
             time.sleep(min(5, max(0.1, end - time.time())))
 
-    # ------------------------------------------------------------------ watchlist (09:45)
-    def _build_watchlist(self, now, force=False):
+    # ------------------------------------------------------------------ watchlist (rotated every rescan_sec)
+    def _refresh_watchlist(self, now, force=False):
+        """Rebuild the watchlist from the CURRENT top BULLISH / BEARISH sectors (runs every rescan_sec).
+
+        Stocks that dropped out of the top sectors leave the list; new ones join with their 09:15-09:45
+        range. Stocks already traded today stay on the list (for the UI) but are never re-entered."""
         from api.sector_scanner import get_sectors, get_sector_stocks
         from api.groww import get_stock_option_meta
         overview = get_sectors()
@@ -291,10 +301,9 @@ class NseSectorOptions(BaseStrategy):
             return
         cands = [s for s in overview['sectors'] if s.get('group') == self.sector_group and s['bias'] != 'MIXED']
         cands.sort(key=lambda s: abs(s['pchange']), reverse=True)
-        print(f"\n{TAG} {now:%Y-%m-%d %H:%M} scan | {len(cands)} BULLISH/BEARISH {self.sector_group.lower()} sectors: "
-              + ', '.join(f"{s['index'].replace('NIFTY ', '')} {s['pchange']:+.2f}%" for s in cands[:6]))
+        traded = {w['symbol'] for w in self._watchlist if w['status'] != 'watching'}
         setups = ('LONG', 'SHORT', 'WATCH', 'LATE') if force else ('LONG', 'SHORT', 'WATCH')
-        picks, seen, skipped = [], set(), []
+        picks, seen, skipped = [], set(traded), []
         for sec in cands:
             if len(picks) >= self.max_watchlist:
                 break
@@ -325,36 +334,76 @@ class NseSectorOptions(BaseStrategy):
                 logger.warning("%s candles %s failed: %s", TAG, sym, e)
                 return None, []
 
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            bars = list(ex.map(fetch, [r['symbol'] for _, r in picks]))
+        # the 30-min range never changes during the day -> only fetch candles for stocks not seen yet
+        new_syms = [r['symbol'] for _, r in picks if r['symbol'] not in self._or_cache]
+        if new_syms:
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                for sym, (bdate, b) in zip(new_syms, ex.map(fetch, new_syms)):
+                    if not b or (bdate != now.date() and not force):
+                        continue                                  # not cached -> retried next scan
+                    self._or_cache[sym] = opening_range(b, self._entry_time(b[0][0]))
+        old = {w['symbol']: w for w in self._watchlist}
         watch = []
-        for (d, r), (bdate, b) in zip(picks, bars):
-            if not b or (bdate != now.date() and not force):
-                skipped.append(f"{r['symbol']} (no candles today)")
-                continue
-            orng = opening_range(b, self._entry_time(b[0][0]))
+        for d, r in picks:
+            orng = self._or_cache.get(r['symbol'])
             if not orng:
-                skipped.append(f"{r['symbol']} (incomplete 30-min range)")
+                skipped.append(f"{r['symbol']} ({'incomplete 30-min range' if r['symbol'] in self._or_cache else 'no candles today'})")
                 continue
+            prev = old.get(r['symbol'])
+            keep = prev if prev and prev['direction'] == r['direction'] else {}
             watch.append({'symbol': r['symbol'], 'direction': r['direction'], 'setup': r['setup'],
                           'sector': d['index'], 'sector_pchg': d['pchange'], 'rvol': r.get('rvol'),
                           'or_high': orng['high'], 'or_low': orng['low'], 'status': 'watching',
-                          'last_close': None, 'vwap': None, 'last_candle': None, 'note': None})
-        self._watchlist = watch
-        self._last_scan = {'time': now.isoformat(), 'day': self._day, 'watchlist': len(watch),
-                           'sector': watch[0]['sector'] if watch else None,
-                           'sector_pchg': watch[0]['sector_pchg'] if watch else None,
-                           'stock': None, 'skipped': skipped[-10:]}
-        if skipped:
-            print(f"{TAG}   passed over: {', '.join(skipped[-8:])}")
-        if watch:
-            print(f"{TAG} Watchlist ({len(watch)}): " + ' | '.join(
-                f"{w['symbol']} {w['direction']} [{w['or_low']}–{w['or_high']}]" for w in watch))
-        elif force or now >= self._entry_time(now) + timedelta(minutes=self.entry_window_min):
-            self._finish_day(now, "no stocks for the watchlist")
-        else:
-            print(f"{TAG} No watchlist stocks yet — rescanning every minute")
+                          'last_close': keep.get('last_close'), 'vwap': keep.get('vwap'),
+                          'last_candle': keep.get('last_candle'), 'note': keep.get('note'),
+                          'added': keep.get('added') or now.strftime('%H:%M'),
+                          'ltp': r.get('ltp'), 'scan_vwap': r.get('vwap')})
+        added = [w['symbol'] for w in watch if w['symbol'] not in old or old[w['symbol']]['direction'] != w['direction']]
+        removed = [s for s, w in old.items() if w['status'] == 'watching' and s not in {x['symbol'] for x in watch}]
+        self._watchlist = watch + [w for w in self._watchlist if w['status'] != 'watching']
+        top = ', '.join(f"{s['index'].replace('NIFTY ', '')} {s['pchange']:+.2f}%" for s in cands[:4]) or 'none'
+        self._last_scan = {**(self._last_scan if (self._last_scan or {}).get('day') == self._day else {}),
+                           'time': now.isoformat(), 'day': self._day, 'watchlist': len(watch),
+                           'top_sectors': top, 'skipped': skipped[-10:]}
+        if added or removed or force:
+            print(f"\n{TAG} {now:%H:%M} rescan | top sectors: {top} | watching {len(watch)}"
+                  + (f" | + {', '.join(added)}" if added else '') + (f" | − {', '.join(removed)}" if removed else ''))
+            if watch:
+                print(f"{TAG}   watchlist: " + ' | '.join(
+                    f"{w['symbol']} {w['direction']} [{w['or_low']}–{w['or_high']}]" for w in watch))
+            elif not cands:
+                print(f"{TAG}   no BULLISH/BEARISH {self.sector_group.lower()} sector right now — rescanning every "
+                      f"{self.rescan_sec}s")
+        if added and not force:
+            self._enter_late_joiners(now, [w for w in watch if w['symbol'] in added])
         self._persist_state()
+
+    def _enter_late_joiners(self, now, joiners):
+        """A stock that JOINS the watchlist after the first breakout candle could close and is ALREADY beyond
+        its 30-min range (and the 5m VWAP) on the live price is entered immediately — no candle-close wait.
+        Stocks added before the first breakout candle can close (09:45–09:50, i.e. the opening watchlist)
+        keep the normal candle-close rule. A strategy started mid-day treats its first list as late joiners."""
+        first_close = self._entry_time(now) + timedelta(minutes=self.candle_min)
+        if now < first_close or now > self._last_entry_time(now) + timedelta(minutes=self.candle_min):
+            return
+        for w in joiners:
+            px, vwap = w.get('ltp'), w.get('scan_vwap')
+            if not px:
+                continue
+            long_ = w['direction'] == 'LONG'
+            broke = px > w['or_high'] if long_ else px < w['or_low']
+            vwap_ok = not self.use_vwap or vwap is None or (px > vwap if long_ else px < vwap)
+            if not broke:
+                continue
+            if not vwap_ok:
+                w['note'] = f"{now:%H:%M} joined beyond range but {'below' if long_ else 'above'} 5m VWAP {vwap}"
+                continue
+            print(f"{TAG} {now:%H:%M} late joiner {w['symbol']} {w['direction']} already beyond its range "
+                  f"(live {px} vs [{w['or_low']}–{w['or_high']}], 5m VWAP {vwap}) — entering now")
+            w.update(last_close=px, vwap=vwap)
+            self._try_enter(w, {'close': px, 'end': now.strftime('%H:%M')}, vwap, now, live=True)
+        if self._entries_today >= self.max_entries:
+            self._finish_day(now, f"max {self.max_entries} entries reached")
 
     # ------------------------------------------------------------------ breakout checks (5m candles)
     def _check_breakouts(self, now, force=False):
@@ -368,8 +417,7 @@ class NseSectorOptions(BaseStrategy):
                 return
         pending = [w for w in self._watchlist if w['status'] == 'watching']
         if not pending:
-            self._last_candle = key
-            self._finish_day(now, "every watchlist stock has been traded")
+            self._last_candle = key          # nothing to watch right now; the next rescan may add stocks
             return
 
         def fetch(sym):
@@ -406,25 +454,44 @@ class NseSectorOptions(BaseStrategy):
                   + (': ' + ', '.join(f"{w['symbol']} {c['close']:.2f}" for w, c, _ in signals) if signals else ''))
 
         for w, candle, vwap in signals:
-            if self._entries_today >= self.max_entries:
-                w['note'] = f"{candle['end']} breakout — max {self.max_entries} entries reached"
-                continue
-            if len(self._open_legs()) >= self.max_open:
-                w['note'] = f"{candle['end']} breakout — {self.max_open} positions already open"
-                continue
-            contract, why = self._atm_contract(w['symbol'], 'CE' if w['direction'] == 'LONG' else 'PE')
-            if not contract:
-                w['note'] = f"{candle['end']} breakout — {why}"
-                print(f"{TAG}   {w['symbol']} breakout skipped: {why}")
-                continue
-            self._enter(w, candle, vwap, contract)
-            w['status'] = 'entered'
-            self._last_scan = self._last_scan or {'day': self._day}
-            self._last_scan.update(stock=w['symbol'], sector=w['sector'], sector_pchg=w['sector_pchg'],
-                                   setup=w['direction'], time=now.isoformat())
+            self._try_enter(w, candle, vwap, now)
         if self._entries_today >= self.max_entries:
             self._finish_day(now, f"max {self.max_entries} entries reached")
         self._persist_state()
+
+    def _try_enter(self, w, candle, vwap, now, live=False):
+        """Apply the position / entry limits, pick the contract and paper-buy. Returns True if entered.
+
+        live=True is a late joiner taken on the LIVE price (no candle close): the Groww spot used for the
+        fill must itself still be beyond the range (and the VWAP), otherwise the entry is skipped."""
+        what = 'live break' if live else 'breakout'
+        if self._entries_today >= self.max_entries:
+            w['note'] = f"{candle['end']} {what} — max {self.max_entries} entries reached"
+            return False
+        if len(self._open_legs()) >= self.max_open:
+            w['note'] = f"{candle['end']} {what} — {self.max_open} positions already open"
+            return False
+        contract, why = self._atm_contract(w['symbol'], 'CE' if w['direction'] == 'LONG' else 'PE')
+        if not contract:
+            w['note'] = f"{candle['end']} {what} — {why}"
+            print(f"{TAG}   {w['symbol']} {what} skipped: {why}")
+            return False
+        if live:
+            spot, long_ = contract['spot'], w['direction'] == 'LONG'
+            ok = (spot > w['or_high'] if long_ else spot < w['or_low']) and \
+                 (not self.use_vwap or vwap is None or (spot > vwap if long_ else spot < vwap))
+            if not ok:
+                w['note'] = f"{candle['end']} live break not confirmed by Groww spot {spot}"
+                print(f"{TAG}   {w['symbol']} live break skipped: Groww spot {spot} not beyond "
+                      f"{w['or_high'] if long_ else w['or_low']} / VWAP {vwap}")
+                return False
+            candle = dict(candle, close=spot)
+        self._enter(w, candle, vwap, contract, live=live)
+        w['status'] = 'entered'
+        self._last_scan = self._last_scan or {'day': self._day}
+        self._last_scan.update(stock=w['symbol'], sector=w['sector'], sector_pchg=w['sector_pchg'],
+                               setup=w['direction'], time=now.isoformat())
+        return True
 
     def _atm_contract(self, symbol, kind):
         """Pick the ATM contract on the nearest expiry with >= min_dte days. Returns (contract, reason)."""
@@ -459,7 +526,7 @@ class NseSectorOptions(BaseStrategy):
                 'ltp': ltp, 'spot': float(spot), 'lot_size': meta['lot_size'], 'qty': qty,
                 'oi': leg.get('oi'), 'iv': leg.get('iv'), 'delta': leg.get('delta')}, None
 
-    def _enter(self, w, candle, vwap, c):
+    def _enter(self, w, candle, vwap, c, live=False):
         side = 1 if c['kind'] == 'CE' else -1
         stock_entry = c['spot']
         stop = stock_entry * (1 - side * self.stop_pct / 100)
@@ -474,6 +541,7 @@ class NseSectorOptions(BaseStrategy):
             'stock_entry': round(stock_entry, 2), 'stock_mark': round(stock_entry, 2),
             'stock_stop': round(stop, 2), 'stock_target': round(target, 2),
             'or_high': w['or_high'], 'or_low': w['or_low'], 'breakout_candle': candle['end'],
+            'entry_trigger': 'late_join_live' if live else f'{self.candle_min}m_close',
             'sector': w['sector'], 'sector_pchg': w['sector_pchg'],
             'opened_at': now.isoformat(), 'stopped': False,
         }
@@ -487,10 +555,12 @@ class NseSectorOptions(BaseStrategy):
             'ts': now.isoformat(), 'date': now.strftime('%Y-%m-%d'), 'action': 'BUY',
             'symbol': c['trading_symbol'], 'underlying': w['symbol'], 'qty': c['qty'],
             'price': round(c['ltp'], 2), 'stock_price': round(stock_entry, 2), 'sector': w['sector'],
-            'reason': f"{w['direction']} 30-min {'high' if side == 1 else 'low'} {level} break @ {candle['end']}",
+            'reason': f"{w['direction']} 30-min {'high' if side == 1 else 'low'} {level} break @ {candle['end']}"
+                      + (' (late joiner, live price)' if live else ''),
         })
+        how = 'LIVE price' if live else f"{self.candle_min}m close"
         print(f"{TAG} [PAPER] BUY {c['trading_symbol']} x{c['qty']} ({self.lots} lot) @ Rs {c['ltp']:.2f} "
-              f"= Rs {c['ltp'] * c['qty']:,.0f} | {w['direction']} {w['symbol']} {self.candle_min}m close {candle['close']:.2f} "
+              f"= Rs {c['ltp'] * c['qty']:,.0f} | {w['direction']} {w['symbol']} {how} {candle['close']:.2f} "
               f"{'>' if side == 1 else '<'} 30-min {'high' if side == 1 else 'low'} {level} | 5m VWAP {vwap} | "
               f"{w['sector']} {w['sector_pchg']:+.2f}% | entry {self._entries_today}/{self.max_entries}, "
               f"open {len(self._open_legs())}/{self.max_open}")
