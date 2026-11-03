@@ -5585,6 +5585,12 @@ def _build_sector_options(params, resume=False):
         entry_window_min=int(params.get('entry_window_min', 30)),
         sector_group=params.get('sector_group', 'Sectoral'), trading_days=days,
         monitor_interval=int(params.get('monitoring_interval', 15)),
+        max_open=int(params.get('max_open', 5)), max_entries=int(params.get('max_entries', 6)),
+        max_watchlist=int(params.get('max_watchlist', 15)),
+        last_entry_hour=int(params.get('last_entry_hour', 14)),
+        last_entry_minute=int(params.get('last_entry_minute', 45)),
+        use_vwap=_as_bool(params.get('use_vwap', True)),
+        candle_min=int(params.get('candle_min', 5)),
         # never re-fire the one-off test entry after a restart
         run_immediately=False if resume else _as_bool(params.get('run_immediately', False)),
     )
@@ -5643,7 +5649,8 @@ def nse_sector_options_start():
     entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
              'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     nse_sector_options_strategies[sid] = entry
-    name = (f"NSE Sector Options (SL {params.get('stop_pct', 0.5)}% / TP {params.get('target_pct', 0.75)}%, "
+    name = (f"NSE Sector Options (30m ORB, max {params.get('max_open', 5)} open / {params.get('max_entries', 6)} a day, "
+            f"SL {params.get('stop_pct', 0.5)}% / TP {params.get('target_pct', 0.75)}%, "
             f"{params.get('lots', 1)} lot, paper)")
     track_strategy(sid, 'NSE Sector Options', name, current_user_id(),
                    details={**params, 'profile_id': profile_id, 'asset': 'NSE'})

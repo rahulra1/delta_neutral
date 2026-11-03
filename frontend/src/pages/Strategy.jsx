@@ -208,8 +208,8 @@ const STRATEGIES = [
     features: ['Top-N Gainers/Losers', 'Long + Short Stocks', 'Intraday Square-off', 'Paper Trading'],
     rec: '⏱ Intraday 9:30–3:15 IST · NSE equities' },
   { key: 'nse_sector_options', label: 'NSE Sector Options (Paper)', icon: '🧭🇮🇳', type: 'Options',
-    desc: 'Paper-trades 1 lot of the ATM stock option picked by the Sector Scanner at 09:45: CALL for the top LONG setup, PUT for the top SHORT, in the strongest green/red sector. Exits when the STOCK hits its SL/TP or at 15:15. Prices from the Groww option chain.',
-    features: ['Sector Scanner pick', 'ATM CE / PE · 1 lot', 'Stock-based SL / TP', 'Paper only · Groww chain'],
+    desc: 'Watches the Sector Scanner\'s picks from green/red sectors and paper-buys the ATM CALL / PUT when a stock\'s 5-min candle closes beyond its 09:15–09:45 range (and the 5-min VWAP). Max 5 open, 6 entries a day. Exits when the STOCK hits its SL/TP or at 15:15.',
+    features: ['30-min range breakout', '5m candle close + 5m VWAP', 'Max 5 open · 6 a day', 'Paper only · Groww chain'],
     rec: '⏱ Intraday 9:45–3:15 IST · NSE stock options · needs a Groww profile' },
   { key: 'crypto_futures', label: 'Crypto Scanner Futures', icon: '🪙⚡', type: 'Futures',
     desc: 'Trades Delta Exchange perpetual futures picked by the Crypto Scanner: top LONG/SHORT setups (RS + 24h VWAP + volume) in the strongest green/red crypto sectors. You set the dollars per trade; lots = dollars ÷ (price × coins per lot). Stop at VWAP or a fixed %, target in R, time stop. Paper or LIVE.',
@@ -461,33 +461,41 @@ const NSE_SECTOR_OPTIONS_FIELDS = [
   { key: 'min_dte', label: 'Min Days to Expiry', type: 'number', default: 10, hint: 'Nearest expiry until it is closer than this many days, then the next month' },
   { key: 'sector_group', label: 'Sector Group', type: 'select', options: [{value:'Sectoral',label:'Sectoral (21)'},{value:'Thematic',label:'Thematic (41)'}], default: 'Sectoral' },
   { key: 'trading_days', label: 'Trading Days', type: 'text', default: '0,1,2,3,4', hint: '0=Mon..4=Fri' },
-  { key: 'entry_hour', label: 'Entry Hour (24h IST)', type: 'number', default: 9 },
-  { key: 'entry_minute', label: 'Entry Minute', type: 'number', default: 45 },
-  { key: 'entry_window_min', label: 'Entry Window (min)', type: 'number', default: 30, hint: 'Keep rescanning this long if no setup is found at the entry time' },
+  { key: 'max_open', label: 'Max Open Positions', type: 'number', default: 5, hint: 'At most this many options held at the same time' },
+  { key: 'max_entries', label: 'Max Entries per Day', type: 'number', default: 6 },
+  { key: 'max_watchlist', label: 'Watchlist Size', type: 'number', default: 15, hint: 'Stocks picked at 09:45 and watched for a 30-min range breakout' },
+  { key: 'candle_min', label: 'Breakout Candle', type: 'select', options: [{value:5,label:'5-minute close'},{value:15,label:'15-minute close'}], default: 5, hint: 'Candle whose CLOSE must be beyond the 09:15–09:45 range' },
+  { key: 'use_vwap', label: '5-min VWAP Filter', type: 'select', options: [{value:true,label:'Yes — close must also be beyond the 5m VWAP'},{value:false,label:'No — range break only'}], default: true },
+  { key: 'entry_hour', label: 'Range End / Watchlist Hour (24h IST)', type: 'number', default: 9, hint: 'Opening range = 09:15 to this time' },
+  { key: 'entry_minute', label: 'Range End / Watchlist Minute', type: 'number', default: 45 },
+  { key: 'last_entry_hour', label: 'Last Entry Candle Hour', type: 'number', default: 14 },
+  { key: 'last_entry_minute', label: 'Last Entry Candle Minute', type: 'number', default: 45, hint: 'No new entries on 15m candles closing after this' },
+  { key: 'entry_window_min', label: 'Watchlist Retry (min)', type: 'number', default: 30, hint: 'Keep rescanning this long if no watchlist stocks are found at 09:45' },
   { key: 'exit_hour', label: 'Square-off Hour (24h IST)', type: 'number', default: 15 },
   { key: 'exit_minute', label: 'Square-off Minute', type: 'number', default: 15 },
   { key: 'monitoring_interval', label: 'Price Check Interval (s)', type: 'number', default: 15 },
-  { key: 'run_immediately', label: 'Run Immediately (test)', type: 'select', options: [{value:false,label:'No — wait for entry time'},{value:true,label:'Yes — scan & enter now once'}], default: false, hint: 'Testing: ignores the entry time and market-open check once' },
+  { key: 'run_immediately', label: 'Run Immediately (test)', type: 'select', options: [{value:false,label:'No — wait for 09:45'},{value:true,label:'Yes — build watchlist & check breakouts now once'}], default: false, hint: 'Testing: ignores the time windows and market-open check for the first cycle' },
 ];
 
 // Keep in sync with strategy/nse_sector_options.py.
 const NSE_SECTOR_OPTIONS_DETAILS = [
-  { heading: '1. Pick (at the entry time, default 09:45 IST)', points: [
+  { heading: '1. Watchlist (09:45 IST)', points: [
     'Reads the live NSE sectors. Only BULLISH/BEARISH sectors count: |change| ≥ 0.5% and breadth ≥ 30% net advancers/decliners. They are walked from the biggest move down.',
-    'In each sector it takes the top-ranked LONG/SHORT setup from the Sector Scanner (RS vs sector + price on the right side of VWAP + RVOL ≥ 1.5) that has listed stock options.',
-    'If nothing qualifies it rescans every minute for the entry window (default 30 min), then skips the day.',
+    'From those sectors it takes the Sector Scanner\'s LONG / SHORT / WATCH stocks (direction = sector bias) that have listed stock options, up to the watchlist size (default 15).',
+    'For each stock it records the 30-minute opening range: high and low of 09:15–09:45 (5-minute bars).',
   ] },
-  { heading: '2. Trade (paper)', points: [
-    'LONG → buys the ATM CALL, SHORT → buys the ATM PUT. Expiry: the nearest (current-month) expiry until it is less than 10 days away (setting), then the next month. Strike nearest the stock price.',
-    'Price = Groww option-chain LTP. Lot size and contract symbols come from Groww\'s instruments list. No real orders are placed.',
+  { heading: '2. Entry — 5-minute candle breakout (09:50 to 14:45)', points: [
+    'After every 5-minute candle closes: a bullish stock whose candle CLOSES above its 30-min high (and above the 5-minute VWAP) → buys the ATM CALL; a bearish stock closing below its 30-min low (and below the 5-minute VWAP) → buys the ATM PUT. A wick through the level without a close beyond it does not count.',
+    'Max 5 positions open at once and max 6 entries a day; each stock is traded at most once a day. A breakout skipped because the slots are full can still be taken on a later candle if it is still beyond the range.',
+    'Expiry: the nearest expiry with at least 10 days left (setting), else the next month. Strike nearest the stock price. Price = Groww option-chain LTP. No real orders are placed.',
   ] },
-  { heading: '3. Exit (decided by the STOCK price)', points: [
-    'Stop: the stock moves the stop % against the entry stock price. Target: it moves the target % in favour.',
-    'Otherwise the option is sold at the square-off time (default 15:15). One trade per day.',
+  { heading: '3. Exit (decided by the STOCK price, per position)', points: [
+    'Stop: the stock moves the stop % against the entry stock price. Target: it moves the target % in favour. Checked every price-check interval.',
+    'Otherwise every open option is sold at the square-off time (default 15:15).',
     'Realized P&L is after estimated Groww F&O charges (₹40 brokerage + STT 0.1% on sell premium + exchange/SEBI/stamp + GST).',
   ] },
   { heading: '4. What to expect', points: [
-    'In the Aug–Oct 2026 backtest of this exact rule (55 sessions, modelled option prices) it LOST money: 53 trades, 39.6% wins, −₹19,555 with SL 0.5% / TP 0.75%, and −₹37,495 with SL 1% / TP 2%. Treat the paper run as a forward test, not as an expected profit.',
+    'This breakout version has NOT been backtested yet. The earlier one-trade-a-day version lost money in the Aug–Oct 2026 backtest, so treat the paper run as a forward test.',
     'Needs a Groww profile with a valid API token — without it the option chain is unavailable and no trade is taken.',
   ] },
 ];
@@ -1153,7 +1161,7 @@ export default function Strategy() {
       )}
       {activeTab === 'nse_sector_options' && (
         <StrategyTemplate title="NSE Sector Options (Paper)" icon="🧭🇮🇳" type="Options"
-          description="Paper-buys 1 lot of the ATM CALL (LONG) or PUT (SHORT) of the Sector Scanner's top pick at 09:45, exits when the stock hits its SL/TP or at 15:15. Select a Groww profile." profiles={profiles}
+          description="Builds a watchlist from the Sector Scanner at 09:45 and paper-buys the ATM CALL / PUT when a stock's 5-min candle closes beyond its 09:15–09:45 range and the 5-min VWAP (max 5 open, 6 a day). Exits on the stock's SL/TP or at 15:15. Select a Groww profile." profiles={profiles}
           configFields={NSE_SECTOR_OPTIONS_FIELDS} details={NSE_SECTOR_OPTIONS_DETAILS}
           onStart={async (config) => {
             const c = { ...config };
@@ -1175,11 +1183,29 @@ export default function Strategy() {
                   <div className="stat-card"><div className="label">Realized P&L (net)</div><div className="value" style={{ color: col(s.cumulative_pnl) }}>{money(s.cumulative_pnl)}</div><div className="sub">charges ₹{Math.round(s.total_charges || 0).toLocaleString('en-IN')}</div></div>
                   <div className="stat-card"><div className="label">Total (incl. open)</div><div className="value" style={{ color: col(s.total_pnl) }}>{money(s.total_pnl)}</div></div>
                   <div className="stat-card"><div className="label">Trades</div><div className="value">{s.total_trades || 0}</div></div>
-                  <div className="stat-card"><div className="label">Last scan</div><div className="value" style={{ fontSize: '.95rem' }}>{s.last_scan ? (s.last_scan.stock || 'No setup') : '—'}</div><div className="sub">{s.last_scan?.sector ? `${s.last_scan.sector} ${s.last_scan.sector_pchg > 0 ? '+' : ''}${s.last_scan.sector_pchg}%` : (s.entered_day ? `done for ${s.entered_day}` : 'waiting for entry time')}</div></div>
+                  <div className="stat-card"><div className="label">Today</div><div className="value" style={{ fontSize: '.95rem' }}>{(s.watchlist || []).length} watching · {s.entries_today || 0}/{s.params?.max_entries ?? 6} entries</div><div className="sub">{s.entered_day && s.entered_day === s.last_scan?.day ? `done for ${s.entered_day}` : (s.last_candle ? `last ${s.params?.candle_min ?? 5}m candle ${s.last_candle}` : 'waiting for 09:45')}</div></div>
                 </div>
+                {(s.watchlist || []).length > 0 && (
+                  <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                    <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>👀 Breakout Watchlist (30-min range 09:15–09:45)</div>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
+                      <thead><tr>{['Stock', 'Side', 'Range low', 'Range high', 'Last close', '5m VWAP', 'Status'].map(h => <th key={h} scope="col" style={th}>{h}</th>)}</tr></thead>
+                      <tbody>{s.watchlist.map((w, i) => (
+                        <tr key={i}>
+                          <td style={{ ...td, fontWeight: 700 }}>{w.symbol}<div style={{ fontSize: '.66rem', color: 'var(--muted)', fontWeight: 400 }}>{w.sector} {w.sector_pchg > 0 ? '+' : ''}{w.sector_pchg}%</div></td>
+                          <td style={{ ...td, color: w.direction === 'LONG' ? 'var(--green)' : 'var(--red)', fontWeight: 600 }}>{w.direction}</td>
+                          <td style={td}>{w.or_low}</td>
+                          <td style={td}>{w.or_high}</td>
+                          <td style={{ ...td, fontWeight: 600 }}>{w.last_close ?? '—'}{w.last_candle ? <span style={{ color: 'var(--muted)', fontSize: '.66rem' }}> @{w.last_candle}</span> : null}</td>
+                          <td style={td}>{w.vwap ?? '—'}</td>
+                          <td style={td}>{w.status}{w.note && w.status === 'watching' ? <div style={{ fontSize: '.66rem', color: 'var(--muted)' }}>{w.note}</div> : null}</td>
+                        </tr>))}</tbody>
+                    </table>
+                  </div>
+                )}
                 {s.legs && s.legs.length > 0 && (
                   <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
-                    <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Open Paper Position</div>
+                    <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Open Paper Positions ({s.legs.length}/{s.params?.max_open ?? 5})</div>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
                       <thead><tr>{['Option', 'Qty', 'Buy', 'LTP', 'P&L', 'Stock', 'Stock now', 'Stock SL', 'Stock TP'].map(h => <th key={h} scope="col" style={th}>{h}</th>)}</tr></thead>
                       <tbody>{s.legs.map((l, i) => (
