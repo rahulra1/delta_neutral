@@ -51,6 +51,146 @@ function sizePlan(plan, sizing) {
   };
 }
 
+// News grade = tier (A strong / B moderate / C weak) + direction (▲ good / ▼ bad for the stock)
+const DIR = { pos: { arrow: '▲', cls: 'badge badge-green', word: 'positive' }, neg: { arrow: '▼', cls: 'badge badge-red', word: 'negative' },
+  mixed: { arrow: '◆', cls: 'badge badge-yellow', word: 'mixed' } };
+const TIER_WORD = { A: 'A strong', B: 'B moderate', C: 'C weak' };
+const gradeCls = g => (g.direction ? DIR[g.direction].cls : 'badge');
+const gradeLabel = g => `${g.tier}${g.direction ? ` ${DIR[g.direction].arrow}` : ''}${g.category ? ` · ${g.category}` : ''}`;
+const ist = ts => new Date(ts * 1000).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+const ago = ts => {
+  const m = Math.max(0, Math.round((Date.now() / 1000 - ts) / 60));
+  return m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
+};
+
+function NewsItem({ x }) {
+  return (
+    <div style={{ fontSize: '.78rem', padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
+      {x.tier && <span className={gradeCls(x)} style={{ fontSize: '.6rem', padding: '1px 6px', marginRight: 6 }} title={`${TIER_WORD[x.tier]}${x.direction ? ', ' + DIR[x.direction].word : ''}`}>{gradeLabel(x)}</span>}
+      {x.kind === 'filing' && <span className="badge" style={{ fontSize: '.58rem', padding: '1px 5px', marginRight: 4, background: 'var(--bg)', border: '1px solid var(--border)' }}>🏛 NSE</span>}
+      {x.symbols?.map(t => <span key={t} className="badge" style={{ fontSize: '.58rem', padding: '1px 5px', marginRight: 4, background: 'var(--bg)', border: '1px solid var(--border)' }}>{t}</span>)}
+      {x.link ? <a href={x.link} target="_blank" rel="noreferrer" style={{ fontWeight: 600 }}>{x.title}</a> : <b>{x.title}</b>}
+      {x.kind === 'filing' && x.summary && <div style={{ fontSize: '.7rem', color: 'var(--text)', marginTop: 2 }}>{x.summary}</div>}
+      <div style={{ color: 'var(--muted)', fontSize: '.66rem' }}>{x.source} · {ago(x.ts)} · {ist(x.ts)} IST</div>
+    </div>
+  );
+}
+
+function StockNews({ symbol, name, onClose }) {
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState(null);
+  const boxRef = React.useRef(null);
+  useEffect(() => { boxRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, [symbol]);
+  useEffect(() => {
+    setD(null); setErr(null);
+    api.get('/sector-scanner/stock-news', { params: { symbol, name } }).then(r => setD(r.data)).catch(e => setErr(e.response?.data?.error || e.message));
+  }, [symbol, name]);
+  return (
+    <div ref={boxRef} className="card" style={{ border: '1.5px solid var(--purple)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <div style={{ fontWeight: 800 }}>📰 {symbol} — headlines & NSE filings (last 3 days)
+          {d && d.news_tier && <span className={gradeCls({ direction: d.news_direction })} style={{ marginLeft: 8, fontSize: '.66rem' }}>best {d.news_tier} · ▲{d.news_pos} ▼{d.news_neg}</span>}</div>
+        <button type="button" className="btn btn-outline" style={{ padding: '4px 12px', fontSize: '.74rem' }} onClick={onClose}>Close</button>
+      </div>
+      {err && <div style={{ color: 'var(--red)', fontSize: '.8rem' }}>Unavailable: {err}</div>}
+      {!d && !err && <div style={{ color: 'var(--muted)', fontSize: '.8rem' }}>Loading…</div>}
+      {d && d.items.length === 0 && <div style={{ color: 'var(--muted)', fontSize: '.8rem' }}>No headline or NSE filing for {symbol} in the last 3 days.</div>}
+      {d && d.items.map((x, i) => <NewsItem key={i} x={x} />)}
+    </div>
+  );
+}
+
+function CompaniesInNews({ list, onOpen }) {
+  const [showAll, setShowAll] = useState(false);
+  if (!list?.length) return null;
+  const rows = showAll ? list : list.slice(0, 15);
+  const th = { textAlign: 'left', padding: '6px', fontSize: '.64rem', color: 'var(--muted)', fontWeight: 700, borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
+  const td = { padding: '6px', fontSize: '.76rem', borderBottom: '1px solid var(--border)', verticalAlign: 'top' };
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 4 }}>🏢 Companies in news <span style={{ color: 'var(--muted)', fontWeight: 500, fontSize: '.72rem' }}>· ranked by strongest news, then number of A/B items, then latest</span></div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead><tr>{['#', 'Company', 'Grade', '▲ / ▼', 'Headlines', 'Filings', 'Latest', 'Top news'].map(h => <th key={h} scope="col" style={th}>{h}</th>)}</tr></thead>
+          <tbody>{rows.map((c, i) => (
+            <tr key={c.symbol} style={{ background: c.news_direction === 'pos' ? 'var(--light-green)' : c.news_direction === 'neg' ? 'var(--light-red)' : undefined }}>
+              <td style={{ ...td, color: 'var(--muted)' }}>{i + 1}</td>
+              <td style={td}>
+                <button type="button" onClick={() => onOpen(c)} title="Show all headlines and filings" style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}>
+                  <div style={{ fontWeight: 700 }}>{c.symbol} <span style={{ fontSize: '.58rem', color: 'var(--purple)' }}>details ›</span></div>
+                  <div style={{ fontSize: '.62rem', color: 'var(--muted)', maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.name}>
+                    {c.name}{c.listing === 'sme' ? ' · SME' : c.listing === 'main' ? '' : ' · Nifty 500'}{c.industry ? ` · ${c.industry}` : ''}</div>
+                </button>
+              </td>
+              <td style={td}>{c.news_tier ? <span className={gradeCls({ direction: c.news_direction })} style={{ fontSize: '.6rem', padding: '1px 6px' }}>{c.news_tier}{c.news_direction ? ` ${DIR[c.news_direction].arrow}` : ''}</span> : '–'}</td>
+              <td style={td}><span style={{ color: 'var(--green)' }}>{c.news_pos}</span> / <span style={{ color: 'var(--red)' }}>{c.news_neg}</span></td>
+              <td style={td}>{c.news_count}</td>
+              <td style={td}>{c.filings_count}</td>
+              <td style={{ ...td, whiteSpace: 'nowrap' }}>{ago(c.latest_ts)}</td>
+              <td style={{ ...td, maxWidth: 420 }}>
+                {c.top.tier && <span className={gradeCls(c.top)} style={{ fontSize: '.58rem', padding: '1px 5px', marginRight: 4 }}>{gradeLabel(c.top)}</span>}
+                {c.top.link ? <a href={c.top.link} target="_blank" rel="noreferrer">{c.top.title}</a> : c.top.title}
+                <span style={{ color: 'var(--muted)', fontSize: '.64rem' }}> · {c.top.source}</span>
+              </td>
+            </tr>))}</tbody>
+        </table>
+      </div>
+      {list.length > 15 && <button type="button" className="btn btn-outline" style={{ padding: '4px 12px', fontSize: '.72rem', marginTop: 6 }} onClick={() => setShowAll(v => !v)}>{showAll ? 'Show top 15' : `Show all ${list.length}`}</button>}
+    </div>
+  );
+}
+
+function NewsBoard({ onOpen }) {
+  const [d, setD] = useState(null);
+  const [filter, setFilter] = useState('graded');
+  const [sort, setSort] = useState('impact');
+  useEffect(() => {
+    const load = () => api.get('/sector-scanner/news', { params: { sort } }).then(r => setD(r.data)).catch(() => {});
+    load();
+    const t = setInterval(load, 120000);
+    return () => clearInterval(t);
+  }, [sort]);
+  if (!d) return <div className="card" style={{ color: 'var(--muted)' }}>Loading Indian market news…</div>;
+  const f = {
+    graded: x => x.tier === 'A' || x.tier === 'B' || (x.kind === 'news' && x.symbols.length),
+    pos: x => x.direction === 'pos', neg: x => x.direction === 'neg', filings: x => x.kind === 'filing' && x.tier !== 'C', all: () => true,
+  }[filter];
+  const items = d.items.filter(f);
+  const btn = active => ({
+    padding: '4px 10px', borderRadius: 6, fontSize: '.72rem', fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+    border: active ? '1.5px solid var(--accent)' : '1.5px solid var(--border)',
+    background: active ? 'var(--accent)' : 'var(--bg)', color: active ? '#fff' : 'var(--text)' });
+  return (
+    <div className="card">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+        <div>
+          <div style={{ fontWeight: 700 }}>📰 Stock news</div>
+          <div style={{ fontSize: '.68rem', color: 'var(--muted)' }}>
+            {d.sources.join(' · ')} · matched against {d.universe_size ? d.universe_size.toLocaleString('en-IN') : 'all'} NSE companies (mainboard + SME) · grade = A strong / B moderate / C weak with ▲ good · ▼ bad · ◆ mixed (keyword based — read the headline)
+          </div>
+        </div>
+      </div>
+      <CompaniesInNews list={d.companies} onOpen={onOpen} />
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, flexWrap: 'wrap', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 4 }} role="group" aria-label="Sort news">
+          <span style={{ fontSize: '.7rem', color: 'var(--muted)', alignSelf: 'center', marginRight: 4 }}>Sort</span>
+          <button type="button" style={btn(sort === 'impact')} aria-pressed={sort === 'impact'} onClick={() => setSort('impact')} title="Strongest news first (A > B > C, clear ▲/▼ before neutral, company news before market news), then latest">Top impact</button>
+          <button type="button" style={btn(sort === 'latest')} aria-pressed={sort === 'latest'} onClick={() => setSort('latest')}>Latest</button>
+        </div>
+        <div style={{ display: 'flex', gap: 4 }} role="group" aria-label="News filter">
+          {[['graded', 'Catalysts'], ['pos', '▲ Positive'], ['neg', '▼ Negative'], ['filings', '🏛 NSE filings'], ['all', 'All']].map(([k, l]) => (
+            <button key={k} type="button" onClick={() => setFilter(k)} aria-pressed={filter === k} style={btn(filter === k)}>{l}</button>
+          ))}
+        </div>
+      </div>
+      {d.errors?.length > 0 && <div style={{ fontSize: '.7rem', color: 'var(--red)', marginBottom: 6 }}>Feed errors: {d.errors.join('; ')}</div>}
+      <div style={{ maxHeight: 520, overflowY: 'auto' }}>
+        {items.length ? items.map((x, i) => <NewsItem key={i} x={x} />) : <div style={{ color: 'var(--muted)', fontSize: '.8rem' }}>Nothing in this filter.</div>}
+      </div>
+    </div>
+  );
+}
+
 const BIAS_STYLE = {
   BULLISH: 'badge badge-green',
   BEARISH: 'badge badge-red',
@@ -140,7 +280,25 @@ function SizingInputs({ sizing, setSizing }) {
   );
 }
 
-function StocksTable({ data, sizing, onlySetups }) {
+function NewsCell({ r, onNews }) {
+  const has = r.news_count || r.filings_count;
+  return (
+    <button type="button" onClick={() => onNews(r)} title="Show headlines and NSE filings"
+      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontFamily: 'inherit', textAlign: 'left' }}>
+      {has ? (
+        <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+          {r.news_tier && <span className={gradeCls({ direction: r.news_direction })} style={{ fontSize: '.58rem', padding: '1px 5px' }}
+            title={`Best grade ${TIER_WORD[r.news_tier]} · ${r.news_pos} positive / ${r.news_neg} negative`}>{r.news_tier}{r.news_direction ? ` ${DIR[r.news_direction].arrow}` : ''}</span>}
+          {r.news_count > 0 && <span className="badge" style={{ fontSize: '.58rem', padding: '1px 5px' }} title="Headlines naming the stock">📰 {r.news_count}</span>}
+          {r.filings_count > 0 && <span className="badge" style={{ fontSize: '.58rem', padding: '1px 5px' }} title="NSE filings (routine paperwork excluded)">🏛 {r.filings_count}</span>}
+        </div>
+      ) : <span style={{ color: 'var(--muted)' }}>–</span>}
+      <span style={{ fontSize: '.58rem', color: 'var(--purple)' }}>details ›</span>
+    </button>
+  );
+}
+
+function StocksTable({ data, sizing, onlySetups, onNews }) {
   const rows = onlySetups ? data.stocks.filter(r => r.setup) : data.stocks;
   if (!rows.length) return <div style={{ padding: 20, color: 'var(--muted)', fontSize: '.85rem' }}>No stocks match.</div>;
   const th = { padding: '8px 6px', fontSize: '.66rem', color: 'var(--muted)', fontWeight: 700, textAlign: 'right', whiteSpace: 'nowrap', borderBottom: '1px solid var(--border)', position: 'sticky', top: 0, background: 'var(--card)' };
@@ -160,6 +318,7 @@ function StocksTable({ data, sizing, onlySetups }) {
             <th scope="col" style={th}>Value</th>
             <th scope="col" style={{ ...th, textAlign: 'left' }}>OI</th>
             <th scope="col" style={{ ...th, textAlign: 'left' }} title={`Bulk / block deals on ${data.deals_as_on || 'last session'}`}>Deals</th>
+            <th scope="col" style={{ ...th, textAlign: 'left' }} title="Headlines + NSE filings, last 3 days">News</th>
             <th scope="col" style={{ ...th, textAlign: 'left' }}>Checks</th>
             <th scope="col" style={{ ...th, textAlign: 'center' }}>Setup</th>
             <th scope="col" style={th}>Qty</th>
@@ -203,6 +362,7 @@ function StocksTable({ data, sizing, onlySetups }) {
                     </span>
                   ) : <span style={{ color: 'var(--muted)' }}>–</span>}
                 </td>
+                <td style={{ ...td, textAlign: 'left' }}><NewsCell r={r} onNews={onNews} /></td>
                 <td style={{ ...td, textAlign: 'left' }}><CheckDots checks={r.checks} /></td>
                 <td style={{ ...td, textAlign: 'center' }}><SetupBadge setup={r.setup} /></td>
                 {showPlan ? (
@@ -237,6 +397,8 @@ export default function SectorScanner() {
   const [loadingStocks, setLoadingStocks] = useState(false);
   const [onlySetups, setOnlySetups] = useState(false);
   const [sizing, setSizing] = useState(loadSizing);
+  const [newsFor, setNewsFor] = useState(null);
+  const [boardNews, setBoardNews] = useState(null);
 
   useEffect(() => { localStorage.setItem(SIZING_KEY, JSON.stringify(sizing)); }, [sizing]);
 
@@ -343,7 +505,7 @@ export default function SectorScanner() {
               </div>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(165px, 1fr))', gap: 8 }}>
-              {sectors.map(s => <SectorCard key={s.index} s={s} active={s.index === selected} onClick={() => setSelected(s.index)} />)}
+              {sectors.map(s => <SectorCard key={s.index} s={s} active={s.index === selected} onClick={() => { setSelected(s.index); setNewsFor(null); }} />)}
             </div>
           </div>
 
@@ -371,6 +533,8 @@ export default function SectorScanner() {
                 <SizingInputs sizing={sizing} setSizing={setSizing} />
               </div>
 
+              {newsFor && <StockNews symbol={newsFor.symbol} name={newsFor.name} onClose={() => setNewsFor(null)} />}
+
               {stocks?.late && (
                 <div className="badge badge-yellow" style={{ marginBottom: 10 }}>
                   After {stocks.params.late_entry} IST — new entries are marked LATE; square off intraday positions by 15:15.
@@ -384,7 +548,7 @@ export default function SectorScanner() {
 
               {loadingStocks && <div style={{ padding: 20, color: 'var(--muted)', fontSize: '.85rem' }}>Loading constituents and intraday candles…</div>}
               {stocksErr && !loadingStocks && <div style={{ padding: 12, color: 'var(--red)', fontSize: '.85rem' }}>Unavailable: {stocksErr}</div>}
-              {stocks && stocks.index === selected && !loadingStocks && <StocksTable data={stocks} sizing={sizing} onlySetups={onlySetups} />}
+              {stocks && stocks.index === selected && !loadingStocks && <StocksTable data={stocks} sizing={sizing} onlySetups={onlySetups} onNews={r => setNewsFor({ symbol: r.symbol, name: r.name })} />}
 
               <div style={{ fontSize: '.66rem', color: 'var(--muted)', marginTop: 12, lineHeight: 1.6 }}>
                 Direction follows the sector bias (MIXED sectors use each stock's own direction). Setup = RS + VWAP + RVOL all pass; WATCH = 2+ checks.
@@ -395,6 +559,9 @@ export default function SectorScanner() {
           )}
         </>
       )}
+
+      {boardNews && <StockNews symbol={boardNews.symbol} name={boardNews.name} onClose={() => setBoardNews(null)} />}
+      {overview && <NewsBoard onOpen={c => setBoardNews({ symbol: c.symbol, name: c.name })} />}
 
       {!overview && !error && <div className="card" style={{ color: 'var(--muted)' }}>Loading NSE sectors…</div>}
     </div>

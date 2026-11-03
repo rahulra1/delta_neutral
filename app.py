@@ -7978,6 +7978,37 @@ def api_sector_scanner_stocks():
         return jsonify(error=str(e), index=index), 502
 
 
+@app.route('/api/sector-scanner/news')
+@login_required
+def api_sector_scanner_news():
+    """Indian market headlines (ET, Mint, BS, NDTV Profit, BusinessLine, Moneycontrol) + NSE filings, graded."""
+    from api.stock_news import get_board
+    sort = request.args.get('sort', 'impact')
+    if sort not in ('impact', 'latest'):
+        return jsonify(error='sort must be impact or latest'), 400
+    try:
+        return jsonify(get_board(sort=sort))
+    except Exception as e:
+        logger.error(f"Sector scanner news error: {e}")
+        return jsonify(error=str(e)), 502
+
+
+@app.route('/api/sector-scanner/stock-news')
+@login_required
+def api_sector_scanner_stock_news():
+    """Graded headlines + NSE filings (last 3 days) for one NSE symbol. ?symbol=RELIANCE&name=Reliance Industries"""
+    from api.stock_news import by_symbol
+    symbol = (request.args.get('symbol') or '').strip().upper()
+    if not symbol:
+        return jsonify(error='symbol is required'), 400
+    name = (request.args.get('name') or '').strip()
+    try:
+        return jsonify(dict(by_symbol([symbol], extra={symbol: name} if name else None)[symbol], symbol=symbol))
+    except Exception as e:
+        logger.error(f"Sector scanner stock news error ({symbol}): {e}")
+        return jsonify(error=str(e)), 502
+
+
 @app.route('/api/crypto-scanner')
 @login_required
 def api_crypto_scanner():

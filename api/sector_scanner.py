@@ -373,6 +373,15 @@ def get_sector_stocks(index):
     late = now.time() >= LATE_ENTRY
     rows = [_analyse(s, sec_pchg, bias, oi_map.get(s['symbol']), deals['by_symbol'],
                      intra.get(s['symbol']), late) for s in cons['stocks']]
+    try:
+        from api.stock_news import by_symbol
+        news = by_symbol(symbols, extra={s['symbol']: s.get('companyName') for s in cons['stocks']})
+    except Exception as e:
+        logger.warning(f"sector_scanner news failed: {e}")
+        news = {}
+    for r in rows:
+        n = news.get(r['symbol']) or {}
+        r.update({k: n.get(k) for k in ('news_count', 'filings_count', 'news_tier', 'news_direction', 'news_pos', 'news_neg')})
     rows.sort(key=lambda r: (r['setup'] in ('LONG', 'SHORT', 'LATE'), r['score'],
                              r['rvol'] or 0, abs(r['rel_to_sector'])), reverse=True)
     return {
