@@ -146,20 +146,24 @@ def _ts_minute(ts):
 
 # --------------------------------------------------------------------------- Groww data (cached)
 def expiries(client, symbol, on_date):
-    """Expiries that are still alive on `on_date` (this month + the next 3), oldest first."""
+    """Expiries alive on `on_date` within the next ~4 months, oldest first.
+
+    Groww's get_expiries takes a year (optionally a month) and rejects FUTURE years, so ask per whole
+    year: the date's year and the next one, never beyond the current year."""
     exch = exchange_of(symbol)
+    horizon = (on_date + timedelta(days=125)).isoformat()
+    this_year = today_ist().year
     out = set()
-    d = date(on_date.year, on_date.month, 1)
-    for _ in range(4):
-        cur = (d.year, d.month) >= (today_ist().year, today_ist().month)
-        path = _path('expiries', f'{exch}_{symbol}_{d.year}_{d.month:02d}.json')
-        data = _read(path, max_age=86400 if cur else None)
+    for year in sorted({on_date.year, on_date.year + 1}):
+        if year > this_year:
+            continue
+        path = _path('expiries', f'{exch}_{symbol}_{year}.json')
+        data = _read(path, max_age=86400 if year == this_year else None)
         if data is None:
-            resp = _call(client.get_expiries, exchange=exch, underlying_symbol=symbol, year=d.year, month=d.month)
+            resp = _call(client.get_expiries, exchange=exch, underlying_symbol=symbol, year=year)
             data = sorted((resp or {}).get('expiries') or [])
             _write(path, data)
-        out.update(x for x in data if x >= on_date.isoformat())
-        d = date(d.year + (d.month == 12), d.month % 12 + 1, 1)
+        out.update(x for x in data if on_date.isoformat() <= x <= horizon)
     return sorted(out)
 
 
