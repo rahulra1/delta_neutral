@@ -8074,6 +8074,96 @@ def api_crypto_scanner_coin_news():
         return jsonify(error=str(e)), 502
 
 
+# ── Option Replay (real Groww historical 1-minute option candles) ──
+
+def _replay_client():
+    """Groww client for the replay, from ?profile_id= or the user's first Groww profile."""
+    from api.option_replay import ReplayError
+    from api.groww import _get_client
+    from config import set_thread_credentials
+    pid = request.args.get('profile_id') or (request.get_json(silent=True) or {}).get('profile_id')
+    prof = get_profile(int(pid), current_user_id()) if pid else None
+    if not prof:
+        prof = next((p for p in get_profiles(current_user_id()) if p.get('broker') == 'groww'), None)
+        prof = get_profile(int(prof['id']), current_user_id()) if prof else None
+    if not prof or prof.get('broker') != 'groww':
+        raise ReplayError('Add a Groww profile (Broker page) — the replay uses Groww historical data.',
+                          code='no_groww_profile', status=424)
+    set_thread_credentials(prof['api_key'], prof['api_secret'], 'groww')
+    return _get_client()
+
+
+def _replay_error(e):
+    from api.option_replay import ReplayError
+    if isinstance(e, ReplayError):
+        return jsonify(error=str(e), code=e.code), e.status
+    logger.error(f"Option replay error: {e}")
+    return jsonify(error=str(e), code='error'), 500
+
+
+@app.route('/api/option-replay/meta')
+@login_required
+def api_option_replay_meta():
+    from api.option_replay import INDICES
+    return jsonify(indices=INDICES, open='09:15', close='15:30',
+                   source='Groww historical 1-minute candles (real trades, incl. expired contracts, from 2020)')
+
+
+@app.route('/api/option-replay/chain')
+@login_required
+def api_option_replay_chain():
+    """Option chain at a past moment. ?symbol=NIFTY&date=2025-10-27&time=10:30[&expiry=2025-10-28&width=10]"""
+    from datetime import date as _date
+    from api.option_replay import chain, parse_hhmm
+    try:
+        client = _replay_client()
+        day = _date.fromisoformat(request.args['date'])
+        minute = parse_hhmm(request.args.get('time', '09:20'))
+        width = max(2, min(int(request.args.get('width', 10)), 30))
+        return jsonify(chain(client, request.args.get('symbol', 'NIFTY'), day, minute,
+                             request.args.get('expiry') or None, width))
+    except (KeyError, ValueError) as e:
+        return jsonify(error=f'bad parameter: {e}', code='bad_request'), 400
+    except Exception as e:
+        return _replay_error(e)
+
+
+@app.route('/api/option-replay/quote', methods=['POST'])
+@login_required
+def api_option_replay_quote():
+    """Prices of position legs at a past moment. Body: {date, time, legs:[{symbol,gsym,strike,type,expiry}]}"""
+    from datetime import date as _date
+    from api.option_replay import quote, parse_hhmm
+    body = request.get_json(silent=True) or {}
+    try:
+        client = _replay_client()
+        legs = body.get('legs') or []
+        if len(legs) > 50:
+            return jsonify(error='too many legs (max 50)', code='bad_request'), 400
+        return jsonify(quotes=quote(client, legs, _date.fromisoformat(body['date']), parse_hhmm(body['time'])))
+    except (KeyError, ValueError) as e:
+        return jsonify(error=f'bad parameter: {e}', code='bad_request'), 400
+    except Exception as e:
+        return _replay_error(e)
+
+
+@app.route('/api/option-replay/day')
+@login_required
+def api_option_replay_day():
+    """Next / previous trading day from real index candles. ?symbol=NIFTY&date=2025-10-27&dir=1"""
+    from datetime import date as _date
+    from api.option_replay import step_day
+    try:
+        client = _replay_client()
+        d = step_day(client, request.args.get('symbol', 'NIFTY').upper(),
+                     _date.fromisoformat(request.args['date']), 1 if int(request.args.get('dir', 1)) > 0 else -1)
+        return jsonify(date=d.isoformat() if d else None)
+    except (KeyError, ValueError) as e:
+        return jsonify(error=f'bad parameter: {e}', code='bad_request'), 400
+    except Exception as e:
+        return _replay_error(e)
+
+
 @app.route('/api/place-legs', methods=['POST'])
 @login_required
 @credits_required('place_legs')

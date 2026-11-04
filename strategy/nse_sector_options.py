@@ -398,6 +398,11 @@ class NseSectorOptions(BaseStrategy):
             if not vwap_ok:
                 w['note'] = f"{now:%H:%M} joined beyond range but {'below' if long_ else 'above'} 5m VWAP {vwap}"
                 continue
+            if self._entries_today >= self.max_entries or len(self._open_legs()) >= self.max_open:
+                full = (f"max {self.max_entries} entries reached" if self._entries_today >= self.max_entries
+                        else f"{self.max_open} positions already open")
+                w['note'] = f"{now:%H:%M} joined beyond range — {full}"
+                continue
             print(f"{TAG} {now:%H:%M} late joiner {w['symbol']} {w['direction']} already beyond its range "
                   f"(live {px} vs [{w['or_low']}–{w['or_high']}], 5m VWAP {vwap}) — entering now")
             w.update(last_close=px, vwap=vwap)
