@@ -83,7 +83,8 @@ def _read(path, max_age=None):
 
 
 def _write(path, data):
-    tmp = path + '.tmp'
+    # unique temp name: parallel fetch threads may save at the same moment; os.replace is atomic
+    tmp = f'{path}.{os.getpid()}.{threading.get_ident()}.tmp'
     with open(tmp, 'w') as f:
         json.dump(data, f, separators=(',', ':'))
     os.replace(tmp, path)
@@ -184,29 +185,47 @@ def contracts(client, symbol, expiry):
     return _memo(('contracts', exch, symbol, expiry), load)
 
 
+TODAY_REFRESH_S = 60            # a saved file of a session still in progress is re-fetched after this
+
+
+def session_complete(day):
+    """True once a session can no longer change (past day, or today after 15:45 IST)."""
+    now = datetime.now(IST)
+    return day < now.date() or (day == now.date() and now.hour * 60 + now.minute > CLOSE_MIN + 15)
+
+
 def day_candles(client, exchange, segment, gsym, day):
-    """1-minute candles of one instrument for one session: [(minute, o, h, l, c, volume, oi), ...]."""
+    """1-minute candles of one instrument for one session: [(minute, o, h, l, c, volume, oi), ...].
+
+    Disk first: a saved COMPLETE session is used as is, forever (past data never changes). A saved
+    partial session (today, market still open) is re-used for TODAY_REFRESH_S seconds. Otherwise the
+    Groww API is called and the result is saved straight after the call (empty days too = holidays)."""
     dstr = day.isoformat()
+    path = _path('candles', exchange, dstr, f'{gsym}.json')
 
     def load():
-        path = _path('candles', exchange, dstr, f'{gsym}.json')
-        data = _read(path)
-        if data is None:
-            resp = _call(client.get_historical_candles, exchange=exchange, segment=segment, groww_symbol=gsym,
-                         start_time=f'{dstr} 09:15:00', end_time=f'{dstr} 15:30:00', candle_interval='1minute')
-            data = []
-            for c in (resp or {}).get('candles') or []:
-                d, m = _ts_minute(c[0])
-                if d != day or not (OPEN_MIN <= m < CLOSE_MIN):
-                    continue
-                vals = [float(x) if x is not None else None for x in c[1:7]] + [None] * (7 - len(c))
-                data.append([m] + vals[:6])
-            data.sort(key=lambda r: r[0])
-            complete = day < today_ist() or datetime.now(IST).hour * 60 + datetime.now(IST).minute > CLOSE_MIN + 15
-            if complete:
-                _write(path, data)
+        saved = _read(path)
+        if isinstance(saved, list):                          # older format: complete session
+            return saved
+        if isinstance(saved, dict):
+            fresh = time.time() - os.path.getmtime(path) < TODAY_REFRESH_S
+            if saved.get('complete') or (day >= today_ist() and fresh):
+                return saved.get('candles') or []
+        complete = session_complete(day)                     # decide BEFORE the call (no race at 15:45)
+        resp = _call(client.get_historical_candles, exchange=exchange, segment=segment, groww_symbol=gsym,
+                     start_time=f'{dstr} 09:15:00', end_time=f'{dstr} 15:30:00', candle_interval='1minute')
+        data = []
+        for c in (resp or {}).get('candles') or []:
+            d, m = _ts_minute(c[0])
+            if d != day or not (OPEN_MIN <= m < CLOSE_MIN):
+                continue
+            vals = [float(x) if x is not None else None for x in c[1:7]] + [None] * (7 - len(c))
+            data.append([m] + vals[:6])
+        data.sort(key=lambda r: r[0])
+        _write(path, {'complete': complete, 'fetched_at': datetime.now(IST).isoformat(timespec='seconds'),
+                      'candles': data})
         return data
-    if day >= today_ist():                 # today's session is still growing: never memoise it
+    if not session_complete(day):          # still growing: only the disk TTL above, no in-memory memo
         return load()
     return _memo(('candles', exchange, dstr, gsym), load)
 
@@ -249,22 +268,75 @@ def step_day(client, symbol, day, direction):
 
 
 def lot_size(symbol, expiry, day):
-    """Official lot size from the NSE / BSE F&O bhavcopy of that day (None if not available)."""
+    """Official lot size from the NSE / BSE F&O bhavcopy (None if not available).
+
+    Uses the saved bhavcopy when present, downloads + saves it otherwise. Today's bhavcopy is only
+    published in the evening (and a failed download leaves a permanent '.miss' marker), so for today it
+    is never downloaded — the most recent saved bhavcopy of the previous days is used instead."""
+    def from_csv(raw):
+        import csv
+        import io
+        for r in csv.DictReader(io.StringIO(raw)):
+            if r.get('TckrSymb') == symbol and r.get('XpryDt') == expiry and r.get('NewBrdLotQty'):
+                return int(float(r['NewBrdLotQty']))
+        return None
+
     def load():
         try:
-            import csv
-            import io
-            from backtest.nse_bhavcopy import download_bhavcopy
-            raw = download_bhavcopy(day.strftime('%Y%m%d'), exchange=exchange_of(symbol))
-            if not raw:
-                return None
-            for r in csv.DictReader(io.StringIO(raw)):
-                if r.get('TckrSymb') == symbol and r.get('XpryDt') == expiry and r.get('NewBrdLotQty'):
-                    return int(float(r['NewBrdLotQty']))
+            from backtest.nse_bhavcopy import _cache_path, download_bhavcopy
+            exch = exchange_of(symbol)
+            for back in range(0, 8):
+                d = day - timedelta(days=back)
+                ymd = d.strftime('%Y%m%d')
+                if d.weekday() >= 5:
+                    continue
+                if session_complete(d) and d < today_ist():
+                    raw = download_bhavcopy(ymd, exchange=exch)          # saved copy, else download + save
+                else:
+                    path = _cache_path(ymd, exch)
+                    raw = open(path).read() if os.path.exists(path) else None
+                lot = from_csv(raw) if raw else None
+                if lot:
+                    return lot
         except Exception as e:                      # noqa: BLE001
             logger.warning("replay lot size %s %s %s: %s", symbol, expiry, day, e)
         return None
     return _memo(('lot', symbol, expiry, day.isoformat()), load)
+
+
+# --------------------------------------------------------------------------- saved option chains
+_chain_locks = {}
+_chain_locks_guard = threading.Lock()
+
+
+def chain_day(client, symbol, expiry, day, chosen):
+    """Candles of an option chain for one session: {gsym: candles}, from ONE saved chain file.
+
+    File .nse_cache/replay/chains/<EXCH>/<date>/<SYMBOL>_<expiry>.json holds every strike of that chain
+    loaded so far. Strikes already in a usable saved file are taken from it (no API call); missing strikes
+    are loaded through day_candles (its own disk cache, else the Groww API), merged in and the file is
+    saved again straight away. Same completeness rule as the candles: a complete past session is final,
+    a session still in progress is re-used for TODAY_REFRESH_S seconds."""
+    exch = exchange_of(symbol)
+    path = _path('chains', exch, day.isoformat(), f'{symbol}_{expiry}.json')
+    with _chain_locks_guard:
+        lock = _chain_locks.setdefault(path, threading.Lock())
+    with lock:
+        saved = _read(path)
+        have = {}
+        if isinstance(saved, dict):
+            fresh = time.time() - os.path.getmtime(path) < TODAY_REFRESH_S
+            if saved.get('complete') or (not session_complete(day) and fresh):
+                have = saved.get('candles') or {}
+        missing = [c for c in chosen if c['gsym'] not in have]
+        if missing:
+            complete = session_complete(day)
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+                got = list(ex.map(lambda c: day_candles(client, exch, 'FNO', c['gsym'], day), missing))
+            have = {**have, **{c['gsym']: cd for c, cd in zip(missing, got)}}
+            _write(path, {'complete': complete, 'symbol': symbol, 'expiry': expiry, 'date': day.isoformat(),
+                          'fetched_at': datetime.now(IST).isoformat(timespec='seconds'), 'candles': have})
+        return {c['gsym']: have.get(c['gsym']) or [] for c in chosen}
 
 
 # --------------------------------------------------------------------------- public API
@@ -291,11 +363,10 @@ def chain(client, symbol, day, minute, expiry=None, width=10):
     lo, hi = max(0, atm_i - width), min(len(strikes), atm_i + width + 1)
     pick = set(strikes[lo:hi])
     chosen = [c for c in cons if c['strike'] in pick]
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        data = list(ex.map(lambda c: day_candles(client, exch, 'FNO', c['gsym'], day), chosen))
+    candles = chain_day(client, symbol, expiry, day, chosen)
     by = {}
-    for c, cd in zip(chosen, data):
-        snap = snapshot(cd, minute)
+    for c in chosen:
+        snap = snapshot(candles[c['gsym']], minute)
         by.setdefault(c['strike'], {})[c['type']] = {'gsym': c['gsym'], **(snap or {'ltp': None})}
     rows = [{'strike': k, 'ce': by.get(k, {}).get('CE'), 'pe': by.get(k, {}).get('PE')} for k in sorted(pick)]
     exp_d = date.fromisoformat(expiry)
