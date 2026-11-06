@@ -5576,6 +5576,18 @@ def _build_sector_options(params, resume=False):
     days = params.get('trading_days', [0, 1, 2, 3, 4])
     if isinstance(days, str):
         days = [int(d) for d in days.replace('[', '').replace(']', '').split(',') if d.strip()]
+    if params.get('mode') == 'overnight':
+        # Scanner Overnight Options: same registry / routes / resume path, different class
+        from strategy.nse_scanner_overnight import NseScannerOvernight
+        return NseScannerOvernight(
+            max_trades=int(params.get('max_trades', 5)), min_dte=int(params.get('min_dte', 15)),
+            lots=int(params.get('lots', 1)), max_premium=float(params.get('max_premium', 100000)),
+            sector_group=params.get('sector_group', 'Sectoral'),
+            entry_hour=int(params.get('entry_hour', 15)), entry_minute=int(params.get('entry_minute', 15)),
+            exit_hour=int(params.get('exit_hour', 9)), exit_minute=int(params.get('exit_minute', 17)),
+            trading_days=days, monitor_interval=int(params.get('monitoring_interval', 15)),
+            run_immediately=False if resume else _as_bool(params.get('run_immediately', False)),
+        )
     return NseSectorOptions(
         entry_hour=int(params.get('entry_hour', 9)), entry_minute=int(params.get('entry_minute', 45)),
         exit_hour=int(params.get('exit_hour', 15)), exit_minute=int(params.get('exit_minute', 15)),
@@ -5649,9 +5661,13 @@ def nse_sector_options_start():
     entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
              'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     nse_sector_options_strategies[sid] = entry
-    name = (f"NSE Sector Options (30m ORB, max {params.get('max_open', 5)} open / {params.get('max_entries', 6)} a day, "
-            f"SL {params.get('stop_pct', 0.5)}% / TP {params.get('target_pct', 0.75)}%, "
-            f"{params.get('lots', 1)} lot, paper)")
+    if params.get('mode') == 'overnight':
+        name = (f"Scanner Overnight Options (15:15 -> 09:17, top {params.get('max_trades', 5)} by sector, "
+                f"expiry >= {params.get('min_dte', 15)}d, {params.get('lots', 1)} lot, paper)")
+    else:
+        name = (f"NSE Sector Options (30m ORB, max {params.get('max_open', 5)} open / {params.get('max_entries', 6)} a day, "
+                f"SL {params.get('stop_pct', 0.5)}% / TP {params.get('target_pct', 0.75)}%, "
+                f"{params.get('lots', 1)} lot, paper)")
     track_strategy(sid, 'NSE Sector Options', name, current_user_id(),
                    details={**params, 'profile_id': profile_id, 'asset': 'NSE'})
     entry['thread'] = threading.Thread(target=_sector_options_thread, args=(sid, entry), daemon=True)
