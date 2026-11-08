@@ -430,6 +430,13 @@ const CRYPTO_FUTURES_FIELDS = [
   { key: 'cooldown_hours', label: 'Re-entry Cooldown (h)', type: 'number', default: 24, hint: 'Do not trade the same coin again within this many hours' },
   { key: 'scan_interval_min', label: 'Scan Every (min)', type: 'number', default: 15 },
   { key: 'price_check_sec', label: 'Price Check (s)', type: 'number', default: 15 },
+  { key: 'rating_mode', label: 'Use Weighted Rating', type: 'select', options: [
+    {value:'filter',label:'Filter — scanner setups with rating ≥ minimum, best rating first'},
+    {value:'rating',label:'Rating decides — any coin with rating ≥ minimum, in its direction'},
+    {value:'off',label:'Off — scanner setups only (old behaviour)'}], default: 'filter',
+    hint: 'Rating = News 35% + Twitter/X 25% + RSI 20% + EMA 7/20 20% (Crypto Scanner page, 0–100, 50 = neutral)' },
+  { key: 'min_rating', label: 'Minimum Rating (0–100)', type: 'number', default: 60, hint: '50 = neutral. Higher = fewer, better-agreeing trades' },
+  { key: 'use_page_weights', label: 'Rating Weights', type: 'select', options: [{value:true,label:'My weights from the Crypto Scanner page'},{value:false,label:'Default (News 35 / X 25 / RSI 20 / EMA 20)'}], default: true, hint: 'The weights you set on the Crypto Scanner page (saved in this browser) are sent with the start' },
 ];
 
 // Keep in sync with strategy/crypto_scanner_futures.py.
@@ -437,6 +444,7 @@ const CRYPTO_FUTURES_DETAILS = [
   { heading: '1. Pick (every scan, default 15 min, 24/7)', points: [
     'Reads the Crypto Scanner: Delta perps grouped by Delta\'s sector tags. By default only BULLISH/BEARISH sectors (median 24h move ≥ 1.5% with breadth ≥ 30%), biggest move first.',
     'Takes LONG/SHORT setups: stronger/weaker than the sector, on the right side of the 24h VWAP, 24h volume ≥ 1.5× its 7-day average, and 24h turnover ≥ the minimum.',
+    'Weighted rating (default ON as a filter): each coin gets 0–100 from News 35% + Twitter/X 25% + RSI 14 20% + EMA 7/20 crossover 20% on 1h, all judged in the trade direction (50 = neutral). Filter = only setups with rating ≥ the minimum, best rating first. "Rating decides" = any coin with rating ≥ the minimum is bought (LONG) or sold (SHORT) in its sector direction, even without a scanner setup. Twitter/X counts only once an X API token is set.',
     'Skips coins already held or traded within the cooldown. Stops when max open positions or max entries per day is reached.',
   ] },
   { heading: '2. Size — your dollars → lots', points: [
@@ -1133,7 +1141,12 @@ export default function Strategy() {
             if (live && !window.confirm(`Start LIVE trading on Delta Exchange?\n\nReal market orders, $${config.amount_usd} per trade, up to ${config.max_positions} positions at once.`)) {
               return { error: 'Cancelled — LIVE start not confirmed' };
             }
-            const { data } = await api.post('/crypto-futures/start', config);
+            const c = { ...config };
+            if (String(c.use_page_weights) !== 'false') {
+              try { const w = JSON.parse(localStorage.getItem('cryptoScannerWeights') || 'null'); if (w) c.rating_weights = w; } catch { /* default weights */ }
+            }
+            delete c.use_page_weights;
+            const { data } = await api.post('/crypto-futures/start', c);
             return data;
           }}
           onStop={async (sid) => { await api.post('/crypto-futures/stop', { sid }); }}

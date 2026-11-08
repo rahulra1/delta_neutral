@@ -5747,7 +5747,10 @@ def _build_crypto_futures(params):
         cooldown_hours=float(params.get('cooldown_hours', 24)),
         scan_interval_min=int(params.get('scan_interval_min', 15)),
         price_check_sec=int(params.get('price_check_sec', 15)),
-        dry_run=_as_bool(params.get('dry_run', True)))
+        dry_run=_as_bool(params.get('dry_run', True)),
+        # runs started before the rating existed have no rating_mode -> 'off' = unchanged behaviour
+        rating_mode=params.get('rating_mode') or 'off', min_rating=float(params.get('min_rating') or 0),
+        rating_weights=params.get('rating_weights') if isinstance(params.get('rating_weights'), dict) else None)
 
 
 def _crypto_futures_setup(entry, live):
@@ -5836,7 +5839,9 @@ def crypto_futures_start():
              'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     crypto_futures_strategies[sid] = entry
     mode = 'paper' if params['dry_run'] else 'LIVE'
-    name = f"Crypto Scanner Futures (${amount:,.0f}/trade, max {params.get('max_positions', 3)} open, {mode})"
+    rmode = params.get('rating_mode') or 'off'
+    rtxt = '' if rmode == 'off' else f", rating {'filter' if rmode == 'filter' else 'entries'} >= {params.get('min_rating', 0)}"
+    name = f"Crypto Scanner Futures (${amount:,.0f}/trade, max {params.get('max_positions', 3)} open{rtxt}, {mode})"
     track_strategy(sid, 'Crypto Scanner Futures', name, current_user_id(),
                    details={**params, 'profile_id': profile_id, 'asset': 'CRYPTO'})
     entry['thread'] = threading.Thread(target=_crypto_futures_thread, args=(sid, entry), daemon=True)

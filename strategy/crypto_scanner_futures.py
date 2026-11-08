@@ -46,7 +46,8 @@ class CryptoScannerFutures:
     def __init__(self, amount_usd=100.0, max_positions=3, max_trades_per_day=6, stop_mode='vwap',
                  stop_pct=1.5, rr=2.0, max_hold_hours=24, min_turnover_usd=1_000_000,
                  require_sector_bias=True, sectors='', allow_long=True, allow_short=True,
-                 cooldown_hours=24, scan_interval_min=15, price_check_sec=15, dry_run=True):
+                 cooldown_hours=24, scan_interval_min=15, price_check_sec=15, dry_run=True,
+                 rating_mode='off', min_rating=0.0, rating_weights=None):
         self.amount_usd = float(amount_usd)
         self.max_positions = max(1, int(max_positions))
         self.max_trades_per_day = max(1, int(max_trades_per_day))
@@ -62,6 +63,15 @@ class CryptoScannerFutures:
         self.scan_interval = max(1, int(scan_interval_min)) * 60
         self.price_check_sec = max(5, int(price_check_sec))
         self.dry_run = bool(dry_run)
+        # Weighted rating (api.crypto_scanner: News / Twitter / RSI / EMA 7-20, 0-100, 50 = neutral):
+        #   'off'    -> old behaviour: scanner LONG/SHORT setups only, scanner order
+        #   'filter' -> scanner LONG/SHORT setups whose rating >= min_rating, best rating first
+        #   'rating' -> ANY coin (setup, WATCH or none) whose rating >= min_rating, in its trade direction,
+        #               best rating first (still needs a VWAP stop plan, min turnover, cooldown, sides)
+        self.rating_mode = rating_mode if rating_mode in ('off', 'filter', 'rating') else 'off'
+        self.min_rating = float(min_rating or 0)
+        self.rating_weights = ({k: float(v) for k, v in rating_weights.items()}
+                               if isinstance(rating_weights, dict) and rating_weights else None)
 
         self.legs = []
         self._legs_lock = threading.Lock()
@@ -94,7 +104,8 @@ class CryptoScannerFutures:
             'require_sector_bias': self.require_sector_bias, 'sectors': ','.join(self.sectors),
             'allow_long': self.allow_long, 'allow_short': self.allow_short, 'cooldown_hours': self.cooldown_hours,
             'scan_interval_min': self.scan_interval // 60, 'price_check_sec': self.price_check_sec,
-            'dry_run': self.dry_run,
+            'dry_run': self.dry_run, 'rating_mode': self.rating_mode, 'min_rating': self.min_rating,
+            'rating_weights': self.rating_weights,
         }
 
     # ------------------------------------------------------------------ lifecycle
@@ -119,6 +130,12 @@ class CryptoScannerFutures:
               f"min turnover ${self.min_turnover_usd:,.0f} | sides: "
               f"{'/'.join(s for s, ok in (('LONG', self.allow_long), ('SHORT', self.allow_short)) if ok)} | "
               f"scan every {self.scan_interval // 60} min")
+        if self.rating_mode != 'off':
+            from api.crypto_scanner import WEIGHTS
+            w = self.rating_weights or WEIGHTS
+            print(f"{TAG} Rating {'filter on scanner setups' if self.rating_mode == 'filter' else 'decides entries (any coin)'}"
+                  f": rating >= {self.min_rating:g}/100, best first | weights "
+                  + ', '.join(f"{k} {v:g}%" for k, v in w.items() if v))
         if not self.dry_run:
             print(f"{TAG} ⚠ LIVE: real market orders on Delta Exchange. Margin/leverage follow your Delta account "
                   f"settings for each product.")
@@ -195,12 +212,11 @@ class CryptoScannerFutures:
             except Exception as e:
                 print(f"{TAG}   {sec['sector']}: unavailable ({e})")
                 continue
-            for r in d['stocks']:
+            for r in self._candidates(d['stocks']):
                 if free <= 0 or left_today <= 0:
                     break
-                if r['setup'] not in ('LONG', 'SHORT') or not r.get('plan'):
-                    continue
-                if (r['setup'] == 'LONG' and not self.allow_long) or (r['setup'] == 'SHORT' and not self.allow_short):
+                side_key = r['direction'] if self.rating_mode == 'rating' else r['setup']
+                if (side_key == 'LONG' and not self.allow_long) or (side_key == 'SHORT' and not self.allow_short):
                     continue
                 sym = r['symbol']
                 if sym in held or sym in taken:
@@ -223,8 +239,31 @@ class CryptoScannerFutures:
             print(f"{TAG}   no new entry this scan")
         self._persist_state()
 
+    def _rating(self, r):
+        """The coin's weighted rating with this strategy's weights (falls back to the scanner's default weights)."""
+        if self.rating_weights:
+            from api.crypto_scanner import rating
+            return rating(r.get('components') or {}, self.rating_weights)
+        return r.get('rating')
+
+    def _candidates(self, rows):
+        """Coins of one sector to try, in order, according to rating_mode (see __init__)."""
+        if self.rating_mode == 'off':
+            return [r for r in rows if r['setup'] in ('LONG', 'SHORT') and r.get('plan')]
+        # the VWAP stop needs the scanner's stop plan (price on the trade side of VWAP); a fixed % stop does not
+        has_stop = (lambda r: bool(r.get('plan'))) if self.stop_mode == 'vwap' else (lambda r: True)
+        pool = [r for r in rows if has_stop(r)
+                and (self.rating_mode == 'rating' or r['setup'] in ('LONG', 'SHORT'))]
+        out = []
+        for r in pool:
+            rt = self._rating(r)
+            if rt is None or rt < self.min_rating:
+                continue
+            out.append(dict(r, _rating=rt))
+        return sorted(out, key=lambda r: -r['_rating'])
+
     def _enter(self, sec, r):
-        side = 'buy' if r['setup'] == 'LONG' else 'sell'
+        side = 'buy' if (r['direction'] if self.rating_mode == 'rating' else r['setup']) == 'LONG' else 'sell'
         sign = 1 if side == 'buy' else -1
         price, cv = r['price'], r['contract_value']
         lots = self.lots_for(price, cv)
@@ -258,12 +297,18 @@ class CryptoScannerFutures:
         self._day_trades = {today: self._day_trades.get(today, 0) + 1}
         self.trade_log.append({'ts': now.isoformat(), 'action': side.upper(), 'symbol': r['symbol'], 'lots': lots,
                                'price': round(fill, 8), 'notional': round(notional, 2), 'sector': sec['sector'],
-                               'reason': f"{r['setup']} setup", 'mode': self.mode})
+                               'reason': f"{r['setup'] or 'no setup'} {r['direction']}"
+                                         + (f", rating {r['_rating']:g}" if r.get('_rating') is not None else ''),
+                               'rating': r.get('_rating'), 'components': r.get('components'), 'mode': self.mode})
+        leg['rating'] = r.get('_rating')
         self._track_open(leg)
         risk = notional * stop_pct / 100
         print(f"{TAG} [{self.mode}] {'LONG' if side == 'buy' else 'SHORT'} {r['symbol']} x{lots} lots "
               f"@ {fill:.6g} = ${notional:,.2f} ({cv:g} {r['ticker']}/lot) | {sec['sector']} {sec['pchange']:+.2f}% "
-              f"| RVOL {r['rvol']} | OI 6h {r['oi_chg_6h_pct']}%")
+              f"| RVOL {r['rvol']} | OI 6h {r['oi_chg_6h_pct']}%"
+              + (f" | rating {r['_rating']:g} (RSI {r.get('rsi')}, EMA7/20 {r.get('ema_state')}, "
+                 f"news {(r.get('components') or {}).get('news')}, X {(r.get('components') or {}).get('twitter')})"
+                 if r.get('_rating') is not None else ''))
         print(f"{TAG}   stop {stop:.6g} (-{stop_pct:.2f}% ≈ -${risk:,.2f}) / target {target:.6g} "
               f"(+{self.rr * stop_pct:.2f}% ≈ +${risk * self.rr:,.2f}) | est. fees ${fee * 2:,.2f} round trip")
         return True
