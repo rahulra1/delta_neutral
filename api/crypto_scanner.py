@@ -19,6 +19,7 @@ Sources (all public, no login):
 """
 
 import logging
+import math
 import re
 import threading
 import time
@@ -47,6 +48,14 @@ OI_BUILD_PCT = 2.0      # 6h OI change needed to call it a build-up / unwinding
 FUNDING_HOT = 0.05      # % per funding interval: longs above this (or shorts below -this) are crowded
 STOP_MIN_PCT, STOP_MAX_PCT = 0.75, 3.0
 MIN_TURNOVER = 250_000  # 24h USD turnover needed for a LONG/SHORT setup (thinner books = noisy signals, bad fills)
+RSI_LEN = 14            # 1h RSI
+EMA_FAST, EMA_SLOW = 7, 20   # 1h EMA crossover (user's choice: 7 / 20)
+FRESH_CROSS_BARS = 3    # a cross within this many 1h bars counts as "fresh"
+# Weighted rating (0-100, 50 = neutral). Each component is scored -1..+1 IN THE TRADE DIRECTION; a component with
+# no data is left out and the remaining weights are re-normalised. The UI lets the user change these weights.
+# User's weights (Nov 2026): Twitter 25%, News 35%, Technical 40% = RSI 20% + EMA 7/20 crossover 20%.
+# 'setup' (the scanner's RS / VWAP / RVOL / OI / funding checks) is available but weighted 0 by default.
+WEIGHTS = {'news': 35, 'twitter': 25, 'rsi': 20, 'ema': 20, 'setup': 0}
 TAKER_FEE = 0.0005 * 1.18                          # Delta taker 0.05% + 18% GST, per side
 MAJOR_3 = {'BTC', 'ETH', 'XRP', 'SOL', 'BNB', 'ADA', 'TRX', 'LTC', 'DOT', 'UNI', 'TON', 'SUI', 'APT', 'ZEC', 'XMR'}
 
@@ -182,8 +191,38 @@ def _candles(symbol, hours=8 * 24):
                     'c': _f(c['close']), 'v': _f(c.get('volume'))} for c in rows), key=lambda c: c['t'])
 
 
+def _rsi(closes, n=14):
+    """Wilder RSI of the last close (None if not enough bars)."""
+    if len(closes) < n + 1:
+        return None
+    gains = [max(0.0, b - a) for a, b in zip(closes, closes[1:])]
+    losses = [max(0.0, a - b) for a, b in zip(closes, closes[1:])]
+    ag, al = sum(gains[:n]) / n, sum(losses[:n]) / n
+    for g, l in zip(gains[n:], losses[n:]):
+        ag, al = (ag * (n - 1) + g) / n, (al * (n - 1) + l) / n
+    return 100.0 if al == 0 else round(100 - 100 / (1 + ag / al), 1)
+
+
+def _ema_series(closes, n):
+    k, out = 2 / (n + 1), []
+    for c in closes:
+        out.append(c if not out else c * k + out[-1] * (1 - k))
+    return out
+
+
+def _ema_cross(closes, fast=EMA_FAST, slow=EMA_SLOW):
+    """{'state': 'BULL'|'BEAR', 'bars_since_cross': int|None, 'fast', 'slow'} on closed 1h bars."""
+    if len(closes) < slow * 3:
+        return None
+    ef, es = _ema_series(closes, fast), _ema_series(closes, slow)
+    diff = [a - b for a, b in zip(ef, es)][slow * 2:]               # skip the warm-up
+    state = 'BULL' if diff[-1] > 0 else 'BEAR'
+    since = next((i for i in range(1, len(diff)) if (diff[-i] > 0) != (diff[-i - 1] > 0)), None)
+    return {'state': state, 'bars_since_cross': since, 'fast': round(ef[-1], 8), 'slow': round(es[-1], 8)}
+
+
 def _intraday(symbol):
-    """1h / 4h / 6h change, rolling-24h VWAP, 24h and 1h relative volume from 1h candles."""
+    """1h / 4h / 6h change, rolling-24h VWAP, 24h and 1h relative volume, RSI and EMA cross from 1h candles."""
     now = time.time()
     cs = [c for c in _candles(symbol) if c['t'] <= now]          # Delta also returns the next (empty) hour
     closed = [c for c in cs if c['t'] + 3600 <= now]
@@ -198,6 +237,7 @@ def _intraday(symbol):
     days = [d for d in days if d > 0]
     hourly = [c['v'] for c in prior if c['v'] > 0]
     ch = lambda k: round((last / closed[-k]['c'] - 1) * 100, 2) if len(closed) >= k and closed[-k]['c'] else None  # noqa: E731
+    closes = [c['c'] for c in closed]
     return {
         'chg_1h': ch(1), 'chg_4h': ch(4), 'chg_6h': ch(6),
         'vwap': round(pv / vol24, 8) if vol24 else None,
@@ -205,6 +245,7 @@ def _intraday(symbol):
         'rvol_1h': round(closed[-1]['v'] / (sum(hourly) / len(hourly)), 2) if hourly and closed[-1]['v'] else None,
         'high_24h': max(c['h'] for c in day), 'low_24h': min(c['l'] for c in day),
         'spark': [round(c['c'], 8) for c in closed[-48:]],
+        'rsi': _rsi(closes, RSI_LEN), 'ema': _ema_cross(closes),
     }
 
 
@@ -241,11 +282,29 @@ def _analyse(r, sec_pchg, bias, intra, news):
         plan = {'side': direction, 'entry': r['price'], 'stop': r['price'] * (1 - sign * dist / 100),
                 'stop_pct': round(dist, 2), 'stop_basis': f'24h VWAP (clamped {STOP_MIN_PCT}-{STOP_MAX_PCT}%)'}
     n = news or {}
+    avail = [v for v in checks.values() if v is not None]
+    ema = intra.get('ema') if intra else None
+    rsi = intra.get('rsi') if intra else None
+    components = {
+        # no graded headline / listing = neutral 0 (news WAS checked), not "unknown": otherwise a coin with no news
+        # would get the full 100% weight on technicals and look better than a coin with mixed news
+        'news': news_signal(n) or 0.0,
+        'twitter': None,                                  # filled in by get_sector_coins when X is configured
+        'rsi': rsi_signal(rsi, sign),
+        'ema': ema_signal(ema, sign),
+        'setup': round(2 * sum(1 for v in avail if v) / len(avail) - 1, 3) if avail else None,
+    }
+    if components['news']:
+        components['news'] = round(sign * components['news'], 3)       # bullish news helps a LONG, hurts a SHORT
     return dict(r, rel_to_sector=round(r['pchange'] - sec_pchg, 2), direction=direction, buildup=buildup, thin=thin,
                 checks=checks, score=passed, setup=direction if core else ('WATCH' if passed >= 3 else None),
                 plan=plan, **({k: intra[k] for k in ('chg_1h', 'chg_4h', 'chg_6h', 'vwap', 'rvol', 'rvol_1h', 'spark')}
                               if intra else {'chg_1h': None, 'chg_4h': None, 'chg_6h': None, 'vwap': None,
                                              'rvol': None, 'rvol_1h': None, 'spark': []}),
+                rsi=rsi, ema_state=ema['state'] if ema else None,
+                ema_bars_since_cross=ema['bars_since_cross'] if ema else None,
+                ema_fresh=bool(ema and ema['bars_since_cross'] is not None and ema['bars_since_cross'] <= FRESH_CROSS_BARS),
+                components=components, rating=rating(components), x=None,
                 news_count=len(n.get('headlines', [])), news_tier=n.get('top_tier'),
                 events_count=len(n.get('events', [])), listing=n.get('listing'))
 
@@ -355,6 +414,82 @@ def _news_by_ticker(tickers, with_events=True):
     return out
 
 
+# --------------------------------------------------------------------------- weighted rating
+NEWS_POS = re.compile(r"\b(approv\w+|lists?|listing|listed|launch\w*|mainnet|upgrade\w*|partner\w*|integrat\w+|"
+                      r"buy-?backs?|burns?|burned|adopt\w+|inflows?|surg\w+|rall\w+|soar\w*|jumps?|record|all-time high|"
+                      r"bullish|raises?|raised|funding|acquir\w+|accumulat\w+|wins?|green-?light\w*)\b", re.I)
+NEWS_NEG = re.compile(r"\b(hack\w*|exploit\w*|drain\w*|stolen|breach\w*|delist\w*|lawsuits?|sues?|sued|charg(?:es|ed)|"
+                      r"fraud|scam|rug|bans?|banned|halt\w*|outages?|liquidat\w+|sell-?off|dump\w*|plung\w+|crash\w*|"
+                      r"investigat\w+|probe|fines?|fined|penalt\w+|unlocks?|vesting|bearish|downgrad\w+|suspend\w*|"
+                      r"outflows?|tumbl\w+|slump\w*)\b", re.I)
+TIER_W = {'A': 1.0, 'B': 0.6, 'C': 0.3, 'R': 0.8}
+
+
+def news_direction(text, tier=None):
+    """+1 bullish / -1 bearish / 0 neutral headline. A token unlock (tier R) is always bearish."""
+    if tier == 'R':
+        return -1
+    p, n = len(NEWS_POS.findall(text)), len(NEWS_NEG.findall(text))
+    return 1 if p > n else -1 if n > p else 0
+
+
+def news_signal(news, now=None):
+    """Net news direction -1..+1 from graded headlines (half-life 24h) + exchange listing notices. None = no news."""
+    now = now or time.time()
+    total, seen = 0.0, 0
+    for h in (news or {}).get('headlines', []):
+        d = news_direction(h['title'] + '. ' + h.get('summary', ''), h.get('tier'))
+        if not d:
+            continue
+        w = TIER_W.get(h.get('tier'), 0.3)
+        age_h = max(0.0, (now - h['ts']) / 3600)
+        total += d * w * 0.5 ** (age_h / 24)
+        seen += 1
+    lst = (news or {}).get('listing')
+    if lst:
+        total += 1.0 if lst['kind'] in ('new', 'add') else -1.0
+        seen += 1
+    if not seen:
+        return None
+    return round(math.tanh(total), 3)
+
+
+def rsi_signal(rsi, sign):
+    """RSI in the trade direction: momentum zone 50-70 (long) / 30-50 (short) = +1, stretched = small, wrong side = -1."""
+    if rsi is None:
+        return None
+    r = rsi if sign > 0 else 100 - rsi
+    if 50 <= r <= 70:
+        return 1.0
+    if 70 < r <= 80:
+        return 0.3
+    if r > 80:
+        return -0.5                                  # overbought (long) / oversold (short): late, risk of snap-back
+    if 45 <= r < 50:
+        return -0.3
+    return -1.0
+
+
+def ema_signal(ema, sign):
+    """EMA 7/20 on 1h in the trade direction: aligned = +1 (fresh cross in our favour too), against = -1."""
+    if not ema:
+        return None
+    aligned = (ema['state'] == 'BULL') == (sign > 0)
+    return 1.0 if aligned else -1.0
+
+
+def rating(components, weights=None):
+    """Weighted 0-100 (50 neutral) from -1..+1 components; missing components drop out and weights re-normalise."""
+    w = weights or WEIGHTS
+    num = den = 0.0
+    for k, v in components.items():
+        if v is None or not w.get(k):
+            continue
+        num += w[k] * v
+        den += w[k]
+    return round(50 + 50 * num / den, 1) if den else None
+
+
 # --------------------------------------------------------------------------- public API
 
 def get_overview():
@@ -389,12 +524,38 @@ def get_sector_coins(sector):
                          ex.map(lambda c: _safe_intraday(c['symbol']), coins)))
     news = _news_by_ticker([c['ticker'] for c in coins], with_events=False)
     rows = [_analyse(c, sec['pchange'], sec['bias'], intra.get(c['symbol']), news.get(c['ticker'])) for c in coins]
+    _add_twitter(rows)
     rows.sort(key=lambda r: (r['setup'] in ('LONG', 'SHORT'), r['score'], r['rvol'] or 0, abs(r['rel_to_sector'])),
               reverse=True)
+    from api import x_social
     return dict(sec, stocks=rows, intraday_missing=sum(1 for v in intra.values() if not v),
                 timestamp=datetime.now(UTC).isoformat(),
                 params={'rvol_hot': RVOL_HOT, 'min_turnover': MIN_TURNOVER, 'oi_build_pct': OI_BUILD_PCT, 'funding_hot': FUNDING_HOT,
-                        'stop_min_pct': STOP_MIN_PCT, 'stop_max_pct': STOP_MAX_PCT, 'taker_fee': TAKER_FEE})
+                        'stop_min_pct': STOP_MIN_PCT, 'stop_max_pct': STOP_MAX_PCT, 'taker_fee': TAKER_FEE,
+                        'weights': WEIGHTS, 'rsi_len': RSI_LEN, 'ema_fast': EMA_FAST, 'ema_slow': EMA_SLOW,
+                        'fresh_cross_bars': FRESH_CROSS_BARS, 'x_configured': x_social.configured(),
+                        'x_max_coins': X_MAX_COINS})
+
+
+X_MAX_COINS = 10        # X recent search is rate-limited: only the most promising coins of a sector get Twitter data
+
+
+def _add_twitter(rows):
+    """Twitter/X sentiment (official API, cached 30 min) for the sector's setups / WATCH coins, best first."""
+    from api import x_social
+    if not x_social.configured():
+        return
+    cands = sorted([r for r in rows if r['setup'] in ('LONG', 'SHORT', 'WATCH')],
+                   key=lambda r: (r['setup'] != 'WATCH', r['score'], r['turnover_usd']), reverse=True)[:X_MAX_COINS]
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        res = list(ex.map(lambda r: x_social.sentiment(r['ticker']), cands))
+    sign_of = {'LONG': 1, 'SHORT': -1}
+    for r, x in zip(cands, res):
+        if not x:
+            continue
+        r['x'] = {k: x[k] for k in ('score', 'tweets', 'bullish', 'bearish')}
+        r['components']['twitter'] = round(sign_of[r['direction']] * x['score'], 3)
+        r['rating'] = rating(r['components'])
 
 
 def _safe_intraday(sym):
@@ -419,4 +580,9 @@ def get_coin_news(ticker):
     ticker = ticker.upper()
     if ticker not in _universe_for_news():
         raise ValueError(f'Unknown coin: {ticker}')
-    return dict(_news_by_ticker([ticker])[ticker], ticker=ticker)
+    from api import x_social
+    n = _news_by_ticker([ticker])[ticker]
+    for h in n['headlines']:
+        h['direction'] = news_direction(h['title'] + '. ' + h.get('summary', ''), h.get('tier'))
+    return dict(n, ticker=ticker, news_score=news_signal(n), x_configured=x_social.configured(),
+                x=x_social.sentiment(ticker) if x_social.configured() else None)

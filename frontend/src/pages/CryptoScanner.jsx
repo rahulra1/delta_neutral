@@ -4,6 +4,51 @@ import api from '../api';
 const REFRESH_MS = 60000;
 const SIZING_KEY = 'cryptoScannerSizing';
 const DEFAULT_SIZING = { capital: 10000, riskPct: 0.5, rr: 2, leverage: 5 };
+const WEIGHTS_KEY = 'cryptoScannerWeights';
+// Default weights (user's choice, Nov 2026): Twitter 25%, News 35%, Technical 40% = RSI 20% + EMA 7/20 cross 20%.
+const DEFAULT_WEIGHTS = { news: 35, twitter: 25, rsi: 20, ema: 20, setup: 0 };
+const COMPONENTS = [
+  { key: 'news', label: 'News', title: 'Graded headlines (half-life 24h) + exchange listing notices, in the trade direction. No news = neutral.' },
+  { key: 'twitter', label: 'Twitter / X', title: 'Engagement-weighted bullish vs bearish tweets (official X API; needs X_BEARER_TOKEN). Left out until configured.' },
+  { key: 'rsi', label: 'RSI 14 (1h)', title: 'LONG: RSI 50–70 = +1, 70–80 = +0.3, >80 = −0.5, 45–50 = −0.3, <45 = −1 (SHORT mirrored)' },
+  { key: 'ema', label: 'EMA 7/20 (1h)', title: 'EMA 7 above EMA 20 = +1 for LONG / −1 for SHORT (and the reverse)' },
+  { key: 'setup', label: 'Scanner checks', title: 'RS / VWAP / RVOL / OI / funding checks passed, −1..+1' },
+];
+
+function loadWeights() {
+  try { return { ...DEFAULT_WEIGHTS, ...JSON.parse(localStorage.getItem(WEIGHTS_KEY) || '{}') }; } catch { return DEFAULT_WEIGHTS; }
+}
+
+// Same formula as api/crypto_scanner.rating(): weighted mean of the −1..+1 components, missing ones drop out, 50 = neutral.
+function rate(components, w) {
+  let num = 0, den = 0;
+  for (const c of COMPONENTS) {
+    const v = components?.[c.key];
+    if (v == null || !w[c.key]) continue;
+    num += w[c.key] * v; den += w[c.key];
+  }
+  return den ? Math.round((50 + 50 * num / den) * 10) / 10 : null;
+}
+const rateColor = v => (v == null ? 'var(--muted)' : v >= 70 ? 'var(--green)' : v <= 40 ? 'var(--red)' : 'var(--text)');
+
+function WeightInputs({ weights, setWeights, xConfigured }) {
+  const total = COMPONENTS.reduce((s, c) => s + (Number(weights[c.key]) || 0), 0);
+  return (
+    <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 8 }}>
+      <div style={{ fontSize: '.7rem', fontWeight: 700, color: 'var(--muted)', alignSelf: 'center' }}>Rating weights (%)</div>
+      {COMPONENTS.map(c => (
+        <label key={c.key} title={c.title} style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: '.64rem', color: 'var(--muted)', fontWeight: 600 }}>
+          {c.label}{c.key === 'twitter' && !xConfigured ? ' (not set up)' : ''}
+          <input type="number" min="0" step="5" value={weights[c.key]}
+            onChange={e => setWeights(w => ({ ...w, [c.key]: Math.max(0, Number(e.target.value) || 0) }))}
+            style={{ width: 70, padding: '5px 7px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)', fontFamily: 'inherit', fontSize: '.8rem', color: 'var(--text)' }} />
+        </label>
+      ))}
+      <span style={{ fontSize: '.66rem', color: total === 100 ? 'var(--muted)' : 'var(--red)', alignSelf: 'center' }}>total {total}%{total !== 100 ? ' (weights are re-normalised)' : ''}</span>
+      <button type="button" className="btn btn-outline" style={{ padding: '4px 10px', fontSize: '.7rem' }} onClick={() => setWeights(DEFAULT_WEIGHTS)}>Reset</button>
+    </div>
+  );
+}
 
 const CHECKS = [
   { key: 'rel_strength', label: 'RS', title: 'Stronger (long) / weaker (short) than its sector over 24h' },
@@ -169,13 +214,31 @@ function CoinNews({ ticker, onClose }) {
               </div>
             )}
             {d.headlines.length === 0 && <div style={{ fontSize: '.78rem', color: 'var(--muted)' }}>No headline naming {ticker} in the major crypto feeds.</div>}
+            {d.news_score != null && <div style={{ fontSize: '.72rem', marginBottom: 6 }}>News score <b style={{ color: d.news_score > 0 ? 'var(--green)' : d.news_score < 0 ? 'var(--red)' : 'var(--text)' }}>{d.news_score > 0 ? '+' : ''}{d.news_score}</b> <span style={{ color: 'var(--muted)' }}>(−1 bearish … +1 bullish)</span></div>}
             {d.headlines.map((h, i) => (
               <div key={i} style={{ fontSize: '.78rem', padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
+                {h.direction ? <span style={{ color: h.direction > 0 ? 'var(--green)' : 'var(--red)', fontWeight: 800, marginRight: 4 }} title={h.direction > 0 ? 'bullish' : 'bearish'}>{h.direction > 0 ? '▲' : '▼'}</span> : null}
                 {h.tier && <span className={TIER[h.tier].cls} style={{ fontSize: '.6rem', padding: '1px 6px', marginRight: 6 }}>{TIER[h.tier].label} · {h.category}</span>}
                 <a href={h.link} target="_blank" rel="noreferrer" style={{ fontWeight: 600 }}>{h.title}</a>
                 <div style={{ color: 'var(--muted)', fontSize: '.68rem' }}>{h.source} · {ago(h.ts)} · {ist(h.ts)} IST</div>
               </div>
             ))}
+          </div>
+          <div>
+            <div style={{ fontSize: '.72rem', fontWeight: 700, color: 'var(--muted)', marginBottom: 6 }}>TWITTER / X (last 7 days)</div>
+            {!d.x_configured && <div style={{ fontSize: '.78rem', color: 'var(--muted)' }}>Not set up — add an X API bearer token with search access as X_BEARER_TOKEN in .env and restart.</div>}
+            {d.x_configured && !d.x && <div style={{ fontSize: '.78rem', color: 'var(--muted)' }}>Unavailable right now (rate limit or API error).</div>}
+            {d.x && (
+              <>
+                <div style={{ fontSize: '.74rem', marginBottom: 6 }}>Score <b style={{ color: d.x.score > 0 ? 'var(--green)' : d.x.score < 0 ? 'var(--red)' : 'var(--text)' }}>{d.x.score > 0 ? '+' : ''}{d.x.score}</b> · {d.x.tweets} tweets · {d.x.bullish} bullish / {d.x.bearish} bearish</div>
+                {d.x.top.map((t, i) => (
+                  <div key={i} style={{ fontSize: '.76rem', padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
+                    <a href={`https://x.com/i/web/status/${t.id}`} target="_blank" rel="noreferrer">{t.text}</a>
+                    <div style={{ color: 'var(--muted)', fontSize: '.66rem' }}>♥ {t.likes} · {t.created_at ? new Date(t.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : ''} IST</div>
+                  </div>
+                ))}
+              </>
+            )}
           </div>
           <div>
             <div style={{ fontSize: '.72rem', fontWeight: 700, color: 'var(--muted)', marginBottom: 6 }}>CALENDAR (CoinMarketCal, last 7 days → next 30 days)</div>
@@ -193,9 +256,14 @@ function CoinNews({ ticker, onClose }) {
   );
 }
 
-function CoinsTable({ data, sizing, onlySetups, onNews, newsFor }) {
-  const rows = onlySetups ? data.stocks.filter(r => r.setup) : data.stocks;
+function CoinsTable({ data, sizing, onlySetups, onNews, newsFor, weights, sortByRating }) {
+  const filtered = (onlySetups ? data.stocks.filter(r => r.setup) : data.stocks).map(r => ({ ...r, _rating: rate(r.components, weights) }));
+  const rows = sortByRating ? [...filtered].sort((a, b) => (b._rating ?? -1) - (a._rating ?? -1)) : filtered;
   if (!rows.length) return <div style={{ padding: 20, color: 'var(--muted)', fontSize: '.85rem' }}>No coins match.</div>;
+  const p = data.params;
+  const fmtC = v => (v == null ? 'n/a' : `${v > 0 ? '+' : ''}${v.toFixed(2)}`);
+  const ratingTitle = r => COMPONENTS.map(c => `${c.label}: ${fmtC(r.components?.[c.key])} × ${weights[c.key]}%`).join('\n')
+    + `\n= ${r._rating ?? '–'} / 100 (50 = neutral, in the ${r.direction} direction)`;
   const th = { padding: '8px 6px', fontSize: '.64rem', color: 'var(--muted)', fontWeight: 700, textAlign: 'right', whiteSpace: 'nowrap', borderBottom: '1px solid var(--border)', position: 'sticky', top: 0, background: 'var(--card)' };
   const td = { padding: '7px 6px', fontSize: '.76rem', textAlign: 'right', whiteSpace: 'nowrap', borderBottom: '1px solid var(--border)' };
   const fee = data.params.taker_fee;
@@ -206,7 +274,10 @@ function CoinsTable({ data, sizing, onlySetups, onNews, newsFor }) {
           <tr>
             {[['Coin', 'left'], ['Price'], ['24h'], ['4h'], ['1h'], ['vs Sector', 'right', 'Coin 24h % minus sector median'], ['48h'],
               ['RVOL', 'right', 'Last-24h volume ÷ 7-day average (1h: last hour ÷ average hour)'], ['VWAP 24h'], ['OI 6h', 'left'], ['Funding', 'right', '% per funding interval'],
-              ['Turnover'], ['News', 'left'], ['Checks', 'left'], ['Setup', 'center'], ['Lots'], ['Entry'], ['Stop'], ['Target'], ['Risk / Reward']].map(([h, a, t]) => (
+              ['Turnover'], ['News', 'left'], ['Rating', 'center', 'Weighted rating 0–100 in the trade direction (hover a value for the breakdown)'],
+              ['RSI', 'right', `RSI ${p.rsi_len ?? 14} on 1h closes`], ['EMA', 'center', `EMA ${p.ema_fast ?? 7}/${p.ema_slow ?? 20} on 1h — ▲ fast above slow, ★ = crossed within ${p.fresh_cross_bars ?? 3} bars`],
+              ['X', 'center', p.x_configured ? `Twitter/X sentiment (top ${p.x_max_coins} setups/WATCH per sector)` : 'Twitter/X not set up — add X_BEARER_TOKEN'],
+              ['Checks', 'left'], ['Setup', 'center'], ['Lots'], ['Entry'], ['Stop'], ['Target'], ['Risk / Reward']].map(([h, a, t]) => (
               <th key={h} scope="col" title={t} style={{ ...th, textAlign: a || 'right' }}>{h}</th>
             ))}
           </tr>
@@ -242,6 +313,18 @@ function CoinsTable({ data, sizing, onlySetups, onNews, newsFor }) {
                     style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontFamily: 'inherit' }}>
                     <NewsBadges r={r} /><span style={{ fontSize: '.6rem', color: 'var(--purple)' }}>details ›</span>
                   </button>
+                </td>
+                <td style={{ ...td, textAlign: 'center', fontWeight: 800, color: rateColor(r._rating) }} title={ratingTitle(r)}>
+                  {r._rating ?? '–'}
+                  <div style={{ fontSize: '.56rem', fontWeight: 500, color: 'var(--muted)' }}>news {fmtC(r.components?.news)}</div>
+                </td>
+                <td style={{ ...td, color: r.rsi == null ? 'var(--muted)' : r.rsi >= 70 ? 'var(--red)' : r.rsi <= 30 ? 'var(--green)' : 'var(--text)' }}>{r.rsi ?? '–'}</td>
+                <td style={{ ...td, textAlign: 'center' }} title={r.ema_bars_since_cross != null ? `last cross ${r.ema_bars_since_cross} bar(s) ago` : 'no cross in the window'}>
+                  {r.ema_state ? <span style={{ color: r.ema_state === 'BULL' ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>{r.ema_state === 'BULL' ? '▲' : '▼'}{r.ema_fresh ? '★' : ''}</span> : '–'}
+                </td>
+                <td style={{ ...td, textAlign: 'center', fontSize: '.66rem' }}
+                  title={r.x ? `${r.x.tweets} tweets · ${r.x.bullish} bullish / ${r.x.bearish} bearish` : (p.x_configured ? 'not fetched (only the top setups get X data)' : 'X API not set up')}>
+                  {r.x ? <span style={{ color: r.x.score > 0 ? 'var(--green)' : r.x.score < 0 ? 'var(--red)' : 'var(--muted)', fontWeight: 700 }}>{fmtC(r.x.score)}</span> : <span style={{ color: 'var(--muted)' }}>–</span>}
                 </td>
                 <td style={{ ...td, textAlign: 'left' }}><CheckDots checks={r.checks} /></td>
                 <td style={{ ...td, textAlign: 'center' }}>
@@ -316,8 +399,11 @@ export default function CryptoScanner() {
   const [news, setNews] = useState(null);
   const [newsFor, setNewsFor] = useState(null);
   const [sizing, setSizing] = useState(loadSizing);
+  const [weights, setWeights] = useState(loadWeights);
+  const [sortByRating, setSortByRating] = useState(false);
 
   useEffect(() => { localStorage.setItem(SIZING_KEY, JSON.stringify(sizing)); }, [sizing]);
+  useEffect(() => { localStorage.setItem(WEIGHTS_KEY, JSON.stringify(weights)); }, [weights]);
 
   const loadOverview = useCallback(() => {
     api.get('/crypto-scanner').then(r => { setOverview(r.data); setError(null); }).catch(e => setError(e.response?.data?.error || e.message));
@@ -421,13 +507,22 @@ export default function CryptoScanner() {
                 </div>
                 <SizingInputs sizing={sizing} setSizing={setSizing} />
               </div>
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '.76rem', marginBottom: 8, cursor: 'pointer' }}>
-                <input type="checkbox" checked={onlySetups} onChange={e => setOnlySetups(e.target.checked)} /> Show only setups / watch-list
-              </label>
+              <WeightInputs weights={weights} setWeights={setWeights} xConfigured={coins?.params?.x_configured} />
+              <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 8 }}>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '.76rem', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={onlySetups} onChange={e => setOnlySetups(e.target.checked)} /> Show only setups / watch-list
+                </label>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '.76rem', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={sortByRating} onChange={e => setSortByRating(e.target.checked)} /> Sort by rating
+                </label>
+              </div>
               {loading && <div style={{ padding: 20, color: 'var(--muted)', fontSize: '.85rem' }}>Loading coins and 1h candles…</div>}
               {coinsErr && !loading && <div style={{ padding: 12, color: 'var(--red)', fontSize: '.85rem' }}>Unavailable: {coinsErr}</div>}
-              {coins && coins.sector === selected && !loading && <CoinsTable data={coins} sizing={sizing} onlySetups={onlySetups} onNews={setNewsFor} newsFor={newsFor} />}
+              {coins && coins.sector === selected && !loading && <CoinsTable data={coins} sizing={sizing} onlySetups={onlySetups} onNews={setNewsFor} newsFor={newsFor} weights={weights} sortByRating={sortByRating} />}
               <div style={{ fontSize: '.66rem', color: 'var(--muted)', marginTop: 12, lineHeight: 1.6 }}>
+                Rating = weighted mean of News, Twitter/X, RSI {coins?.params.rsi_len ?? 14} and EMA {coins?.params.ema_fast ?? 7}/{coins?.params.ema_slow ?? 20} crossover (1h), each scored −1..+1 in the trade direction; 50 = neutral, 100 = everything agrees. A component with no data is left out and the other weights are re-normalised (no headline counts as neutral news).
+                {!coins?.params.x_configured && ' Twitter/X is not set up (needs an X API bearer token with search access in X_BEARER_TOKEN), so it is left out of the rating for now.'}
+                {' '}The rating is NOT backtested and does not change the LONG/SHORT setup or the Crypto Scanner Futures strategy.<br />
                 Direction follows the sector bias (MIXED sectors use each coin's own 24h direction). Setup = RS + VWAP + RVOL all pass and 24h turnover ≥ {fmtBig(coins?.params.min_turnover ?? 250000)}; WATCH = 3+ of the 5 checks.
                 Stop = rolling 24h VWAP clamped to {coins?.params.stop_min_pct ?? 0.75}–{coins?.params.stop_max_pct ?? 3}% from entry. Lots = capital × risk% ÷ (stop distance × coins per lot), capped at capital × leverage. Hover Lots for notional and margin, Risk/Reward for estimated fees.
                 Big-player activity is inferred from volume, VWAP, open interest and funding — it is not observed directly. These rules are NOT backtested; treat this as a screener, not a signal.
