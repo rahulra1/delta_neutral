@@ -387,6 +387,7 @@ class World:
 
 
 TRADES = []
+DAY_LOCK = {}          # day -> (time, 'day_target'|'day_stop', day P&L) when the daily limit fired
 
 
 class BTStrategy(so.NseSectorOptions):
@@ -473,6 +474,29 @@ def run(args, world):
                 if hit_sl or hit_tp:                                # SL first if both are inside the bar
                     _exit_at(s, world, leg, leg['stock_stop'] if hit_sl else leg['stock_target'],
                              'stop_loss' if hit_sl else 'take_profit')
+            # 1b) daily portfolio target / stop (net of charges): realised today + open positions marked
+            #     at this bar's close (option re-priced at the stock close, minus the exit charges)
+            if (args.day_tp or args.day_sl) and dstr not in DAY_LOCK:
+                realised = sum(t['net'] for t in TRADES if t['closed_at'][:10] == dstr)
+                open_mtm = 0.0
+                marks = []
+                for leg in s._open_legs():
+                    opt = world.option_ltp(leg['symbol'])
+                    if opt is None:
+                        continue
+                    buy, sell = leg['entry_price'] * leg['qty'], opt * leg['qty']
+                    open_mtm += sell - buy - so.estimate_charges(buy, sell)
+                    marks.append((leg, opt))
+                day_pnl = realised + open_mtm
+                hit = ('day_target' if args.day_tp and day_pnl >= args.day_tp else
+                       'day_stop' if args.day_sl and day_pnl <= -args.day_sl else None)
+                if hit:
+                    for leg, opt in marks:
+                        leg['stock_mark'] = world.spot(leg['underlying'])
+                        s._exit(leg, hit, opt=opt)
+                    DAY_LOCK[dstr] = (f"{minute // 60:02d}:{minute % 60:02d}", hit, round(day_pnl))
+                    s._finish_day(Clock.now, f"daily {'target' if hit == 'day_target' else 'stop'} "
+                                             f"hit (day P&L Rs {day_pnl:+,.0f})")
             # 2) the live loop, with the clock 61 s after the bar closed
             Clock.now = at(world.day, minute, 61)
             s._roll_day(Clock.now)
@@ -537,7 +561,9 @@ def report(args, days, books):
     print("\nNSE Sector Options — backtest of the live strategy code")
     print(f"{days[0]} .. {days[-1]}  ({len(days)} sessions)  |  {stop_txt} / target {args.target_pct}% on the "
           f"STOCK, square-off 15:15  |  max {args.max_open} open, {args.max_entries} entries/day  |  "
-          f"{args.candle}m close + {'5m VWAP' if not args.no_vwap else 'no VWAP'}  |  1 lot ATM, expiry >= 10 days")
+          f"{args.candle}m close + {'5m VWAP' if not args.no_vwap else 'no VWAP'}  |  1 lot ATM, expiry > 10 days"
+          + (f"  |  DAILY target Rs {args.day_tp:,.0f} / stop Rs {args.day_sl:,.0f} (net, checked every 5m bar close)"
+             if (args.day_tp or args.day_sl) else ''))
     if not T:
         print("No trades.")
         return
@@ -576,6 +602,23 @@ def report(args, days, books):
               f"{fmt(sum(t['gross'] for t in mt)):>9} | {sum(t['charges'] for t in mt):8,.0f} | {fmt(n):>9} | {fmt(cum):>10}")
     print("```")
 
+    print("\nDAILY (Net per session; Limit = daily target/stop that closed everything, with the time)")
+    print("```")
+    print(f"{'Day':10} | {'Trades':>6} | {'Net':>9} | {'Cumulative':>10} | Limit")
+    cum = 0.0
+    for d in days:
+        dt = [t for t in T if t['opened_at'][:10] == d]
+        n = sum(t['net'] for t in dt)
+        cum += n
+        lim = DAY_LOCK.get(d)
+        lim_txt = f"{'TARGET' if lim[1] == 'day_target' else 'STOP'} @ {lim[0]} (Rs {lim[2]:+,})" if lim else ''
+        print(f"{d:10} | {len(dt):6} | {fmt(n):>9} | {fmt(cum):>10} | {lim_txt}")
+    if args.day_tp or args.day_sl:
+        nt = sum(1 for v in DAY_LOCK.values() if v[1] == 'day_target')
+        ns = sum(1 for v in DAY_LOCK.values() if v[1] == 'day_stop')
+        print(f"Daily target hit on {nt} days, daily stop hit on {ns} days, of {len(days)}")
+    print("```")
+
     def table(title, keyfn):
         print(f"\n{title}")
         print("```")
@@ -587,7 +630,8 @@ def report(args, days, books):
         print("```")
 
     table("BY EXIT", lambda t: {'take_profit': 'Target', 'stop_loss': 'Stop', 'square_off': '15:15 square-off',
-                                'vwap_stop': 'VWAP close stop'}.get(t['exit_reason'], t['exit_reason']))
+                                'vwap_stop': 'VWAP close stop', 'day_target': 'Daily target (all closed)',
+                                'day_stop': 'Daily stop (all closed)'}.get(t['exit_reason'], t['exit_reason']))
     table("BY ENTRY TYPE", lambda t: {'late_join_live': 'Late joiner (live)'}.get(t['entry_trigger'], f"{args.candle}m close"))
     table("BY SIDE", lambda t: f"{t['direction']} ({'CE' if t['type'] == 'call' else 'PE'})")
     table("BY ENTRY HOUR", lambda t: t['opened_at'][11:13] + ':00')
@@ -629,6 +673,8 @@ def main():
     ap.add_argument('--max-watchlist', type=int, default=15)
     ap.add_argument('--candle', type=int, default=5, choices=(5, 15))
     ap.add_argument('--no-vwap', action='store_true')
+    ap.add_argument('--day-tp', type=float, default=0, help='daily net target Rs (0 = off): close all, no more entries')
+    ap.add_argument('--day-sl', type=float, default=0, help='daily net stop Rs (0 = off): close all, no more entries')
     ap.add_argument('--log', default=os.path.join(BT_DIR, 'nse_sector_options_orb.log'))
     args = ap.parse_args()
 

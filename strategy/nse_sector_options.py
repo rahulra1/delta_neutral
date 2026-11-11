@@ -10,7 +10,7 @@ Daily flow (IST, trading days only):
   3. Every completed 5-minute candle (candle_min, default 5: 09:50, 09:55 ... last entry, default 14:45):
        bullish stock: 5m close > 30-min high  (and > the 5-minute VWAP)  -> paper-BUY the ATM CALL
        bearish stock: 5m close < 30-min low   (and < the 5-minute VWAP)  -> paper-BUY the ATM PUT
-     Expiry = nearest with >= min_dte (default 10) days left. Price = Groww option-chain LTP.
+     Expiry = nearest with MORE than min_dte (default 10) days left. Price = Groww option-chain LTP.
      LATE JOINERS: a stock that joins the rotating watchlist after 09:50 and is ALREADY beyond its range
      (and the 5m VWAP) on the live price is entered immediately, without waiting for a candle close
      (the Groww spot used for the fill must confirm it).
@@ -20,9 +20,16 @@ Daily flow (IST, trading days only):
        target = stock moves target_pct % in favour
      else square-off at the exit time (default 15:15). Paper-SELL at the Groww option LTP.
   5. Estimated Groww F&O charges are deducted from the realized P&L.
+  6. Optional DAILY limit on the whole book (day_tp / day_sl, Rs, 0 = off): today's realised net P&L +
+     open positions marked at their LTP minus the charges to sell them. When it reaches +day_tp or
+     -day_sl, every open position is closed and no more entries are made that day.
 
-No real orders are ever placed (paper only). Needs a Groww profile with a valid token for
-the option chain / LTPs; the sector scan and candles use public NSE / Yahoo data.
+Modes (dry_run):
+  PAPER (default): no orders; fills at the Groww option LTP.
+  LIVE: real Groww MARKET orders, product NRML, quantity = lots x lot size. An entry is recorded only
+     after Groww confirms the BUY filled (fill price from the order, else the LTP). An exit marks the
+     position closed only after the SELL fills; a failed / rejected SELL keeps it open (exit_pending)
+     and is retried every monitor_interval s. Needs a Groww profile with a valid token.
 """
 
 import logging
@@ -108,13 +115,14 @@ def floor_candle(t, minutes=5):
 
 
 class NseSectorOptions(BaseStrategy):
+    DTE_STRICT = True          # expiry must be MORE than min_dte calendar days away (not equal)
 
     def __init__(self, entry_hour=9, entry_minute=45, exit_hour=15, exit_minute=15,
                  stop_pct=0.5, target_pct=0.75, lots=1, min_dte=10, max_premium=100000.0,
                  rescan_sec=60, sector_group='Sectoral', trading_days=None,
                  monitor_interval=15, run_immediately=False,
                  max_open=5, max_entries=6, max_watchlist=15, last_entry_hour=14, last_entry_minute=45,
-                 use_vwap=True, candle_min=5):
+                 use_vwap=True, candle_min=5, dry_run=True, day_tp=0.0, day_sl=0.0):
         self.entry_hour, self.entry_minute = int(entry_hour), int(entry_minute)
         self.exit_hour, self.exit_minute = int(exit_hour), int(exit_minute)
         self.last_entry_hour, self.last_entry_minute = int(last_entry_hour), int(last_entry_minute)
@@ -132,6 +140,14 @@ class NseSectorOptions(BaseStrategy):
         self.max_watchlist = max(1, int(max_watchlist))
         self.use_vwap = bool(use_vwap)
         self.candle_min = int(candle_min) if int(candle_min) in CANDLE_CHOICES else 5
+        # LIVE = real Groww MARKET orders (product NRML, quantity in units = lots x lot size)
+        self.dry_run = bool(dry_run)
+        # daily limits on the whole book, NET of charges (realised today + open positions marked to LTP);
+        # 0 = off. On a hit every open position is closed and no more entries are made that day.
+        self.day_tp = max(0.0, float(day_tp or 0))
+        self.day_sl = max(0.0, float(day_sl or 0))
+        self._day_start_pnl = 0.0         # cumulative_pnl when the current day started
+        self._day_limit = None            # {'day', 'kind': 'target'|'stop', 'pnl', 'time'} once hit today
 
         self.legs = []
         self._legs_lock = threading.Lock()
@@ -171,8 +187,13 @@ class NseSectorOptions(BaseStrategy):
             'trading_days': self.trading_days, 'monitoring_interval': self.monitor_interval,
             'max_open': self.max_open, 'max_entries': self.max_entries,
             'max_watchlist': self.max_watchlist, 'use_vwap': self.use_vwap, 'candle_min': self.candle_min,
-            'run_immediately': self.run_immediately, 'dry_run': True,
+            'run_immediately': self.run_immediately, 'dry_run': self.dry_run,
+            'day_tp': self.day_tp, 'day_sl': self.day_sl,
         }
+
+    @property
+    def _mode(self):
+        return 'PAPER' if self.dry_run else 'LIVE'
 
     # ------------------------------------------------------------------ lifecycle
     def initialize(self):
@@ -182,17 +203,29 @@ class NseSectorOptions(BaseStrategy):
         self._api_secret = get_api_secret()
         self._broker = getattr(_thread_local, 'broker', '')
         days = ','.join(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][d] for d in self.trading_days)
-        print(f"{TAG} Started [PAPER] | 30-min range 09:15-{self.entry_hour:02d}:{self.entry_minute:02d}, "
+        print(f"{TAG} Started [{self._mode}] | 30-min range 09:15-{self.entry_hour:02d}:{self.entry_minute:02d}, "
               f"{self.candle_min}m breakouts until {self.last_entry_hour:02d}:{self.last_entry_minute:02d}, "
               f"square-off {self.exit_hour:02d}:{self.exit_minute:02d} IST | days {days}")
         print(f"{TAG} Watchlist: up to {self.max_watchlist} {self.sector_group.lower()} LONG/SHORT/WATCH stocks, "
               f"rotated every {self.rescan_sec}s from the current top sectors | "
               f"entry: {self.candle_min}m close beyond the range" + (" + 5m VWAP" if self.use_vwap else "") +
               f" | max {self.max_open} open / {self.max_entries} entries a day | {self.lots} lot ATM CE/PE | "
-              f"exit on STOCK: SL -{self.stop_pct}% / TP +{self.target_pct}% | min {self.min_dte}d to expiry"
+              f"exit on STOCK: SL -{self.stop_pct}% / TP +{self.target_pct}% | expiry > {self.min_dte}d away"
               + (" | RUN-NOW (test)" if self.run_immediately else ""))
+        if self.day_tp or self.day_sl:
+            print(f"{TAG} Daily limit on the whole book (net of charges): "
+                  + (f"target +Rs {self.day_tp:,.0f}" if self.day_tp else "no target")
+                  + " / " + (f"stop -Rs {self.day_sl:,.0f}" if self.day_sl else "no stop")
+                  + " -> close everything, no more entries that day")
         if self._broker != 'groww':
+            if not self.dry_run:
+                print(f"{TAG} ❌ LIVE mode needs a Groww profile (profile broker is '{self._broker}') — not starting")
+                self._running = False
+                return False
             print(f"{TAG} ⚠ Profile broker is '{self._broker}', not 'groww' — option prices need a Groww profile")
+        if not self.dry_run:
+            print(f"{TAG} 🔴 LIVE MODE — real Groww MARKET orders (NRML), {self.lots} lot per trade. "
+                  f"A failed exit order keeps the position open and is retried every {self.monitor_interval}s.")
         open_legs = self._open_legs()
         if open_legs:
             print(f"{TAG} Resumed with {len(open_legs)} open position(s): "
@@ -209,6 +242,7 @@ class NseSectorOptions(BaseStrategy):
                 self._roll_day(now)
                 if self._open_legs():
                     self._manage_positions(now)
+                self._check_day_limit(now)
                 if force or self._entries_allowed(now):
                     if force or time.time() >= self._next_scan_ts:
                         self._next_scan_ts = time.time() + self.rescan_sec
@@ -222,10 +256,49 @@ class NseSectorOptions(BaseStrategy):
             self._interruptible_sleep(self._sleep_for(datetime.now(IST)))
 
     def close_all(self):
-        """Manual stop: paper-sell every open option at the current LTP."""
+        """Manual stop: sell every open option at the current LTP (LIVE: market orders, 3 attempts)."""
         self._running = False
+        self._apply_thread_context()          # may be called from a request thread
         for leg in self._open_legs():
-            self._exit(leg, reason='manual_stop')
+            for _ in range(1 if self.dry_run else 3):
+                if self._exit(leg, reason='manual_stop'):
+                    break
+                time.sleep(2)
+            else:
+                print(f"{TAG} 🚨 {leg['symbol']} x{leg['qty']} could NOT be closed — CLOSE IT MANUALLY in Groww")
+        self._persist_state()
+
+    # ------------------------------------------------------------------ daily limit (whole book)
+    def day_pnl(self):
+        """Today's NET P&L: realised since the day started + open positions marked at their last LTP
+        minus the charges a sell now would cost. No network calls."""
+        open_net = 0.0
+        for l in self._open_legs():
+            buy = l['entry_price'] * l['qty']
+            sell = (l.get('current_mark') or l['entry_price']) * l['qty']
+            open_net += sell - buy - estimate_charges(buy, sell)
+        return self.cumulative_pnl - self._day_start_pnl + open_net
+
+    def _check_day_limit(self, now):
+        if not (self.day_tp or self.day_sl) or self._day is None:
+            return
+        hit = self._day_limit if (self._day_limit or {}).get('day') == self._day else None
+        if not hit:
+            pnl = self.day_pnl()
+            kind = ('target' if self.day_tp and pnl >= self.day_tp else
+                    'stop' if self.day_sl and pnl <= -self.day_sl else None)
+            if not kind:
+                return
+            hit = self._day_limit = {'day': self._day, 'kind': kind, 'pnl': round(pnl, 2),
+                                     'time': now.strftime('%H:%M:%S')}
+            limit = self.day_tp if kind == 'target' else -self.day_sl
+            print(f"{TAG} {'🎯' if kind == 'target' else '🛑'} DAILY {kind.upper()} hit at {hit['time']}: day P&L "
+                  f"Rs {pnl:+,.0f} (limit Rs {limit:+,.0f}) — closing {len(self._open_legs())} position(s), "
+                  f"no more entries today")
+            self._finish_day(now, f"daily {kind} hit (day P&L Rs {pnl:+,.0f})")
+        # close (and in LIVE keep retrying) whatever is still open after the limit fired
+        for leg in self._open_legs():
+            self._exit(leg, reason=f"day_{hit['kind']}")
         self._persist_state()
 
     @property
@@ -254,6 +327,7 @@ class NseSectorOptions(BaseStrategy):
             self._day = today
             self._watchlist, self._entries_today, self._last_candle = [], 0, None
             self._or_cache = {}
+            self._day_start_pnl = self.cumulative_pnl
             self._persist_state()
 
     def _entries_allowed(self, now):
@@ -491,6 +565,18 @@ class NseSectorOptions(BaseStrategy):
                       f"{w['or_high'] if long_ else w['or_low']} / VWAP {vwap}")
                 return False
             candle = dict(candle, close=spot)
+        if not self.dry_run:
+            fill, oid, why = self._live_order(contract['trading_symbol'], contract['qty'], 'BUY',
+                                              fallback=contract['ltp'])
+            if fill is None:
+                w['order_failures'] = w.get('order_failures', 0) + 1
+                w['note'] = f"{candle['end']} {what} — LIVE buy failed: {why}"
+                print(f"{TAG}   ✗ {w['symbol']} LIVE BUY {contract['trading_symbol']} x{contract['qty']} failed: {why}"
+                      + (" — giving up on this stock today" if w['order_failures'] >= 2 else ""))
+                if w['order_failures'] >= 2:
+                    w['status'] = 'order failed'
+                return False
+            contract = dict(contract, ltp=fill, order_id=oid)
         self._enter(w, candle, vwap, contract, live=live)
         w['status'] = 'entered'
         self._last_scan = self._last_scan or {'day': self._day}
@@ -505,8 +591,10 @@ class NseSectorOptions(BaseStrategy):
         if not meta:
             return None, 'no stock options'
         today = datetime.now(IST).date()
+        # NSE Sector Options: expiry MORE than min_dte days away (user rule); subclasses may use >=
         exps = [e for e in meta['expiries']
-                if (datetime.strptime(e, '%Y-%m-%d').date() - today).days >= self.min_dte]
+                if ((datetime.strptime(e, '%Y-%m-%d').date() - today).days > self.min_dte if self.DTE_STRICT
+                    else (datetime.strptime(e, '%Y-%m-%d').date() - today).days >= self.min_dte)]
         if not exps:
             return None, 'no expiry'
         expiry = exps[0]
@@ -549,6 +637,7 @@ class NseSectorOptions(BaseStrategy):
             'entry_trigger': 'late_join_live' if live else f'{self.candle_min}m_close',
             'sector': w['sector'], 'sector_pchg': w['sector_pchg'],
             'opened_at': now.isoformat(), 'stopped': False,
+            'mode': self._mode, 'entry_order_id': c.get('order_id'),
         }
         with self._legs_lock:
             self.legs = [l for l in self.legs if not l.get('stopped')] + [leg]
@@ -564,7 +653,8 @@ class NseSectorOptions(BaseStrategy):
                       + (' (late joiner, live price)' if live else ''),
         })
         how = 'LIVE price' if live else f"{self.candle_min}m close"
-        print(f"{TAG} [PAPER] BUY {c['trading_symbol']} x{c['qty']} ({self.lots} lot) @ Rs {c['ltp']:.2f} "
+        fill_txt = f" (filled, order {c['order_id']})" if c.get('order_id') else ''
+        print(f"{TAG} [{self._mode}] BUY {c['trading_symbol']} x{c['qty']} ({self.lots} lot) @ Rs {c['ltp']:.2f}{fill_txt} "
               f"= Rs {c['ltp'] * c['qty']:,.0f} | {w['direction']} {w['symbol']} {how} {candle['close']:.2f} "
               f"{'>' if side == 1 else '<'} 30-min {'high' if side == 1 else 'low'} {level} | 5m VWAP {vwap} | "
               f"{w['sector']} {w['sector_pchg']:+.2f}% | entry {self._entries_today}/{self.max_entries}, "
@@ -606,6 +696,10 @@ class NseSectorOptions(BaseStrategy):
             if self._price_failures in (3, MAX_PRICE_FAILURES):
                 print(f"{TAG} ⚠ price poll failed {self._price_failures}x ({leg['underlying']} stock={spot}, option={opt})")
 
+        if leg.get('exit_pending'):                 # LIVE exit order failed earlier -> keep retrying
+            self._exit(leg, reason=leg['exit_pending'], opt=opt)
+            return
+
         if now >= self._exit_time(now) or now.date().isoformat() > leg['opened_at'][:10]:
             self._exit(leg, reason='square_off', opt=opt)
             return
@@ -618,19 +712,37 @@ class NseSectorOptions(BaseStrategy):
             self._exit(leg, reason='take_profit', opt=opt)
 
     def _exit(self, leg, reason, opt=None):
-        if opt is None:
-            try:
-                _, opt = self._marks(leg)
-            except Exception:
-                opt = None
-        px = opt or leg.get('current_mark') or leg['entry_price']
+        """Close one position. PAPER: at the option LTP. LIVE: SELL MARKET order; the position is only
+        marked closed once Groww confirms the fill — otherwise it stays open with exit_pending set and
+        is retried every cycle. Returns True when closed."""
+        if not self.dry_run:
+            fill, oid, why = self._live_order(leg['symbol'], leg['qty'], 'SELL',
+                                              fallback=opt or leg.get('current_mark') or leg['entry_price'])
+            if fill is None:
+                leg['exit_pending'] = reason
+                leg['exit_failures'] = leg.get('exit_failures', 0) + 1
+                n = leg['exit_failures']
+                if n in (1, 3) or n % 20 == 0:
+                    print(f"{TAG} 🚨 LIVE SELL {leg['symbol']} x{leg['qty']} ({reason}) failed #{n}: {why} — "
+                          f"position still OPEN, retrying every {self.monitor_interval}s"
+                          + (" — CHECK GROWW MANUALLY" if n >= 3 else ""))
+                self._persist_state()
+                return False
+            px, exit_oid = fill, oid
+        else:
+            if opt is None:
+                try:
+                    _, opt = self._marks(leg)
+                except Exception:
+                    opt = None
+            px, exit_oid = opt or leg.get('current_mark') or leg['entry_price'], None
         gross = (px - leg['entry_price']) * leg['qty']
         fees = estimate_charges(leg['entry_price'] * leg['qty'], px * leg['qty'])
         net = gross - fees
         now = datetime.now(IST)
         with self._legs_lock:
             leg.update(stopped=True, exit_price=round(px, 2), current_mark=round(px, 2),
-                       current_pnl=0.0, exit_reason=reason)
+                       current_pnl=0.0, exit_reason=reason, exit_order_id=exit_oid, exit_pending=None)
             self.cumulative_pnl += net
             self.total_charges += fees
         move = ((leg.get('stock_mark') or leg['stock_entry']) / leg['stock_entry'] - 1) * 100
@@ -638,15 +750,68 @@ class NseSectorOptions(BaseStrategy):
             'ts': now.isoformat(), 'date': now.strftime('%Y-%m-%d'), 'action': 'SELL',
             'symbol': leg['symbol'], 'underlying': leg['underlying'], 'qty': leg['qty'],
             'price': round(px, 2), 'stock_price': leg.get('stock_mark'), 'gross': round(gross, 2),
-            'charges': fees, 'pnl': round(net, 2), 'reason': reason,
+            'charges': fees, 'pnl': round(net, 2), 'reason': reason, 'mode': self._mode,
         })
         for w in self._watchlist:
             if w['symbol'] == leg['underlying'] and w['status'] == 'entered':
                 w['status'] = f'closed ({reason})'
-        print(f"{TAG} [PAPER] SELL {leg['symbol']} x{leg['qty']} @ Rs {px:.2f} | {reason} | "
+        print(f"{TAG} [{self._mode}] SELL {leg['symbol']} x{leg['qty']} @ Rs {px:.2f} | {reason} | "
               f"stock {leg['underlying']} {leg.get('stock_mark')} ({move:+.2f}%) | gross Rs {gross:+,.0f} "
               f"- charges Rs {fees:,.0f} = Rs {net:+,.0f} | cumulative Rs {self.cumulative_pnl:+,.0f}")
         self._persist_state()
+        return True
+
+    # ------------------------------------------------------------------ LIVE orders (Groww)
+    def _live_order(self, trading_symbol, qty, side, fallback=None):
+        """Place a Groww MARKET order (NRML, quantity in units) and wait for the fill.
+
+        Returns (fill_price, order_id, None) on a confirmed fill, else (None, order_id, reason).
+        A pending order that times out is cancelled; if the cancel loses the race and the order filled
+        anyway, the fill is still returned so the position is never lost track of."""
+        from api.groww import place_order, confirm_order_filled, cancel_order, get_order_status, get_option_ltp
+        resp = place_order(trading_symbol=trading_symbol, quantity=int(qty), transaction_type=side,
+                           order_type='MARKET', product='NRML')
+        if not isinstance(resp, dict) or resp.get('error'):
+            return None, None, (resp.get('error') if isinstance(resp, dict) else str(resp))
+        oid = resp.get('groww_order_id') or resp.get('growwOrderId')
+        filled, status = confirm_order_filled(oid)
+        last = None
+        if not filled and oid and str(status).startswith('timeout'):
+            try:
+                cancel_order(oid)
+            except Exception:
+                pass
+            last = get_order_status(oid)
+            st = str((last or {}).get('order_status') or (last or {}).get('orderStatus') or '').upper()
+            filled = st in ('EXECUTED', 'COMPLETED')
+            status = st or status
+        if not filled:
+            return None, oid, f"order {oid} {status}"
+        if last is None:
+            last = get_order_status(oid)
+        px = None
+        for src in (last, resp):
+            if isinstance(src, dict):
+                for k in ('average_fill_price', 'avg_fill_price', 'average_price', 'filled_price', 'price'):
+                    try:
+                        v = float(src.get(k) or 0)
+                    except (TypeError, ValueError):
+                        v = 0
+                    if v > 0:
+                        px = v
+                        break
+            if px:
+                break
+        if not px:                                    # fill price not in the response -> use the LTP now
+            try:
+                px = float(get_option_ltp(trading_symbol) or 0) or None
+            except Exception:
+                px = None
+        if not px:
+            px = float(fallback or 0)
+            print(f"{TAG} ⚠ {side} {trading_symbol} filled (order {oid}) but Groww returned no fill price/LTP — "
+                  f"recorded at Rs {px:.2f} (last known); check the real price in Groww")
+        return px, oid, None
 
     # ------------------------------------------------------------------ persistence / threading
     def _apply_thread_context(self):
@@ -672,7 +837,8 @@ class NseSectorOptions(BaseStrategy):
                        'total_trades': self.total_trades, 'total_days_traded': self.total_days_traded,
                        'entered_day': self._entered_day, 'last_scan': self._last_scan,
                        'day': self._day, 'watchlist': self._watchlist, 'entries_today': self._entries_today,
-                       'last_candle': self._last_candle}
+                       'last_candle': self._last_candle, 'day_start_pnl': self._day_start_pnl,
+                       'day_limit': self._day_limit}
             update_strategy_db(self._sid, details=details, legs=legs, pnl=round(self.pnl, 2))
         except Exception as e:
             logger.warning("%s persist failed: %s", TAG, e)
@@ -692,6 +858,8 @@ class NseSectorOptions(BaseStrategy):
             self._watchlist = details.get('watchlist') or []
             self._entries_today = int(details.get('entries_today') or 0)
             self._last_candle = details.get('last_candle')
+            self._day_start_pnl = float(details.get('day_start_pnl') or 0)
+            self._day_limit = details.get('day_limit')
         with self._legs_lock:
             self.legs = [dict(l) for l in (legs or []) if isinstance(l, dict) and not l.get('stopped')]
         return self
@@ -705,5 +873,7 @@ class NseSectorOptions(BaseStrategy):
             'legs': [dict(l) for l in self._open_legs()], 'last_scan': self._last_scan,
             'entered_day': self._entered_day, 'watchlist': self._watchlist,
             'entries_today': self._entries_today, 'last_candle': self._last_candle,
-            'params': self._base_params,
+            'params': self._base_params, 'mode': self._mode,
+            'day_pnl': round(self.day_pnl(), 2), 'day_tp': self.day_tp, 'day_sl': self.day_sl,
+            'day_limit': self._day_limit if (self._day_limit or {}).get('day') == self._day else None,
         }

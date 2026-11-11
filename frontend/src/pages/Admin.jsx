@@ -15,7 +15,7 @@ const ALL_STRATEGIES = [
   { key: 'ema_trend', label: 'EMA Trend Follower' },
   { key: 'dual_momentum', label: 'Dual Momentum Basket' },
   { key: 'nse_dual_momentum', label: 'NSE Dual Momentum' },
-  { key: 'nse_sector_options', label: 'NSE Sector Options (Paper)' },
+  { key: 'nse_sector_options', label: 'NSE Sector Options' },
   { key: 'crypto_futures', label: 'Crypto Scanner Futures' },
   { key: 'iv_crush', label: 'IV Crush' },
   { key: 'call_ratio', label: 'Call Ratio Spread' },

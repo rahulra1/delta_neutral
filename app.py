@@ -5605,6 +5605,9 @@ def _build_sector_options(params, resume=False):
         candle_min=int(params.get('candle_min', 5)),
         # never re-fire the one-off test entry after a restart
         run_immediately=False if resume else _as_bool(params.get('run_immediately', False)),
+        # LIVE vs PAPER and the daily limits are saved in details, so a resume keeps the same mode
+        dry_run=_as_bool(params.get('dry_run', True)),
+        day_tp=float(params.get('day_tp') or 0), day_sl=float(params.get('day_sl') or 0),
     )
 
 
@@ -5656,23 +5659,40 @@ def _sector_options_thread(sid, entry, details=None, legs=None, resume=False):
 def nse_sector_options_start():
     params = dict(request.json or {})
     profile_id = params.pop('profile_id', None)
-    params['dry_run'] = True                       # paper only
+    overnight = params.get('mode') == 'overnight'
+    # Scanner Overnight Options stays paper only; NSE Sector Options can run PAPER or LIVE
+    params['dry_run'] = True if overnight else _as_bool(params.get('dry_run', True))
+    for k in ('day_tp', 'day_sl'):
+        try:
+            params[k] = max(0.0, float(params.get(k) or 0))
+        except (TypeError, ValueError):
+            return jsonify(error=f'{k} must be a number (0 = off)'), 400
+    if not params['dry_run']:
+        p = get_profile(int(profile_id), current_user_id()) if profile_id else None
+        if not p:
+            return jsonify(error='LIVE mode needs an API profile — select your Groww profile'), 400
+        if p.get('broker') != 'groww':
+            return jsonify(error=f"LIVE mode needs a Groww profile; '{p.get('name')}' is '{p.get('broker')}'"), 400
+    mode = 'paper' if params['dry_run'] else 'LIVE'
     sid = str(uuid.uuid4())[:8]
     entry = {'thread': None, 'strategy': None, 'log_queue': queue.Queue(maxsize=500), 'log_history': [],
              'running': True, 'params': params, 'user_id': current_user_id(), 'profile_id': profile_id}
     nse_sector_options_strategies[sid] = entry
-    if params.get('mode') == 'overnight':
+    if overnight:
         name = (f"Scanner Overnight Options (15:15 -> 09:17, top {params.get('max_trades', 5)} by sector, "
                 f"expiry >= {params.get('min_dte', 15)}d, {params.get('lots', 1)} lot, paper)")
     else:
+        day_txt = ''
+        if params['day_tp'] or params['day_sl']:
+            day_txt = f", day TP {params['day_tp']:,.0f} / SL {params['day_sl']:,.0f}"
         name = (f"NSE Sector Options (30m ORB, max {params.get('max_open', 5)} open / {params.get('max_entries', 6)} a day, "
-                f"SL {params.get('stop_pct', 0.5)}% / TP {params.get('target_pct', 0.75)}%, "
-                f"{params.get('lots', 1)} lot, paper)")
+                f"SL {params.get('stop_pct', 0.5)}% / TP {params.get('target_pct', 0.75)}%{day_txt}, "
+                f"{params.get('lots', 1)} lot, {mode})")
     track_strategy(sid, 'NSE Sector Options', name, current_user_id(),
                    details={**params, 'profile_id': profile_id, 'asset': 'NSE'})
     entry['thread'] = threading.Thread(target=_sector_options_thread, args=(sid, entry), daemon=True)
     entry['thread'].start()
-    return jsonify(status='started', sid=sid)
+    return jsonify(status='started', sid=sid, mode=mode)
 
 
 @app.route('/api/nse-sector-options/stop', methods=['POST'])

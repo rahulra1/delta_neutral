@@ -31,6 +31,7 @@ EXIT_RETRY_MIN = 13              # 09:17 .. 09:30: wait for a real option LTP, t
 
 
 class NseScannerOvernight(NseSectorOptions):
+    DTE_STRICT = False         # unchanged: expiry at least min_dte (15) days away
 
     def __init__(self, max_trades=5, min_dte=15, lots=1, max_premium=100000.0, sector_group='Sectoral',
                  entry_hour=15, entry_minute=15, exit_hour=9, exit_minute=17, trading_days=None,

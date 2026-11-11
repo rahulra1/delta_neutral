@@ -207,9 +207,9 @@ const STRATEGIES = [
     desc: 'Intraday long/short NSE stock basket. Buys top-N gainers, shorts top-N losers (₹10,000 each, whole shares). TP +5% / SL -3% side-aware, squared off at 3:15 PM. Paper or live.',
     features: ['Top-N Gainers/Losers', 'Long + Short Stocks', 'Intraday Square-off', 'Paper Trading'],
     rec: '⏱ Intraday 9:30–3:15 IST · NSE equities' },
-  { key: 'nse_sector_options', label: 'NSE Sector Options (Paper)', icon: '🧭🇮🇳', type: 'Options',
-    desc: 'Rotates a watchlist every minute from the current top green/red sectors (Sector Scanner) and paper-buys the ATM CALL / PUT when a stock\'s 5-min candle closes beyond its 09:15–09:45 range (and the 5-min VWAP). Max 5 open, 6 entries a day. Exits when the STOCK hits its SL/TP or at 15:15.',
-    features: ['30-min range breakout', '5m candle close + 5m VWAP', 'Max 5 open · 6 a day', 'Paper only · Groww chain'],
+  { key: 'nse_sector_options', label: 'NSE Sector Options', icon: '🧭🇮🇳', type: 'Options',
+    desc: 'Rotates a watchlist every minute from the current top green/red sectors (Sector Scanner) and buys the ATM CALL / PUT when a stock\'s 5-min candle closes beyond its 09:15–09:45 range (and the 5-min VWAP). Max 5 open, 6 entries a day. Exits when the STOCK hits its SL/TP, the daily target/stop is hit, or at 15:15. Paper or LIVE (Groww).',
+    features: ['30-min range breakout', '5m candle close + 5m VWAP', 'Daily TP / SL on the whole book', 'Paper or Live (Groww)'],
     rec: '⏱ Intraday 9:45–3:15 IST · NSE stock options · needs a Groww profile' },
   { key: 'nse_scanner_overnight', label: 'Scanner Overnight Options (Paper)', icon: '🌙🇮🇳', type: 'Options',
     desc: 'At 15:15 takes the top Sector Scanner setup of each green/red sector (max 5, one per sector, F&O stocks only) and paper-buys the ATM CALL (LONG) / PUT (SHORT) — expiry at least 15 days away, else next month. Sells everything at 09:17 the next trading day. No stop / target.',
@@ -500,11 +500,14 @@ const NSE_SCANNER_OVERNIGHT_DETAILS = [
 ];
 
 const NSE_SECTOR_OPTIONS_FIELDS = [
+  { key: 'dry_run', label: 'Mode', type: 'select', options: [{value:true,label:'Paper (simulated fills)'},{value:false,label:'LIVE (real orders on Groww)'}], default: true, hint: 'LIVE places real Groww MARKET orders (NRML) with the selected Groww profile' },
+  { key: 'day_tp', label: 'Daily Target (₹, 0 = off)', type: 'number', default: 0, hint: 'Close ALL positions and stop entries for the day when today\'s net P&L (realised + open, after charges) reaches +this' },
+  { key: 'day_sl', label: 'Daily Stop-Loss (₹, 0 = off)', type: 'number', default: 0, hint: 'Close ALL positions and stop entries for the day when today\'s net P&L falls to −this' },
   { key: 'stop_pct', label: 'Stock Stop-Loss (%)', type: 'number', step: '0.05', default: 0.5, hint: 'Sell the option when the STOCK moves this % against the trade' },
   { key: 'target_pct', label: 'Stock Target (%)', type: 'number', step: '0.05', default: 0.75, hint: 'Sell the option when the STOCK moves this % in favour (0.75 = 1.5 × 0.5)' },
   { key: 'lots', label: 'Lots', type: 'number', default: 1, hint: 'Lot size comes from the Groww instruments list' },
   { key: 'max_premium', label: 'Max Premium per Trade (₹)', type: 'number', default: 100000, hint: 'Skip a contract if lots × lot size × premium is above this' },
-  { key: 'min_dte', label: 'Min Days to Expiry', type: 'number', default: 10, hint: 'Nearest expiry until it is closer than this many days, then the next month' },
+  { key: 'min_dte', label: 'Expiry More Than (days)', type: 'number', default: 10, hint: 'Nearest expiry that is MORE than this many days away (10 = 11+ days), otherwise the next month' },
   { key: 'sector_group', label: 'Sector Group', type: 'select', options: [{value:'Sectoral',label:'Sectoral (21)'},{value:'Thematic',label:'Thematic (41)'}], default: 'Sectoral' },
   { key: 'trading_days', label: 'Trading Days', type: 'text', default: '0,1,2,3,4', hint: '0=Mon..4=Fri' },
   { key: 'max_open', label: 'Max Open Positions', type: 'number', default: 5, hint: 'At most this many options held at the same time' },
@@ -534,12 +537,18 @@ const NSE_SECTOR_OPTIONS_DETAILS = [
     'After every 5-minute candle closes: a bullish stock whose candle CLOSES above its 30-min high (and above the 5-minute VWAP) → buys the ATM CALL; a bearish stock closing below its 30-min low (and below the 5-minute VWAP) → buys the ATM PUT. A wick through the level without a close beyond it does not count.',
     'Late joiners: a stock that joins the watchlist after 09:50 and is ALREADY beyond its range (and the 5-minute VWAP) at the live price is bought immediately — no wait for a candle close. The Groww spot used for the fill must confirm it.',
     'Max 5 positions open at once and max 6 entries a day; each stock is traded at most once a day. A breakout skipped because the slots are full can still be taken on a later candle if it is still beyond the range.',
-    'Expiry: the nearest expiry with at least 10 days left (setting), else the next month. Strike nearest the stock price. Price = Groww option-chain LTP. No real orders are placed.',
+    'Expiry: the nearest expiry MORE than 10 days away (setting), else the next month. Strike nearest the stock price. Paper fills at the Groww option-chain LTP; LIVE sends a MARKET order and records the position only after Groww confirms the fill.',
   ] },
   { heading: '3. Exit (decided by the STOCK price, per position)', points: [
     'Stop: the stock moves the stop % against the entry stock price. Target: it moves the target % in favour. Checked every price-check interval.',
     'Otherwise every open option is sold at the square-off time (default 15:15).',
+    'Daily limit (optional): when today\'s NET P&L for the whole book — realised + open positions at their LTP minus the charges to sell them — reaches the Daily Target or falls to −Daily Stop-Loss, every open position is closed and no more entries are made that day. Checked every price-check interval, so the final figure can overshoot a little.',
     'Realized P&L is after estimated Groww F&O charges (₹40 brokerage + STT 0.1% on sell premium + exchange/SEBI/stamp + GST).',
+  ] },
+  { heading: 'Paper vs LIVE', points: [
+    'Paper: no orders, fills at the Groww option LTP.',
+    'LIVE: real Groww MARKET orders, product NRML, quantity = lots × lot size, through the selected Groww profile. If an exit order fails or is rejected, the position stays OPEN and the sell is retried every price check — watch the log and Groww. Stopping the strategy sells everything at market.',
+    'If the Groww token expires during the day, prices and orders fail: no new entries, and exits keep retrying. Refresh the token on the Broker page.',
   ] },
   { heading: '4. What to expect', points: [
     'This breakout version has NOT been backtested yet. The earlier one-trade-a-day version lost money in the Aug–Oct 2026 backtest, so treat the paper run as a forward test.',
@@ -1282,10 +1291,15 @@ export default function Strategy() {
           }} />
       )}
       {activeTab === 'nse_sector_options' && (
-        <StrategyTemplate title="NSE Sector Options (Paper)" icon="🧭🇮🇳" type="Options"
-          description="Rebuilds the watchlist every minute from the current top bullish/bearish sectors and paper-buys the ATM CALL / PUT when a stock's 5-min candle closes beyond its 09:15–09:45 range and the 5-min VWAP (max 5 open, 6 a day). Exits on the stock's SL/TP or at 15:15. Select a Groww profile." profiles={profiles}
+        <StrategyTemplate title="NSE Sector Options" icon="🧭🇮🇳" type="Options"
+          description="Rebuilds the watchlist every minute from the current top bullish/bearish sectors and buys the ATM CALL / PUT when a stock's 5-min candle closes beyond its 09:15–09:45 range and the 5-min VWAP (max 5 open, 6 a day). Exits on the stock's SL/TP, the optional daily target/stop for the whole book, or at 15:15. Paper or LIVE — select a Groww profile." profiles={profiles}
           configFields={NSE_SECTOR_OPTIONS_FIELDS} details={NSE_SECTOR_OPTIONS_DETAILS}
           onStart={async (config) => {
+            const live = String(config.dry_run) === 'false';
+            const dayTxt = (Number(config.day_tp) || Number(config.day_sl)) ? `\nDaily target ₹${config.day_tp || 0} / stop ₹${config.day_sl || 0}.` : '\nNo daily target/stop.';
+            if (live && !window.confirm(`Start LIVE trading on Groww?\n\nReal MARKET orders: ${config.lots} lot ATM stock options, up to ${config.max_open} open / ${config.max_entries} a day, stock SL ${config.stop_pct}% / TP ${config.target_pct}%.${dayTxt}`)) {
+              return { error: 'Cancelled — LIVE start not confirmed' };
+            }
             const c = { ...config };
             if (typeof c.trading_days === 'string') c.trading_days = c.trading_days.split(',').map(d => parseInt(d.trim(), 10)).filter(n => !isNaN(n));
             const { data } = await api.post('/nse-sector-options/start', c);
@@ -1298,12 +1312,16 @@ export default function Strategy() {
             const col = v => ((v || 0) >= 0 ? 'var(--green)' : 'var(--red)');
             const th = { textAlign: 'left', padding: '4px 8px', color: 'var(--muted)', fontSize: '.68rem', borderBottom: '1px solid var(--border)' };
             const td = { padding: '4px 8px' };
-            const reasons = { take_profit: 'Target', stop_loss: 'Stop', square_off: '15:15', manual_stop: 'Manual' };
+            const reasons = { take_profit: 'Target', stop_loss: 'Stop', square_off: '15:15', manual_stop: 'Manual', day_target: 'Daily target', day_stop: 'Daily stop' };
+            const live = s.mode === 'LIVE';
             return (
               <>
-                <div className="top-stats" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 12 }}>
+                <div style={{ marginBottom: 8 }}><span className={live ? 'badge badge-red' : 'badge badge-yellow'}>{live ? '🔴 LIVE — real Groww orders' : '📝 PAPER'}</span>
+                  {s.day_limit && <span className={s.day_limit.kind === 'target' ? 'badge badge-green' : 'badge badge-red'} style={{ marginLeft: 8 }}>Daily {s.day_limit.kind} hit {s.day_limit.time} ({money(s.day_limit.pnl)}) — done for today</span>}</div>
+                <div className="top-stats" style={{ gridTemplateColumns: 'repeat(5,1fr)', marginBottom: 12 }}>
                   <div className="stat-card"><div className="label">Realized P&L (net)</div><div className="value" style={{ color: col(s.cumulative_pnl) }}>{money(s.cumulative_pnl)}</div><div className="sub">charges ₹{Math.round(s.total_charges || 0).toLocaleString('en-IN')}</div></div>
                   <div className="stat-card"><div className="label">Total (incl. open)</div><div className="value" style={{ color: col(s.total_pnl) }}>{money(s.total_pnl)}</div></div>
+                  <div className="stat-card"><div className="label">Today (net)</div><div className="value" style={{ color: col(s.day_pnl) }}>{money(s.day_pnl)}</div><div className="sub">{(s.day_tp || s.day_sl) ? `limit +₹${Math.round(s.day_tp || 0).toLocaleString('en-IN')} / −₹${Math.round(s.day_sl || 0).toLocaleString('en-IN')}` : 'no daily limit'}</div></div>
                   <div className="stat-card"><div className="label">Trades</div><div className="value">{s.total_trades || 0}</div></div>
                   <div className="stat-card"><div className="label">Today</div><div className="value" style={{ fontSize: '.95rem' }}>{(s.watchlist || []).filter(w => w.status === 'watching').length} watching · {s.entries_today || 0}/{s.params?.max_entries ?? 6} entries</div><div className="sub">{s.entered_day && s.entered_day === s.last_scan?.day ? `done for ${s.entered_day}` : (s.last_scan?.top_sectors ? `${(s.last_scan.time || '').slice(11, 16)} top: ${s.last_scan.top_sectors}` : 'waiting for 09:45')}</div></div>
                 </div>
@@ -1327,12 +1345,12 @@ export default function Strategy() {
                 )}
                 {s.legs && s.legs.length > 0 && (
                   <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
-                    <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Open Paper Positions ({s.legs.length}/{s.params?.max_open ?? 5})</div>
+                    <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📊 Open {live ? 'LIVE' : 'Paper'} Positions ({s.legs.length}/{s.params?.max_open ?? 5})</div>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
                       <thead><tr>{['Option', 'Qty', 'Buy', 'LTP', 'P&L', 'Stock', 'Stock now', 'Stock SL', 'Stock TP'].map(h => <th key={h} scope="col" style={th}>{h}</th>)}</tr></thead>
                       <tbody>{s.legs.map((l, i) => (
                         <tr key={i}>
-                          <td style={{ ...td, fontWeight: 700 }}>{l.symbol}<div style={{ fontSize: '.66rem', color: 'var(--muted)', fontWeight: 400 }}>{l.direction} · {l.sector}</div></td>
+                          <td style={{ ...td, fontWeight: 700 }}>{l.symbol}<div style={{ fontSize: '.66rem', color: 'var(--muted)', fontWeight: 400 }}>{l.direction} · {l.sector}</div>{l.exit_pending && <div style={{ fontSize: '.66rem', color: 'var(--red)', fontWeight: 700 }}>⚠ SELL failed ×{l.exit_failures || 1} ({reasons[l.exit_pending] || l.exit_pending}) — retrying</div>}</td>
                           <td style={td}>{l.qty}</td>
                           <td style={td}>₹{(l.entry_price || 0).toFixed(2)}</td>
                           <td style={{ ...td, fontWeight: 600 }}>₹{(l.current_mark || 0).toFixed(2)}</td>
@@ -1347,7 +1365,7 @@ export default function Strategy() {
                 )}
                 {(s.trade_log || []).length > 0 && (
                   <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
-                    <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 Paper Trade Log</div>
+                    <div style={{ fontWeight: 700, fontSize: '.85rem', marginBottom: 8 }}>📋 {live ? 'LIVE' : 'Paper'} Trade Log</div>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.8rem' }}>
                       <thead><tr>{['Date', 'Time', 'Action', 'Option', 'Qty', 'Premium', 'Stock', 'Exit', 'Net P&L'].map(h => <th key={h} scope="col" style={th}>{h}</th>)}</tr></thead>
                       <tbody>{(s.trade_log || []).slice(-20).reverse().map((t, i) => (
