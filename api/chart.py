@@ -16,6 +16,8 @@ YAHOO_CHART_SYMBOLS = {
 }
 
 RANGES = {'15m': '60d', '1h': '6mo', '1d': '2y'}
+INTERVAL_SEC = {'1m': 60, '5m': 300, '15m': 900, '30m': 1800, '1h': 3600, '1d': 86400}
+CRYPTO_SYMBOLS = {'BTC', 'ETH'}       # 24/7 Yahoo feeds whose trailing live-tick bar is dropped
 
 # Yahoo has no 4h interval (it fell back to ~30 candles), so crypto 4h comes from Delta's
 # public production market-data endpoint (OHLC + volume of the perp we actually trade).
@@ -94,6 +96,14 @@ def get_candles(symbol, interval='1h'):
             if o is None or c is None:
                 continue
             candles.append({'t': ts[i], 'o': round(o, 2), 'h': round(h, 2), 'l': round(l, 2), 'c': round(c, 2), 'v': v or 0})
+        # Yahoo crypto intraday ends with a live-TICK bar (timestamp = now, o=h=l=c, v=0) AFTER the
+        # still-forming bar. Every calc_* drops only candles[-1] as "forming", so with the tick bar
+        # left in, the half-built bar was treated as CLOSED: live signals fired mid-bar and ~half of
+        # them vanished at the close (EMA+Trendline BTC 1h, 6 months: 130 live vs 61 closed-bar
+        # signals). Drop it so the last candle is the forming one, as documented.
+        step = INTERVAL_SEC.get(interval)
+        if symbol in CRYPTO_SYMBOLS and step and len(candles) >= 2 and candles[-1]['t'] - candles[-2]['t'] < step:
+            candles.pop()
         return candles
     except Exception:
         return None

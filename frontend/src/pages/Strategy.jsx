@@ -60,9 +60,11 @@ const EMA_TRENDLINE_DETAILS = [
     'Trade skipped if the SL is closer than 0.5% of price (fees would eat most of the risk).',
     'TP = 2× the risk (2:1 reward-to-risk). No time exit.',
   ] },
-  { heading: '5. Live trade handling', points: [
-    'Checks every 30 s: new closed-candle signal → order; mark price beyond SL/TP → close at market.',
-    'One trade at a time: signals that arrive while a trade is open are skipped, not taken later.',
+  { heading: '5. Live trade handling (same rules as the Backtest button)', points: [
+    'Checks every 30 s on the same candles as the backtest: a candle that has CLOSED with a signal → market order (≈ the next candle open).',
+    'SL / TP hit = any candle from the entry candle on touches the level (SL checked first), exactly like the backtest; the close is a market order on Delta.',
+    'One trade at a time: signals that arrive while a trade is open are skipped, as in the backtest (also when the previous trade exits on the new entry candle).',
+    'After a restart / downtime the backtest\'s still-open trade is joined late (same SL/TP); trades it already closed are not taken.',
     'Max 10 entries per day.',
   ] },
   { heading: '6. What to expect (backtest, BTC 1H, 100 lots, fees incl.)', points: [
@@ -73,7 +75,7 @@ const EMA_TRENDLINE_DETAILS = [
   { heading: '⚠ Risks & limits', points: [
     'Struggles in sideways/choppy markets where price keeps crossing the EMA.',
     'Sensitive to the EMA length: the same rules with a 200 EMA lost money on the untested period.',
-    'Signals use Yahoo prices but orders fill on Delta; ~20% of signals can differ.',
+    'Signals and SL/TP use Yahoo BTC-USD (as the backtest) but orders fill on the Delta perp, so fill prices differ by the basis/slippage.',
     'Validated on BTC 1H only — not 15m, other timeframes or ETH.',
   ] },
 ];

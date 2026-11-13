@@ -26,6 +26,12 @@ FUTURES_PRODUCTS = {
 # while a leg is open, new signals are skipped instead of stacking more legs.
 ONE_POSITION_KEYS = {'ema_trendline', 'candle_patterns'}
 
+# Strategies whose SL / TP are triggered EXACTLY like the UI backtest (frontend/src/signalBacktest.js):
+# on the SIGNAL feed's candles (the same get_candles data the signals come from), any candle from the
+# entry candle onward whose low/high touches the level, SL checked first. The exchange mark price
+# (testnet on demo profiles, and a basis away from Yahoo on prod) is only used for display / fallback.
+BACKTEST_EXIT_KEYS = {'ema_trendline'}
+
 TAKER_FEE = 0.0005 * 1.18          # Delta taker 0.05% + 18% GST, per side (estimate)
 CANDLE_SECONDS = {'5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
 
@@ -71,6 +77,8 @@ class FuturesSignalTrader:
         self.losses = 0
         self.last_mark = None        # last mark price seen by the trader thread (live account's venue)
         self.last_mark_ts = 0
+        self.first_started_ts = None # first deploy time: signals closed after it are never dropped
+        self.last_exit_bar_t = 0     # open time of the candle the last leg exited on (backtest busyUntil)
         self.sid = None
         self._thread = None
         self._today = None
@@ -83,7 +91,10 @@ class FuturesSignalTrader:
             return
         self.running = True
         self._today = datetime.utcnow().date()
+        self.trades_today = 0            # only a same-day count is restored (resume used to carry yesterday's)
         self._restore_state()
+        if not self.first_started_ts:
+            self.first_started_ts = time.time()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
         print(f"[FST] ✓ Started | {self.signal_key} {self.asset} {self.timeframe} | Lots: {self.lots} | "
@@ -118,6 +129,8 @@ class FuturesSignalTrader:
             self.wins = int(details.get('wins') or 0)
             self.losses = int(details.get('losses') or 0)
             self.last_mark = details.get('last_mark') or self.last_mark
+            self.first_started_ts = details.get('first_started_ts') or self.first_started_ts
+            self.last_exit_bar_t = int(details.get('last_exit_bar_t') or 0)
             self.legs = [l for l in legs if isinstance(l, dict) and l.get('side') and l.get('size')]
             if self._pending_signal:
                 print(f"[FST] ♻ Restored pending {self._pending_signal['type'].upper()} signal @ {self._pending_signal.get('price')}")
@@ -146,6 +159,7 @@ class FuturesSignalTrader:
                 if today != self._today:
                     self._today = today
                     self.trades_today = 0
+                self._loop_candles = None            # one candle fetch per loop, shared by exits + scan
                 self._check_tp_sl()
                 self._scan_and_trade()
                 if self._scan_count % 10 == 0 and self.sid:
@@ -201,34 +215,81 @@ class FuturesSignalTrader:
         return self.last_mark if data else None
 
     # ------------------------------------------------------------------ exits
+    def _candles(self):
+        """Signal-feed candles, fetched at most once per loop iteration."""
+        if getattr(self, '_loop_candles', None) is None:
+            self._loop_candles = get_candles(self.asset, self.timeframe) or []
+        return self._loop_candles
+
+    def _entry_bar_t(self, leg):
+        """Open time of the candle the leg was entered on (the candle after the signal candle)."""
+        if leg.get('entry_bar_t'):
+            return int(leg['entry_bar_t'])
+        tf = CANDLE_SECONDS.get(self.timeframe, 900)
+        if leg.get('signal_time'):
+            return int(leg['signal_time']) + tf
+        try:
+            ts = datetime.fromisoformat(leg.get('opened_at')).timestamp()
+            return int(ts // tf * tf)
+        except Exception:
+            return None
+
+    def _candle_hit(self, leg, candles):
+        """Backtest rule: first candle from the entry candle on that touches SL (checked first) or TP.
+        Returns (reason, level, candle_open_time) or (None, None, None)."""
+        start = self._entry_bar_t(leg)
+        sl, tp = leg.get('sl'), leg.get('tp')
+        if start is None:
+            return None, None, None
+        buy = leg['side'] == 'buy'
+        for c in candles:
+            if c['t'] < start:
+                continue
+            if sl and (c['l'] <= float(sl) if buy else c['h'] >= float(sl)):
+                return 'SL', float(sl), c['t']
+            if tp and (c['h'] >= float(tp) if buy else c['l'] <= float(tp)):
+                return 'TP', float(tp), c['t']
+        return None, None, None
+
     def _check_tp_sl(self):
-        """Close legs that hit TP or SL (on the Delta mark price)."""
+        """Close legs that hit TP or SL.
+
+        BACKTEST_EXIT_KEYS: triggered on the signal-feed candles exactly like the backtest (the forming
+        candle's high/low carries the live price). Others / feed outage: on the exchange mark price."""
         price = self._refresh_mark()
-        if not self.legs or not price:
+        if not self.legs:
             return
         symbol = FUTURES_PRODUCTS.get(self.asset)
+        candles = self._candles() if self.signal_key in BACKTEST_EXIT_KEYS else None
+        if self.signal_key in BACKTEST_EXIT_KEYS and not candles:
+            print(f"[FST] {self.signal_key} | ⚠ no candle data for SL/TP — falling back to the mark price")
         changed = False
         for leg in list(self.legs):
             sl, tp = leg.get('sl'), leg.get('tp')
             if not sl and not tp:
                 continue
-            hit = None
-            if leg['side'] == 'buy':
-                if sl and price <= float(sl):
-                    hit = 'SL'
-                elif tp and price >= float(tp):
-                    hit = 'TP'
-            else:
-                if sl and price >= float(sl):
-                    hit = 'SL'
-                elif tp and price <= float(tp):
-                    hit = 'TP'
-            if hit and self._close_leg(leg, symbol, price, hit):
+            hit, level, bar_t = None, None, None
+            if candles:
+                hit, level, bar_t = self._candle_hit(leg, candles)
+            elif price:
+                if leg['side'] == 'buy':
+                    if sl and price <= float(sl):
+                        hit = 'SL'
+                    elif tp and price >= float(tp):
+                        hit = 'TP'
+                else:
+                    if sl and price >= float(sl):
+                        hit = 'SL'
+                    elif tp and price <= float(tp):
+                        hit = 'TP'
+            if hit and self._close_leg(leg, symbol, price or level, hit, level=level):
+                tf = CANDLE_SECONDS.get(self.timeframe, 900)
+                self.last_exit_bar_t = max(self.last_exit_bar_t, int(bar_t or time.time() // tf * tf))
                 changed = True
         if changed and self.sid:
             self._persist()
 
-    def _close_leg(self, leg, symbol, price, reason):
+    def _close_leg(self, leg, symbol, price, reason, level=None):
         close_side = 'sell' if leg['side'] == 'buy' else 'buy'
         result = place_order(None, symbol, leg['size'], close_side)
         if not result:
@@ -253,6 +314,7 @@ class FuturesSignalTrader:
                 'signal_key': self.signal_key, 'side': close_side, 'position_side': leg['side'],
                 'price': round(exit_px, 2), 'entry_price': leg['entry_price'], 'size': leg['size'],
                 'sl': leg.get('sl'), 'tp': leg.get('tp'), 'reason': reason, 'success': True,
+                'trigger_level': level,
                 'gross': round(gross, 4), 'fees': round(fees, 4), 'pnl': round(net, 4),
                 'opened_at': leg.get('opened_at') or leg.get('time'),
             })
@@ -279,7 +341,9 @@ class FuturesSignalTrader:
                                         'trades_today_date': str(self._today),
                                         'trade_log': self.trade_log[-500:],
                                         'cumulative_pnl': self.cumulative_pnl, 'total_fees': self.total_fees,
-                                        'wins': self.wins, 'losses': self.losses, 'last_mark': self.last_mark})
+                                        'wins': self.wins, 'losses': self.losses, 'last_mark': self.last_mark,
+                                        'first_started_ts': self.first_started_ts,
+                                        'last_exit_bar_t': self.last_exit_bar_t})
         except Exception as e:
             logger.warning(f"[FST] persist failed for {self.sid}: {e}")
 
@@ -337,13 +401,17 @@ class FuturesSignalTrader:
             print(f"[FST] ❌ Unknown signal_key: {self.signal_key}")
             return
 
-        candles = get_candles(self.asset, self.timeframe)
+        candles = self._candles()
         if not candles:
             print(f"[FST] {self.signal_key} {self.asset} {self.timeframe} | ⚠ No candle data")
             return
 
         result = fn(candles)
         signals = result.get('signals', [])
+
+        if self.signal_key in BACKTEST_EXIT_KEYS:
+            self._scan_backtest(signals, candles)
+            return
 
         latest = signals[-1] if signals else None
         is_new = latest and latest['time'] > self.last_signal_time
@@ -386,6 +454,63 @@ class FuturesSignalTrader:
         self.last_signal_time = latest['time']
         self._place_trade(latest)
 
+    def _scan_backtest(self, signals, candles):
+        """Entries exactly as frontend/src/signalBacktest.js decides them (one position at a time).
+
+        Every signal not handled yet is replayed in time order with the backtest's rules:
+          - its entry candle = the candle after the signal candle; skipped while a position is open
+            and when entry candle <= the candle the previous trade exited on (busyUntil);
+          - from its entry candle up to now, if the SL / TP was already touched, the backtest trade is
+            already over: not entered, but it still blocks later signals until its exit candle;
+          - the one whose backtest trade is STILL OPEN is entered now at market.
+        Normally that is the signal of the candle that just closed (entered ~30 s after the backtest's
+        next-candle open). After downtime / a restart, the backtest's open trade is joined late instead
+        of being lost. Signals that closed before the first deploy are only taken within 2 candles."""
+        tf = CANDLE_SECONDS.get(self.timeframe, 900)
+        now = time.time()
+        pending = [s for s in signals if s['time'] > self.last_signal_time and
+                   (now - s['time'] <= 2 * tf or s['time'] + tf >= (self.first_started_ts or now))]
+        print(f"[FST] {self.signal_key} {self.asset} {self.timeframe} | Scan #{self._scan_count} | "
+              f"Signals: {len(signals)} | New: {len(pending) or 'no'} | Trades: {self.trades_today}/"
+              f"{self.max_trades_per_day}")
+        if not pending:
+            return
+        self.last_signal_time = max(s['time'] for s in pending)       # every one is decided now
+        busy = self.last_exit_bar_t
+        join = None
+        for s in pending:
+            entry_bar = s['time'] + tf
+            if self.legs:
+                print(f"[FST] {self.signal_key} | {s['type'].upper()} signal skipped — position already open "
+                      f"(one at a time)")
+                continue
+            if entry_bar <= busy:
+                print(f"[FST] {self.signal_key} | {s['type'].upper()} signal skipped — its entry candle is the "
+                      f"previous trade's exit candle (backtest rule)")
+                continue
+            probe = {'side': s['type'], 'sl': s.get('sl'), 'tp': s.get('tp1'), 'entry_bar_t': entry_bar}
+            hit, level, bar_t = self._candle_hit(probe, candles)
+            # touched already on its own entry candle that is still forming -> the backtest takes it and
+            # books the stop / target on that candle; enter, the next exit check closes it the same way
+            fresh = bar_t == entry_bar and now - entry_bar <= tf / 2
+            if hit and not fresh:
+                busy = bar_t
+                self.last_exit_bar_t = max(self.last_exit_bar_t, bar_t)
+                print(f"[FST] {self.signal_key} | {s['type'].upper()} signal not entered — the backtest trade "
+                      f"already hit {hit} @ {level}")
+                continue
+            join = s
+            break                                   # the backtest is in this trade now; later ones are skipped
+        if join:
+            late = now - (join['time'] + tf) > tf / 2
+            if late:
+                print(f"[FST] {self.signal_key} | ♻ joining the backtest's open {join['type'].upper()} trade late "
+                      f"(signal candle {datetime.fromtimestamp(join['time'], timezone.utc):%Y-%m-%d %H:%M} UTC)")
+            self._pending_signal = None
+            self._place_trade(join)
+        elif self.sid:
+            self._persist()
+
     def _place_trade(self, signal):
         symbol = FUTURES_PRODUCTS.get(self.asset)
         if not symbol:
@@ -425,6 +550,9 @@ class FuturesSignalTrader:
                     'time': trade['time'],
                     'opened_at': trade['ts'],
                     'signal_time': signal.get('time'),
+                    # backtest entry candle = the one after the signal candle
+                    'entry_bar_t': (int(signal['time']) + CANDLE_SECONDS.get(self.timeframe, 900))
+                                   if signal.get('time') else None,
                 })
             print(f"[FST] 🟢 ORDER PLACED: {self.signal_key} {side.upper()} {self.lots} {symbol} @ {entry_price} "
                   f"(signal {signal.get('price')}) | SL: {signal.get('sl')} | TP: {signal.get('tp1')}")
