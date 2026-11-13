@@ -9,7 +9,7 @@ Sources (all public, no broker login needed):
   NSE  /api/live-analysis-oi-spurts-underlyings   F&O open-interest change per underlying
   NSE  /api/snapshot-capital-market-largedeal     last session's bulk / block deals
   NSE  /api/fiidiiTradeReact                      last session's FII / DII net cash flow
-  Yahoo 5m candles (5 days)                        VWAP, 30-min opening range (09:15-09:45), ORB / VWAP
+  Yahoo 5m candles (5 days)                        VWAP, opening range (09:15-09:50), ORB / VWAP
                                                    LONG/SHORT on the last completed 5m close, relative volume
 
 "Big player" activity can't be observed directly, so it is inferred from:
@@ -40,7 +40,7 @@ _UA = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
 BIAS_PCT = 0.5          # |sector % change| needed to call it green/red
 BIAS_BREADTH = 0.3      # (adv - dec) / (adv + dec) needed to confirm it is broad-based
 RVOL_HOT = 1.5          # relative volume that counts as "unusual"
-OR_END = dtime(9, 45)   # 30-minute opening range: 09:15-09:45 (same as the NSE Sector Options strategy)
+OR_END = dtime(9, 50)   # opening range: 09:15-09:50 incl. the 09:45 candle (same as the NSE Sector Options strategy)
 LATE_ENTRY = dtime(14, 30)
 STOP_MIN_PCT, STOP_MAX_PCT = 0.4, 1.5   # clamp VWAP-based stop distance (% of entry)
 
@@ -212,7 +212,7 @@ def _intraday(symbol):
     """VWAP, opening range, ORB / VWAP signals and time-of-day relative volume from Yahoo 5m candles.
 
     Same rules as the NSE Sector Options strategy:
-      opening range = high / low of 09:15-09:45 (30 min)
+      opening range = high / low of 09:15-09:50 (seven 5m candles, incl. 09:45-09:50)
       ORB signal    = last COMPLETED 5m close above the range high (LONG) / below the low (SHORT), else INSIDE
       VWAP          = session VWAP from the completed 5m bars; signal = last 5m close above (LONG) / below (SHORT)
     Yahoo's newest bar is the still-forming one (its timestamp is the last trade, not a 5m boundary) -> excluded."""

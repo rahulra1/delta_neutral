@@ -1,17 +1,18 @@
 """NSE Sector Options — PAPER trades ATM stock options on opening-range breakouts of Sector Scanner picks.
 
 Daily flow (IST, trading days only):
-  1. Opening range = the stock's high / low of the first 30 minutes, 09:15-09:45 (5m Yahoo bars).
-  2. From 09:45 (entry_hour:entry_minute) until the last entry time, EVERY rescan_sec (default 60 s)
+  1. Opening range = the stock's high / low of 09:15-09:50 (the first seven 5m Yahoo bars, i.e. the
+     09:15 ... 09:45 candles; range end = entry_hour:entry_minute).
+  2. From 09:50 (entry_hour:entry_minute) until the last entry time, EVERY rescan_sec (default 60 s)
      re-read the live NSE sectors (api.sector_scanner) and rebuild the watchlist: walk the CURRENT
      BULLISH / BEARISH sectors from the biggest |% change| down and take their LONG / SHORT / WATCH
      stocks that have listed stock options (max max_watchlist). Direction = sector bias. Stocks that
      leave the top sectors drop off; new ones join. Stocks already traded today are not re-added.
-  3. Every completed 5-minute candle (candle_min, default 5: 09:50, 09:55 ... last entry, default 14:45):
-       bullish stock: 5m close > 30-min high  (and > the 5-minute VWAP)  -> paper-BUY the ATM CALL
-       bearish stock: 5m close < 30-min low   (and < the 5-minute VWAP)  -> paper-BUY the ATM PUT
+  3. Every completed 5-minute candle (candle_min, default 5: 09:55, 10:00 ... last entry, default 14:45):
+       bullish stock: 5m close > range high  (and > the 5-minute VWAP)  -> paper-BUY the ATM CALL
+       bearish stock: 5m close < range low   (and < the 5-minute VWAP)  -> paper-BUY the ATM PUT
      Expiry = nearest with MORE than min_dte (default 10) days left. Price = Groww option-chain LTP.
-     LATE JOINERS: a stock that joins the rotating watchlist after 09:50 and is ALREADY beyond its range
+     LATE JOINERS: a stock that joins the rotating watchlist after 09:55 and is ALREADY beyond its range
      (and the 5m VWAP) on the live price is entered immediately, without waiting for a candle close
      (the Groww spot used for the fill must confirm it).
      Limits: max_open (5) positions at a time, max_entries (6) per day, one entry per stock per day.
@@ -117,7 +118,7 @@ def floor_candle(t, minutes=5):
 class NseSectorOptions(BaseStrategy):
     DTE_STRICT = True          # expiry must be MORE than min_dte calendar days away (not equal)
 
-    def __init__(self, entry_hour=9, entry_minute=45, exit_hour=15, exit_minute=15,
+    def __init__(self, entry_hour=9, entry_minute=50, exit_hour=15, exit_minute=15,
                  stop_pct=0.5, target_pct=0.75, lots=1, min_dte=10, max_premium=100000.0,
                  rescan_sec=60, sector_group='Sectoral', trading_days=None,
                  monitor_interval=15, run_immediately=False,
@@ -162,7 +163,7 @@ class NseSectorOptions(BaseStrategy):
         self._entries_today = 0
         self._last_candle = None          # 'HH:MM' end of the last breakout candle evaluated
         self._last_scan = None            # summary of the last scan for the UI
-        self._or_cache = {}               # symbol -> today's 09:15-09:45 range (None if incomplete)
+        self._or_cache = {}               # symbol -> today's 09:15-09:50 range (None if incomplete)
         self._next_scan_ts = 0.0
         self._running = False
         self._pnl_history = []
@@ -203,7 +204,7 @@ class NseSectorOptions(BaseStrategy):
         self._api_secret = get_api_secret()
         self._broker = getattr(_thread_local, 'broker', '')
         days = ','.join(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][d] for d in self.trading_days)
-        print(f"{TAG} Started [{self._mode}] | 30-min range 09:15-{self.entry_hour:02d}:{self.entry_minute:02d}, "
+        print(f"{TAG} Started [{self._mode}] | opening range 09:15-{self.entry_hour:02d}:{self.entry_minute:02d}, "
               f"{self.candle_min}m breakouts until {self.last_entry_hour:02d}:{self.last_entry_minute:02d}, "
               f"square-off {self.exit_hour:02d}:{self.exit_minute:02d} IST | days {days}")
         print(f"{TAG} Watchlist: up to {self.max_watchlist} {self.sector_group.lower()} LONG/SHORT/WATCH stocks, "
@@ -364,7 +365,7 @@ class NseSectorOptions(BaseStrategy):
     def _refresh_watchlist(self, now, force=False):
         """Rebuild the watchlist from the CURRENT top BULLISH / BEARISH sectors (runs every rescan_sec).
 
-        Stocks that dropped out of the top sectors leave the list; new ones join with their 09:15-09:45
+        Stocks that dropped out of the top sectors leave the list; new ones join with their 09:15-09:50
         range. Stocks already traded today stay on the list (for the UI) but are never re-entered."""
         from api.sector_scanner import get_sectors, get_sector_stocks
         from api.groww import get_stock_option_meta
@@ -408,7 +409,7 @@ class NseSectorOptions(BaseStrategy):
                 logger.warning("%s candles %s failed: %s", TAG, sym, e)
                 return None, []
 
-        # the 30-min range never changes during the day -> only fetch candles for stocks not seen yet
+        # the opening range never changes during the day -> only fetch candles for stocks not seen yet
         new_syms = [r['symbol'] for _, r in picks if r['symbol'] not in self._or_cache]
         if new_syms:
             with ThreadPoolExecutor(max_workers=8) as ex:
@@ -421,7 +422,7 @@ class NseSectorOptions(BaseStrategy):
         for d, r in picks:
             orng = self._or_cache.get(r['symbol'])
             if not orng:
-                skipped.append(f"{r['symbol']} ({'incomplete 30-min range' if r['symbol'] in self._or_cache else 'no candles today'})")
+                skipped.append(f"{r['symbol']} ({'incomplete opening range' if r['symbol'] in self._or_cache else 'no candles today'})")
                 continue
             prev = old.get(r['symbol'])
             keep = prev if prev and prev['direction'] == r['direction'] else {}

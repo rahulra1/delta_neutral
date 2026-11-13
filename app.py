@@ -5589,7 +5589,7 @@ def _build_sector_options(params, resume=False):
             run_immediately=False if resume else _as_bool(params.get('run_immediately', False)),
         )
     return NseSectorOptions(
-        entry_hour=int(params.get('entry_hour', 9)), entry_minute=int(params.get('entry_minute', 45)),
+        entry_hour=int(params.get('entry_hour', 9)), entry_minute=int(params.get('entry_minute', 50)),
         exit_hour=int(params.get('exit_hour', 15)), exit_minute=int(params.get('exit_minute', 15)),
         stop_pct=float(params.get('stop_pct', 0.5)), target_pct=float(params.get('target_pct', 0.75)),
         lots=int(params.get('lots', 1)), min_dte=int(params.get('min_dte', 10)),
@@ -5685,7 +5685,7 @@ def nse_sector_options_start():
         day_txt = ''
         if params['day_tp'] or params['day_sl']:
             day_txt = f", day TP {params['day_tp']:,.0f} / SL {params['day_sl']:,.0f}"
-        name = (f"NSE Sector Options (30m ORB, max {params.get('max_open', 5)} open / {params.get('max_entries', 6)} a day, "
+        name = (f"NSE Sector Options (ORB 09:15-{int(params.get('entry_hour', 9)):02d}:{int(params.get('entry_minute', 50)):02d}, max {params.get('max_open', 5)} open / {params.get('max_entries', 6)} a day, "
                 f"SL {params.get('stop_pct', 0.5)}% / TP {params.get('target_pct', 0.75)}%{day_txt}, "
                 f"{params.get('lots', 1)} lot, {mode})")
     track_strategy(sid, 'NSE Sector Options', name, current_user_id(),
