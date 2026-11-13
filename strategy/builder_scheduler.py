@@ -236,9 +236,9 @@ class BuilderScheduler:
 
     def _run_one_entry(self):
         from api.chain import get_option_chain_full, get_expiries
-        from api.orders import place_order
+        from api.orders import place_order, order_fill_price
         from strategy.builder_common import (
-            resolve_builder_expiry, resolve_leg_to_option, atm_index)
+            resolve_builder_expiry, resolve_leg_to_option, atm_index, premium_targets)
         from strategy.monitor import StrategyMonitor
 
         expiries = get_expiries(self.asset)
@@ -271,10 +271,14 @@ class BuilderScheduler:
             if order is None:
                 self._print(f"[Builder Sched] Order FAILED {leg['side']} {opt['symbol']}")
                 continue
+            mark = float(opt.get('mark_price', 0) or 0)
+            fill = order_fill_price(order, fallback=mark)
+            self._print(f"[Builder Sched]   {leg['side'].upper()} {opt['symbol']} x{size} filled @ {fill:.2f} "
+                        f"(mark {mark:.2f})")
             placed.append({'product_id': opt['product_id'], 'symbol': opt['symbol'],
                            'type': leg['type'], 'strike': opt['strike'],
                            'side': leg['side'], 'size': size,
-                           'entry_price': float(opt.get('mark_price', 0))})
+                           'entry_price': fill, 'entry_mark': mark})
 
         if not placed:
             self._print("[Builder Sched] No legs placed this cycle")
@@ -288,15 +292,16 @@ class BuilderScheduler:
 
         # Hand to a StrategyMonitor for TP/SL (if risk set); force-close on
         # square-off / days-before-expiry handled by a lightweight watcher.
-        total_prem = sum(l['entry_price'] * l['size'] for l in placed if l['side'] == 'sell')
+        # TP / SL = target% / sl% of the NET premium at the executed prices.
         from config import get_contract_value
         try:
             cv = get_contract_value(self.asset)
         except Exception:
             cv = 0.001
         self._cv = cv
-        max_profit = total_prem * cv * self.target_pct / 100 if self.target_pct else 0
-        max_loss = total_prem * cv * self.sl_pct / 100 if self.sl_pct else 0
+        net, max_profit, max_loss = premium_targets(placed, cv, self.target_pct, self.sl_pct)
+        self._print(f"[Builder Sched] Net premium ${net:,.2f} (sell − buy, at fills) → "
+                    f"TP ${max_profit:,.2f} ({self.target_pct}%) | SL −${max_loss:,.2f} ({self.sl_pct}%)")
 
         mon = None
         if max_profit > 0 or max_loss > 0:
@@ -633,9 +638,8 @@ class BuilderScheduler:
         except Exception:
             cv = 0.001
         self._cv = cv
-        total_prem = sum(l['entry_price'] * l['size'] for l in placed if l['side'] == 'sell')
-        max_profit = total_prem * cv * self.target_pct / 100 if self.target_pct else 0
-        max_loss = total_prem * cv * self.sl_pct / 100 if self.sl_pct else 0
+        from strategy.builder_common import premium_targets
+        _, max_profit, max_loss = premium_targets(placed, cv, self.target_pct, self.sl_pct)
         mon = None
         if max_profit > 0 or max_loss > 0:
             _HUGE = 1e12

@@ -72,3 +72,18 @@ def atm_index(chain, spot):
     """Index of the chain row whose strike is closest to spot."""
     strikes = [float(row['strike']) for row in chain]
     return min(range(len(strikes)), key=lambda i: abs(strikes[i] - spot))
+
+
+def premium_targets(legs, contract_value, target_pct, sl_pct):
+    """TP / SL in $ from the NET premium of the placed legs (executed prices).
+
+    net premium = (sum of SELL entry prices - sum of BUY entry prices) x size x contract value
+    TP = net x target_pct %, SL = net x sl_pct %  (e.g. 50% / 100%).
+    For a net-debit structure the debit paid is used as the base.
+    Returns (net_premium, max_profit, max_loss)."""
+    net = sum((1 if l['side'] == 'sell' else -1) * float(l.get('entry_price') or 0) * int(l.get('size') or 0)
+              for l in legs) * contract_value
+    base = abs(net)
+    max_profit = base * float(target_pct) / 100 if target_pct else 0
+    max_loss = base * float(sl_pct) / 100 if sl_pct else 0
+    return net, max_profit, max_loss

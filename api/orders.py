@@ -47,3 +47,46 @@ def place_order(product_id, product_symbol, size, side, max_retries=3):
             else:
                 logger.warning(f"✗ Order failed after {max_retries} attempts: {detail}")
                 return None
+
+
+def get_order(order_id):
+    """GET /v2/orders/{id} -> the order dict (or None)."""
+    if not order_id:
+        return None
+    path = f'/v2/orders/{order_id}'
+    try:
+        headers = get_headers('GET', path, '')
+        r = requests.get(f'{config.BASE_URL}{path}', headers=headers, timeout=10)
+        r.raise_for_status()
+        res = r.json()
+        return res.get('result') if res.get('success') else None
+    except Exception as e:
+        logger.warning(f"get_order {order_id} failed: {e}")
+        return None
+
+
+def order_fill_price(order, fallback=0.0, retries=3):
+    """Average EXECUTED price of a (market) order returned by place_order.
+
+    Uses the order response's average_fill_price; if the response does not carry
+    it yet, re-reads the order a few times. Falls back to `fallback` (e.g. the
+    mark) only when the broker reports no fill price at all."""
+    import time as _t
+
+    def _px(o):
+        try:
+            return float((o or {}).get('average_fill_price') or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    px = _px(order)
+    oid = (order or {}).get('id')
+    for _ in range(retries if px <= 0 and oid else 0):
+        _t.sleep(1)
+        px = _px(get_order(oid))
+        if px > 0:
+            break
+    if px <= 0:
+        logger.warning(f"⚠ No fill price for order {oid} — using {fallback}")
+        return float(fallback or 0)
+    return px

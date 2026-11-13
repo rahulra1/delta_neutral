@@ -8744,16 +8744,20 @@ def api_deploy_strategy_builder():
         ok = order is not None
         results.append({'symbol': opt['symbol'], 'side': leg['side'], 'size': size, 'success': ok})
         if ok:
+            from api.orders import order_fill_price
+            mark = float(opt.get('mark_price', 0) or 0)
+            fill = order_fill_price(order, fallback=mark)       # executed price, not the mark
+            results[-1]['fill_price'] = fill
             placed_legs.append({
                 'product_id': opt['product_id'], 'symbol': opt['symbol'],
                 'type': leg['type'], 'strike': opt['strike'],
                 'side': leg['side'], 'size': size,
-                'entry_price': float(opt.get('mark_price', 0)),
+                'entry_price': fill, 'entry_mark': mark,
             })
             position_tracker.open(current_user_id(), opt['product_id'], opt['symbol'],
                 type=leg['type'], strike=opt['strike'],
                 side=leg['side'], size=size,
-                entry_price=float(opt.get('mark_price', 0)),
+                entry_price=fill,
                 asset=asset, source='Strategy Builder')
 
     if not placed_legs:
@@ -8776,11 +8780,12 @@ def api_deploy_strategy_builder():
     _tp = risk.get('target_pct', None)
     sl_pct = float(100 if _sl is None else _sl)
     tgt_pct = float(50 if _tp is None else _tp)
-    total_premium = sum(l['entry_price'] * l['size'] for l in placed_legs if l['side'] == 'sell')
     lot_sizes = {'BTC': 0.001, 'ETH': 0.01}
     lot_size = lot_sizes.get(asset, 0.001)
-    max_profit = total_premium * lot_size * tgt_pct / 100 if tgt_pct else 0
-    max_loss = total_premium * lot_size * sl_pct / 100 if sl_pct else 0
+    # TP / SL = target% / sl% of the NET premium (sell - buy) at the executed prices
+    from strategy.builder_common import premium_targets
+    net_premium, max_profit, max_loss = premium_targets(placed_legs, lot_size, tgt_pct, sl_pct)
+    data['net_premium'] = round(net_premium, 4)
 
     data['max_profit'] = max_profit
     data['max_loss'] = max_loss
