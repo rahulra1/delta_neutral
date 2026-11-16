@@ -173,9 +173,11 @@ def _resume_db_strategies():
             continue
 
         if source in ('Option Chain', 'Strategy Builder') and max_profit > 0 and max_loss > 0:
+            # NSE/BSE Strategy Builder legs are Groww trading symbols: price/close via Groww.
+            _gw = source == 'Strategy Builder' and asset not in ('BTC', 'ETH')
             mon = StrategyMonitor(
                 legs=legs, max_profit=max_profit, max_loss=max_loss,
-                asset=asset, lot_size=lot_size,
+                asset=asset, lot_size=lot_size, broker='groww' if _gw else None,
             )
             mon.current_pnl = d['pnl'] or 0
             mon.user_id = user_id
