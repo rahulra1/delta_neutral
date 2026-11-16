@@ -7899,6 +7899,17 @@ def dual_momentum_status(sid):
 
 DELTA_ASSETS = {'BTC', 'ETH'}
 
+def _use_groww_for_nse(profile_id):
+    """If the selected profile is a Groww profile, set thread credentials so
+    api.groww uses its (TOTP) login, and return True. Otherwise False (use NSE)."""
+    from config import set_thread_credentials
+    api_key, api_secret, _, broker = get_profile_creds(profile_id)
+    if broker == 'groww' and api_key:
+        set_thread_credentials(api_key, api_secret, 'groww')
+        return True
+    return False
+
+
 @app.route('/api/expiries')
 @login_required
 def api_expiries():
@@ -7924,6 +7935,16 @@ def api_expiries():
         live = 'testnet' not in base and 'demo' not in base
         return jsonify(expiries=get_expiries(asset), source='Delta Exchange',
                        endpoint=base, live=live)
+    if _use_groww_for_nse(request.args.get('profile_id')):
+        from api.groww import get_groww_expiries
+        try:
+            gw_exp = get_groww_expiries(asset)
+        except Exception as e:
+            logger.warning(f"Groww expiries failed for {asset}, falling back to NSE: {e}")
+            gw_exp = []
+        if gw_exp:
+            return jsonify(expiries=gw_exp, source='Groww',
+                           endpoint='groww.in', live=True)
     from api.nse import get_nse_expiries
     return jsonify(expiries=get_nse_expiries(asset), source='NSE',
                    endpoint='nseindia.com', live=True)
@@ -7952,7 +7973,16 @@ def api_chain():
     else:
         from api.nse import get_nse_chain
         try:
-            chain, spot, exp = get_nse_chain(asset, expiry)
+            chain = None
+            if _use_groww_for_nse(request.args.get('profile_id')):
+                from api.groww import get_groww_chain
+                try:
+                    chain, spot, exp = get_groww_chain(asset, expiry)
+                except Exception as e:
+                    logger.warning(f"Groww chain failed for {asset} {expiry}, falling back to NSE: {e}")
+                    chain = None
+            if not chain:
+                chain, spot, exp = get_nse_chain(asset, expiry)
         except Exception as e:
             logger.error(f"NSE chain error: {e}")
             return jsonify(error=str(e)), 500
