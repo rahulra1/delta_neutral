@@ -22,7 +22,15 @@ def compute_live_legs(legs, asset='BTC'):
     Input legs: [{product_id, symbol, side, size, entry_price, type?, strike?, ...}]
     Returns: (enriched_legs, total_pnl)
     """
-    lot_size = get_contract_value(asset)
+    # NSE/BSE legs (Groww): size is a quantity, marks come from Groww LTP by trading symbol.
+    groww = asset not in ('BTC', 'ETH') or any(l.get('trading_symbol') for l in legs)
+    groww_marks = {}
+    if groww:
+        from strategy.groww_exec import get_marks, GROWW_CONTRACT_VALUE
+        lot_size = GROWW_CONTRACT_VALUE
+        groww_marks = get_marks([l for l in legs if l.get('trading_symbol') or l.get('symbol')])
+    else:
+        lot_size = get_contract_value(asset)
     total_pnl = 0
     result = []
 
@@ -31,7 +39,11 @@ def compute_live_legs(legs, asset='BTC'):
         pid = leg.get('product_id')
         mark = entry  # fallback
 
-        if pid:
+        if groww:
+            m = groww_marks.get(leg.get('trading_symbol') or leg.get('symbol'))
+            if m:
+                mark = float(m)
+        elif pid:
             try:
                 data = get_current_price(pid, asset)
                 if data and data.get('mark_price'):

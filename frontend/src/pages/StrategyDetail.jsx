@@ -119,6 +119,7 @@ export default function StrategyDetail() {
   const config = d.details || d.params || {};
   const isRunning = d.running || d.status === 'running' || d.status === 'open (no monitor)';
   const pnl = d.pnl || 0;
+  const cur = ['BTC', 'ETH'].includes(config.asset || d.asset || 'BTC') ? '$' : '₹';
 
   const TABS = [
     { key: 'overview', label: '📊 Overview' },
@@ -179,7 +180,7 @@ export default function StrategyDetail() {
         <>
           {d.source === 'Strategy Builder (Recurring)' && isRunning && <AdoptBrokerLegs sid={sid} onDone={load} />}
           {legs.length > 0 && (
-            <div className="card"><div style={{ fontWeight: 700, marginBottom: 12 }}>Active Legs</div><PositionTable positions={legs} sym="$" /></div>
+            <div className="card"><div style={{ fontWeight: 700, marginBottom: 12 }}>Active Legs</div><PositionTable positions={legs} sym={cur} /></div>
           )}
           {logs.length > 0 && (
             <div className="card">
@@ -208,7 +209,7 @@ export default function StrategyDetail() {
 
       {tab === 'legs' && (
         <div className="card">
-          {legs.length > 0 ? <PositionTable positions={legs} sym="$" /> : <div style={{ color: 'var(--muted)', padding: 16 }}>No legs data available</div>}
+          {legs.length > 0 ? <PositionTable positions={legs} sym={cur} /> : <div style={{ color: 'var(--muted)', padding: 16 }}>No legs data available</div>}
         </div>
       )}
 

@@ -2921,6 +2921,20 @@ def _fetch_peer_strategies(uid, token):
     return []
 
 
+def _bind_groww_ctx(details, asset):
+    """Point this request thread at the strategy's Groww profile so Groww LTP calls
+    authenticate (request threads otherwise default to the demo broker)."""
+    if asset in ('BTC', 'ETH') or not details:
+        return
+    try:
+        from config import set_thread_credentials
+        k, sec, _n, brk = get_profile_creds(details.get('profile_id'))
+        if brk == 'groww' and k:
+            set_thread_credentials(k, sec, 'groww')
+    except Exception as e:
+        logger.warning(f"Groww ctx bind failed: {e}")
+
+
 @app.route('/api/strategies')
 @login_required
 def api_all_strategies():
@@ -3200,6 +3214,7 @@ def api_all_strategies():
                     raw_legs = entry.get('details', {}).get('legs', [])
                     asset = entry.get('details', {}).get('asset', 'BTC')
                     if raw_legs:
+                        _bind_groww_ctx(entry.get('details'), asset)
                         _, pnl = compute_live_legs(raw_legs, asset)
                         entry['pnl'] = pnl
             result.append(entry)
@@ -4158,6 +4173,7 @@ def api_strategy_detail(sid):
                 raw_legs = entry.get('details', {}).get('legs', [])
 
             if raw_legs:
+                _bind_groww_ctx(entry.get('details'), asset)
                 live_legs, total_pnl = compute_live_legs(raw_legs, asset)
                 entry['pnl'] = total_pnl
 

@@ -105,3 +105,12 @@ def test_scheduler_groww_entry_arms_groww_monitor():
     assert s._cv == 1 and s.total_entries == 1
     # TP = 50% of net premium (50 * 65 qty)
     assert started[0].max_profit == 50 * gx.lot_size_for('NIFTY') * 0.5
+
+
+def test_compute_live_legs_uses_groww_marks_and_quantity():
+    from api.live_pnl import compute_live_legs
+    legs = [dict(LEGS[0]), dict(LEGS[1])]
+    with mock.patch.object(gx, 'get_marks', return_value={'NIFTY1': 80.0, 'NIFTY2': 20.0}):
+        out, total = compute_live_legs(legs, 'NIFTY')
+    # sell 100->80: +20*65 ; buy 10->20: +10*65
+    assert out[0]['current_mark'] == 80.0 and total == 30 * 65
