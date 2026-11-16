@@ -447,7 +447,10 @@ def get_option_ltps(trading_symbols):
     for attempt in range(2):
         try:
             client = _get_client(force_refresh=(attempt > 0))
-            keys = tuple(f'NSE_{ts}' for ts in trading_symbols)
+            def _key(ts):
+                ex = 'BSE' if any(ts.startswith(b) for b in _BSE_SYMBOLS) else 'NSE'
+                return f'{ex}_{ts}'
+            keys = tuple(_key(ts) for ts in trading_symbols)
             resp = client.get_ltp(
                 segment='FNO',
                 exchange_trading_symbols=keys
@@ -455,7 +458,7 @@ def get_option_ltps(trading_symbols):
             # Return {original_symbol: ltp}
             result = {}
             for ts in trading_symbols:
-                result[ts] = resp.get(f'NSE_{ts}', 0)
+                result[ts] = resp.get(_key(ts), 0)
             return result
         except Exception as e:
             if attempt == 0 and _is_auth_error(e):

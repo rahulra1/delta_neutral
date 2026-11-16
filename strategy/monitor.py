@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class StrategyMonitor:
     """Monitors a multi-leg option strategy and closes at max profit or max loss."""
 
-    def __init__(self, legs, max_profit, max_loss, asset='BTC', lot_size=0.001, interval=10, on_complete=None):
+    def __init__(self, legs, max_profit, max_loss, asset='BTC', lot_size=0.001, interval=10, on_complete=None, broker=None):
         """
         legs: list of {product_id, symbol, type, strike, side, size, entry_price}
         max_profit / max_loss: absolute dollar thresholds (positive values)
@@ -25,6 +25,13 @@ class StrategyMonitor:
         self.lot_size = lot_size
         self.interval = interval
         self.on_complete = on_complete
+        self.broker = broker
+        self._groww = broker == 'groww'
+        if self._groww:
+            from strategy.groww_exec import GROWW_CONTRACT_VALUE
+            self.lot_size = GROWW_CONTRACT_VALUE   # Groww leg size is already a quantity
+        self._closing = False
+        self._open_legs = list(legs)               # legs not yet confirmed closed (Groww)
 
         self.running = False
         self.current_pnl = 0
@@ -68,13 +75,28 @@ class StrategyMonitor:
                 pnl = 0
                 details = []
                 all_legs_ok = True
+                marks = None
+                if self._groww:
+                    from strategy.groww_exec import get_marks, market_open
+                    if self._closing:
+                        # A previous close was incomplete: retry only the open legs.
+                        if market_open():
+                            self._close_all()
+                            if not self.running:
+                                return
+                        continue
+                    marks = get_marks(self.legs)
                 for leg in self.legs:
                     pid = leg.get('product_id')
                     if not pid:
                         all_legs_ok = False
                         details.append(f"{leg.get('symbol', '?')}: no product_id")
                         continue
-                    data = get_current_price(pid, self.asset)
+                    if self._groww:
+                        m = marks.get(leg.get('trading_symbol') or leg['symbol'])
+                        data = {'mark_price': m} if m else None
+                    else:
+                        data = get_current_price(pid, self.asset)
                     if not data:
                         all_legs_ok = False
                         details.append(f"{leg.get('symbol', '?')}: no data")
@@ -108,6 +130,9 @@ class StrategyMonitor:
                     self._log("⚠ Skipping exit check — incomplete price data")
                     continue
 
+                if self._groww and not market_open():
+                    continue  # orders would be rejected outside the F&O session
+
                 if pnl >= self.max_profit:
                     self.exit_reason = 'max_profit'
                     self._log(f"🎯 Max profit ${self.max_profit:.2f} reached! Closing all legs...")
@@ -123,6 +148,19 @@ class StrategyMonitor:
                 self._log(f"⚠ Monitor error: {e}")
 
     def _close_all(self):
+        if self._groww:
+            from strategy.groww_exec import close_legs
+            self._closing = True
+            self._open_legs = close_legs(self._open_legs, log=self._log)
+            if self._open_legs:
+                self._log(f"⚠ {len(self._open_legs)} leg(s) NOT closed on Groww; will retry "
+                          f"while the market is open. Check Groww positions.")
+                return
+            self.running = False
+            self._log(f"✅ All legs closed. Final PnL: ₹{self.current_pnl:.2f} ({self.exit_reason})")
+            if self.on_complete:
+                self.on_complete(self.current_pnl, self.exit_reason)
+            return
         for leg in self.legs:
             close_side = 'sell' if leg['side'] == 'buy' else 'buy'
             self._log(f"📝 {close_side.upper()} {leg['symbol']} x {leg['size']}")
@@ -136,8 +174,10 @@ class StrategyMonitor:
         """Manual stop — close everything."""
         if self.running:
             self._log("🛑 Manual stop — closing all legs...")
+            self.exit_reason = self.exit_reason or 'manual'
             self._close_all()
-        self.running = False
+        if not (self._groww and self._open_legs and self._closing):
+            self.running = False   # Groww: keep retrying legs that failed to close
 
     def get_status(self):
         with self._lock:

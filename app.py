@@ -8681,6 +8681,89 @@ def api_save_strategy_builder():
     return jsonify(status='saved', sid=sid)
 
 
+def _deploy_builder_groww(data, asset, legs_cfg, broker):
+    """Place Strategy Builder legs on NSE/BSE options through the Groww API.
+
+    Resolves expiry/strikes from the Groww chain, sends BUY legs first, records a
+    leg only after Groww confirms it EXECUTED, then arms a TP/SL StrategyMonitor
+    (Groww marks + Groww close orders) from the net premium.
+    """
+    from api.groww import get_groww_expiries, get_groww_chain
+    from strategy.builder_common import resolve_builder_expiry, premium_targets
+    from strategy import groww_exec
+    from strategy.monitor import StrategyMonitor
+
+    if broker != 'groww':
+        return jsonify(error=f"{asset} orders need a Groww profile (selected broker: {broker})"), 400
+
+    expiries = get_groww_expiries(asset)
+    if not expiries:
+        return jsonify(error="Could not fetch Groww expiries"), 500
+    expiry = resolve_builder_expiry(data.get('expiry', 'weekly'), expiries)
+    if not expiry:
+        return jsonify(error="Could not resolve expiry"), 500
+    chain, spot, _ = get_groww_chain(asset, expiry)
+    if not chain or not spot:
+        return jsonify(error="Failed to fetch Groww option chain"), 500
+
+    lots_per_leg = int(data.get('execution', {}).get('lots', 1))
+    placed_legs, results, err = groww_exec.place_legs(legs_cfg, chain, spot, asset, lots_per_leg)
+    if err:
+        return jsonify(error=err), 400
+    if not placed_legs:
+        return jsonify(error="All orders failed", results=results), 500
+    for l in placed_legs:
+        position_tracker.open(current_user_id(), l['product_id'], l['symbol'], type=l['type'],
+                              strike=l['strike'], side=l['side'], size=l['size'],
+                              entry_price=l['entry_price'], asset=asset, source='Strategy Builder')
+
+    failed = any(not r['success'] for r in results)
+    lot_size = groww_exec.lot_size_for(asset)
+    sid = str(uuid.uuid4())[:8]
+    data['legs'] = placed_legs
+    data['asset'] = asset
+    data['lot_size'] = lot_size
+    record_start(sid, {
+        'asset': asset, 'source': 'Strategy Builder', 'name': data.get('name', 'Unnamed'),
+        'legs': len(placed_legs), 'expiry_date': expiry, 'lot_size': lot_size,
+        'leg_details': ', '.join(f"{l['side'].upper()} {l.get('type','')} {l.get('strike','')}" for l in placed_legs[:4]),
+    }, user_id=current_user_id())
+
+    risk = data.get('risk', {})
+    _sl, _tp = risk.get('sl_pct', None), risk.get('target_pct', None)
+    sl_pct = float(100 if _sl is None else _sl)
+    tgt_pct = float(50 if _tp is None else _tp)
+    net, max_profit, max_loss = premium_targets(placed_legs, groww_exec.GROWW_CONTRACT_VALUE, tgt_pct, sl_pct)
+    data['net_premium'] = round(net, 4)
+    data['max_profit'] = max_profit
+    data['max_loss'] = max_loss
+    track_strategy(sid, 'Strategy Builder', data.get('name', 'Unnamed'), current_user_id(), details=data)
+
+    monitor_id = None
+    # A partial fill leaves an unhedged structure: do not auto-manage it.
+    if not failed and (max_profit > 0 or max_loss > 0):
+        _HUGE = 1e12
+        mon = StrategyMonitor(legs=placed_legs,
+                              max_profit=max_profit if max_profit > 0 else _HUGE,
+                              max_loss=max_loss if max_loss > 0 else _HUGE,
+                              asset=asset, lot_size=groww_exec.GROWW_CONTRACT_VALUE, broker='groww')
+        mon.user_id = current_user_id()
+        mon.sid = sid
+        mon.profile_id = data.get('profile_id')
+        monitor_id = sid
+        active_monitors[monitor_id] = {'monitor': mon, 'user_id': current_user_id(), 'profile_id': data.get('profile_id')}
+        mon.on_complete = lambda pnl, reason: (update_tracked(sid, status='completed', pnl=round(pnl, 2)), record_end(sid, pnl, 0))
+        mon.start()
+        update_tracked(sid, status='running')
+    else:
+        update_tracked(sid, status='open (partial - check Groww)' if failed else 'open (no monitor)')
+
+    resp = dict(status='partial' if failed else 'deployed', sid=sid, results=results, monitor_id=monitor_id)
+    if failed:
+        resp['warning'] = 'Some legs failed; open legs remain on Groww and are NOT monitored. Review positions.'
+    return jsonify(resp)
+
+
 @app.route('/api/strategy-builder/deploy', methods=['POST'])
 @login_required
 @credits_required('deploy_builder')
@@ -8700,6 +8783,14 @@ def api_deploy_strategy_builder():
     legs_cfg = data.get('legs', [])
     if not legs_cfg:
         return jsonify(error="No legs defined"), 400
+
+    # NSE/BSE underlyings are traded through Groww (Delta has no such products).
+    if asset not in DELTA_ASSETS:
+        if data.get('recurring'):
+            if broker != 'groww':
+                return jsonify(error=f"{asset} orders need a Groww profile (selected broker: {broker})"), 400
+        else:
+            return _deploy_builder_groww(data, asset, legs_cfg, broker)
 
     # Recurring mode: hand the whole config to the BuilderScheduler, which opens
     # the strategy on the configured weekdays/time (and days-before-expiry) and

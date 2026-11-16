@@ -105,6 +105,33 @@ class BuilderScheduler:
         except (ValueError, TypeError):
             return None
 
+    @property
+    def _groww(self):
+        return self._broker == 'groww'
+
+    def _mark(self, leg):
+        """Current mark for a leg (Groww LTP or Delta price); falls back to entry."""
+        try:
+            if self._groww:
+                from strategy.groww_exec import get_marks
+                m = get_marks([leg]).get(leg.get('trading_symbol') or leg['symbol'])
+                return m if m else leg['entry_price']
+            from api.pricing import get_current_price
+            data = get_current_price(leg['product_id'], self.asset)
+            return data['mark_price'] if data else leg['entry_price']
+        except Exception:
+            return leg['entry_price']
+
+    def _contract_value(self):
+        if self._groww:
+            from strategy.groww_exec import GROWW_CONTRACT_VALUE
+            return GROWW_CONTRACT_VALUE
+        from config import get_contract_value
+        try:
+            return get_contract_value(self.asset)
+        except Exception:
+            return 0.001
+
     # ── BaseStrategy-ish interface ──────────────────────────────────────
 
     def initialize(self):
@@ -177,17 +204,12 @@ class BuilderScheduler:
     def running_pnl(self):
         """Live UNREALIZED P&L of currently-open positions only. This is what
         TP/SL act on. Does NOT include realized/cumulative P&L."""
-        from api.pricing import get_current_price
         total = 0.0
         with self._open_lock:
             positions = [p for p in self._open_positions]
         for pos in positions:
             for l in pos.get('legs', []):
-                try:
-                    data = get_current_price(l['product_id'], self.asset)
-                    mark = data['mark_price'] if data else l['entry_price']
-                except Exception:
-                    mark = l['entry_price']
+                mark = self._mark(l)
                 sign = 1 if l['side'] == 'sell' else -1
                 total += sign * (l['entry_price'] - mark) * l['size'] * self._cv
         return total
@@ -199,18 +221,13 @@ class BuilderScheduler:
 
     def status(self):
         """Monitoring snapshot for the dashboard, with live per-leg marks/PnL."""
-        from api.pricing import get_current_price
         with self._open_lock:
             positions = [dict(p) for p in self._open_positions]
         open_legs = []
         running = 0.0
         for pos in positions:
             for l in pos.get('legs', []):
-                try:
-                    data = get_current_price(l['product_id'], self.asset)
-                    mark = data['mark_price'] if data else l['entry_price']
-                except Exception:
-                    mark = l['entry_price']
+                mark = self._mark(l)
                 sign = 1 if l['side'] == 'sell' else -1
                 leg_pnl = sign * (l['entry_price'] - mark) * l['size'] * self._cv
                 running += leg_pnl
@@ -235,11 +252,14 @@ class BuilderScheduler:
     # ── Core ────────────────────────────────────────────────────────────
 
     def _run_one_entry(self):
-        from api.chain import get_option_chain_full, get_expiries
         from api.orders import place_order, order_fill_price
         from strategy.builder_common import (
             resolve_builder_expiry, resolve_leg_to_option, atm_index, premium_targets)
         from strategy.monitor import StrategyMonitor
+        if self._groww:
+            from api.groww import get_groww_expiries as get_expiries, get_groww_chain as get_option_chain_full
+        else:
+            from api.chain import get_option_chain_full, get_expiries
 
         expiries = get_expiries(self.asset)
         expiry = resolve_builder_expiry(self.expiry_key, expiries)
@@ -261,7 +281,27 @@ class BuilderScheduler:
         atm_idx = atm_index(chain, spot)
 
         placed = []
-        for leg in self.legs_cfg:
+        if self._groww:
+            from strategy import groww_exec
+            placed, results, err = groww_exec.place_legs(
+                self.legs_cfg, chain, spot, self.asset, self.lots_per_leg, log=self._print)
+            if err:
+                self._print(f"[Builder Sched] {err}")
+                return
+            if any(not r['success'] for r in results):
+                # Partial structure: do not auto-manage; surface loudly.
+                self._print(f"[Builder Sched] ⚠ Groww leg failed {results} — "
+                            f"{len(placed)} filled leg(s) are OPEN and UNMONITORED; stopping scheduler")
+                if placed:
+                    self.total_entries += 1
+                    with self._open_lock:
+                        self._open_positions.append({'entry_id': self.total_entries,
+                                                     'expiry': expiry, 'legs': placed})
+                    self._track_legs(placed)
+                self._running = False
+                self._persist_state()
+                return
+        for leg in ([] if self._groww else self.legs_cfg):
             opt = resolve_leg_to_option(leg, chain, atm_idx)
             if not opt:
                 self._print(f"[Builder Sched] No option for leg {leg} — skipping it")
@@ -293,11 +333,7 @@ class BuilderScheduler:
         # Hand to a StrategyMonitor for TP/SL (if risk set); force-close on
         # square-off / days-before-expiry handled by a lightweight watcher.
         # TP / SL = target% / sl% of the NET premium at the executed prices.
-        from config import get_contract_value
-        try:
-            cv = get_contract_value(self.asset)
-        except Exception:
-            cv = 0.001
+        cv = self._contract_value()
         self._cv = cv
         net, max_profit, max_loss = premium_targets(placed, cv, self.target_pct, self.sl_pct)
         self._print(f"[Builder Sched] Net premium ${net:,.2f} (sell − buy, at fills) → "
@@ -311,7 +347,7 @@ class BuilderScheduler:
             mon = StrategyMonitor(legs=placed,
                                   max_profit=max_profit if max_profit > 0 else _HUGE,
                                   max_loss=max_loss if max_loss > 0 else _HUGE,
-                                  asset=self.asset, lot_size=cv)
+                                  asset=self.asset, lot_size=cv, broker=self._broker)
             mon.user_id = self._user_id
             mon.sid = self._sid
             mon.profile_id = self.profile_id
@@ -328,7 +364,6 @@ class BuilderScheduler:
 
     def _expiry_exit_watch(self, entry_id, placed, expiry, mon):
         from api.orders import place_order
-        from api.pricing import get_current_price
         self._apply_thread_context()
         opened_at = datetime.now(IST)
         exit_target, rule = self._resolve_exit_target(opened_at, expiry)
@@ -359,18 +394,22 @@ class BuilderScheduler:
             # Book realized PnL from current marks BEFORE closing, then close.
             realized = 0.0
             for l in placed:
-                try:
-                    data = get_current_price(l['product_id'], self.asset)
-                    mark = data['mark_price'] if data else l['entry_price']
-                except Exception:
-                    mark = l['entry_price']
+                mark = self._mark(l)
                 sign = 1 if l['side'] == 'sell' else -1
                 realized += sign * (l['entry_price'] - mark) * l['size'] * self._cv
+                if self._groww:
+                    continue
                 close_side = 'sell' if l['side'] == 'buy' else 'buy'
                 try:
                     place_order(l['product_id'], l['symbol'], l['size'], close_side)
                 except Exception as e:
                     logger.warning("[Builder Sched] close fail %s: %s", l['symbol'], e)
+            if self._groww:
+                from strategy.groww_exec import close_legs
+                failed = close_legs(placed, log=self._print)
+                if failed:
+                    self._print(f"[Builder Sched] ⚠ {len(failed)} Groww leg(s) NOT closed at square-off "
+                                f"({[l['symbol'] for l in failed]}) — close manually on Groww")
             if mon is not None:
                 mon.running = False
             self._print(f"[Builder Sched] Force-closed {len(placed)} legs (square-off/expiry)")
@@ -627,16 +666,12 @@ class BuilderScheduler:
     def _rearm_position(self, pos):
         """Re-create the TP/SL monitor + expiry watcher for a restored position."""
         from strategy.monitor import StrategyMonitor
-        from config import get_contract_value
         placed = pos.get('legs', [])
         expiry = pos.get('expiry')
         entry_id = pos.get('entry_id')
         if not placed:
             return
-        try:
-            cv = get_contract_value(self.asset)
-        except Exception:
-            cv = 0.001
+        cv = self._contract_value()
         self._cv = cv
         from strategy.builder_common import premium_targets
         _, max_profit, max_loss = premium_targets(placed, cv, self.target_pct, self.sl_pct)
@@ -646,7 +681,7 @@ class BuilderScheduler:
             mon = StrategyMonitor(legs=placed,
                                   max_profit=max_profit if max_profit > 0 else _HUGE,
                                   max_loss=max_loss if max_loss > 0 else _HUGE,
-                                  asset=self.asset, lot_size=cv)
+                                  asset=self.asset, lot_size=cv, broker=self._broker)
             mon.user_id = self._user_id
             mon.sid = self._sid
             mon.profile_id = self.profile_id
