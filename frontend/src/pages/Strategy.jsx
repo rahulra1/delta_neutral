@@ -213,9 +213,9 @@ const STRATEGIES = [
     desc: 'Rotates a watchlist every minute from the current top green/red sectors (Sector Scanner) and buys the ATM CALL / PUT when a stock\'s 5-min candle closes beyond its 09:15–09:50 range (and the 5-min VWAP). Max 5 open, 6 entries a day. Exits when the STOCK hits its SL/TP, the daily target/stop is hit, or at 15:15. Paper or LIVE (Groww).',
     features: ['09:15–09:50 opening-range breakout', '5m candle close + 5m VWAP', 'Daily TP / SL on the whole book', 'Paper or Live (Groww)'],
     rec: '⏱ Intraday 9:50–3:15 IST · NSE stock options · needs a Groww profile' },
-  { key: 'nse_scanner_overnight', label: 'Scanner Overnight Options (Paper)', icon: '🌙🇮🇳', type: 'Options',
-    desc: 'At 15:15 takes the top Sector Scanner setup of each green/red sector (max 5, one per sector, F&O stocks only) and paper-buys the ATM CALL (LONG) / PUT (SHORT) — expiry at least 15 days away, else next month. Sells everything at 09:17 the next trading day. No stop / target.',
-    features: ['15:15 entry → next-day 09:17 exit', 'Top 5 · one per sector', 'Expiry ≥ 15 days', 'Paper only · Groww chain'],
+  { key: 'nse_scanner_overnight', label: 'Scanner Overnight Options', icon: '🌙🇮🇳', type: 'Options',
+    desc: 'At 15:15 takes the top Sector Scanner setup of each green/red sector (max 5, one per sector, F&O stocks only) and buys the ATM CALL (LONG) / PUT (SHORT) — expiry at least 15 days away, else next month. Sells everything at 09:17 the next trading day. No stop / target. Paper or LIVE (Groww).',
+    features: ['15:15 entry → next-day 09:17 exit', 'Top 5 · one per sector', 'Expiry ≥ 15 days', 'Paper or Live (Groww)'],
     rec: '⏱ Overnight · NSE stock options · needs a Groww profile' },
   { key: 'crypto_futures', label: 'Crypto Scanner Futures', icon: '🪙⚡', type: 'Futures',
     desc: 'Trades Delta Exchange perpetual futures picked by the Crypto Scanner: top LONG/SHORT setups (RS + 24h VWAP + volume) in the strongest green/red crypto sectors. You set the dollars per trade; lots = dollars ÷ (price × coins per lot). Stop at VWAP or a fixed %, target in R, time stop. Paper or LIVE.',
@@ -468,6 +468,7 @@ const CRYPTO_FUTURES_DETAILS = [
 ];
 
 const NSE_SCANNER_OVERNIGHT_FIELDS = [
+  { key: 'dry_run', label: 'Mode', type: 'select', options: [{value:true,label:'Paper (simulated fills)'},{value:false,label:'LIVE (real orders on Groww)'}], default: true, hint: 'LIVE places real Groww MARKET orders (NRML) with the selected Groww profile: BUY at 15:15, SELL at 09:17 next day' },
   { key: 'max_trades', label: 'Max Trades per Day', type: 'number', default: 5, hint: 'Top setup of each bullish/bearish sector, one per sector' },
   { key: 'min_dte', label: 'Min Days to Expiry', type: 'number', default: 15, hint: 'Nearest expiry with at least this many days left, else the next month' },
   { key: 'lots', label: 'Lots per Trade', type: 'number', default: 1, hint: 'Lot size comes from the Groww instruments list' },
@@ -489,11 +490,12 @@ const NSE_SCANNER_OVERNIGHT_DETAILS = [
     'From EACH sector it takes the top Sector Scanner setup (RS vs sector + right side of VWAP + RVOL ≥ 1.5; labelled LATE after 14:30) in the sector\'s direction — one stock per sector, max 5, F&O stocks only, never the same stock twice. If a sector\'s top stock has no tradeable option it tries that sector\'s next setup.',
     'If the scan fails it retries until 15:25; after that no entry that day.',
   ] },
-  { heading: '2. Trade (paper)', points: [
-    'LONG → buys the ATM CALL, SHORT → buys the ATM PUT, 1 lot. Expiry: the nearest expiry with at least 15 days left, otherwise the next month. Strike nearest the stock price, price = Groww option-chain LTP. No real orders.',
+  { heading: '2. Trade (paper or LIVE)', points: [
+    'LONG → buys the ATM CALL, SHORT → buys the ATM PUT, 1 lot. Expiry: the nearest expiry with at least 15 days left, otherwise the next month. Strike nearest the stock price.',
+    'Paper: price = Groww option-chain LTP, no orders. LIVE: a real Groww MARKET order (NRML); the position is recorded only after Groww confirms the fill, and the fill price is used for P&L. A BUY that fails is skipped.',
   ] },
   { heading: '3. Exit (09:17 next trading day)', points: [
-    'Every position is sold at 09:17 on the next trading day at the Groww option LTP. No stop-loss or target. Weekends / holidays: sold at 09:17 on the next open day.',
+    'Every position is sold at 09:17 on the next trading day (paper: at the Groww option LTP; LIVE: MARKET SELL, retried every ~20 s until Groww confirms the fill). No stop-loss or target. Weekends / holidays: sold at 09:17 on the next open day.',
     'If the app was down at 09:17 the positions are sold as soon as it is back during market hours. Realized P&L is after estimated Groww F&O charges.',
   ] },
   { heading: '4. What to expect', points: [
@@ -1223,10 +1225,14 @@ export default function Strategy() {
           }} />
       )}
       {activeTab === 'nse_scanner_overnight' && (
-        <StrategyTemplate title="Scanner Overnight Options (Paper)" icon="🌙🇮🇳" type="Options"
-          description="At 15:15 paper-buys the ATM CALL / PUT of the top Sector Scanner setup in each bullish/bearish sector (max 5, one per sector, F&O stocks, expiry ≥ 15 days else next month) and sells them at 09:17 the next trading day. Select a Groww profile." profiles={profiles}
+        <StrategyTemplate title="Scanner Overnight Options" icon="🌙🇮🇳" type="Options"
+          description="At 15:15 buys the ATM CALL / PUT of the top Sector Scanner setup in each bullish/bearish sector (max 5, one per sector, F&O stocks, expiry ≥ 15 days else next month) and sells them at 09:17 the next trading day. Paper or LIVE — select a Groww profile." profiles={profiles}
           configFields={NSE_SCANNER_OVERNIGHT_FIELDS} details={NSE_SCANNER_OVERNIGHT_DETAILS}
           onStart={async (config) => {
+            const live = String(config.dry_run) === 'false';
+            if (live && !window.confirm(`Start LIVE trading on Groww?\n\nReal MARKET orders: BUY up to ${config.max_trades} ATM stock options (${config.lots} lot each, max premium ₹${config.max_premium} per trade) at ${config.entry_hour}:${String(config.entry_minute).padStart(2, '0')}, SELL at ${config.exit_hour}:${String(config.exit_minute).padStart(2, '0')} the next trading day. No stop-loss or target, so an overnight gap can lose the whole premium.`)) {
+              return { error: 'Cancelled — LIVE start not confirmed' };
+            }
             const c = { ...config, mode: 'overnight' };
             if (typeof c.trading_days === 'string') c.trading_days = c.trading_days.split(',').map(d => parseInt(d.trim(), 10)).filter(n => !isNaN(n));
             const { data } = await api.post('/nse-sector-options/start', c);

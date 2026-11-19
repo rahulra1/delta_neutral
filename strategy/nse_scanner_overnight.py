@@ -1,4 +1,4 @@
-"""NSE Scanner Overnight Options — PAPER trades Sector Scanner picks overnight (15:15 -> next day 09:17).
+"""NSE Scanner Overnight Options — trades Sector Scanner picks overnight (15:15 -> next day 09:17), PAPER or LIVE.
 
 Daily flow (IST):
   1. ENTRY at 15:15 (entry window 15:15-15:25) on trading days:
@@ -7,14 +7,17 @@ Daily flow (IST):
        (scanner rank; LONG / SHORT, labelled LATE after 14:30) whose direction matches the sector bias.
        Only F&O stocks (listed stock options in Groww's instruments list). One pick per sector, max
        max_trades (5) picks, never the same stock twice.
-  2. Paper-BUY 1 lot (configurable) of the ATM CALL for LONG / ATM PUT for SHORT.
+  2. BUY 1 lot (configurable) of the ATM CALL for LONG / ATM PUT for SHORT.
        Expiry: the nearest expiry with at least min_dte (15) days left, otherwise the next month.
-       Price = Groww option-chain LTP. Skipped if lots x lot size x premium > max_premium.
-  3. EXIT every position at 09:17 on the NEXT trading day (Groww option LTP). No stop / target.
+       PAPER price = Groww option-chain LTP; LIVE = real Groww MARKET order (NRML), price = the fill. Skipped if lots x lot size x premium > max_premium.
+  3. EXIT every position at 09:17 on the NEXT trading day (PAPER: Groww option LTP; LIVE: MARKET SELL,
+       retried every cycle until Groww confirms the fill). No stop / target.
        If the app was down at 09:17 the positions are sold as soon as it is back during market hours.
   4. Estimated Groww F&O charges are deducted from the realized P&L.
 
-No real orders are ever placed (paper only). Needs a Groww profile with a valid token.
+dry_run=True (default) is paper. dry_run=False places REAL Groww orders and needs a Groww profile with a valid
+token; a BUY that is not confirmed filled is never recorded, a SELL that is not confirmed keeps the position
+open and is retried.
 Backtest of the same rules: backtest/sector_scanner_overnight_options.py.
 """
 
@@ -35,11 +38,11 @@ class NseScannerOvernight(NseSectorOptions):
 
     def __init__(self, max_trades=5, min_dte=15, lots=1, max_premium=100000.0, sector_group='Sectoral',
                  entry_hour=15, entry_minute=15, exit_hour=9, exit_minute=17, trading_days=None,
-                 monitor_interval=15, run_immediately=False):
+                 monitor_interval=15, run_immediately=False, dry_run=True):
         super().__init__(entry_hour=entry_hour, entry_minute=entry_minute, exit_hour=exit_hour,
                          exit_minute=exit_minute, lots=lots, min_dte=min_dte, max_premium=max_premium,
                          sector_group=sector_group, trading_days=trading_days, monitor_interval=monitor_interval,
-                         run_immediately=run_immediately)
+                         run_immediately=run_immediately, dry_run=dry_run)
         self.max_trades = max(1, int(max_trades))
         self._base_params = {
             'mode': 'overnight', 'max_trades': self.max_trades, 'min_dte': self.min_dte, 'lots': self.lots,
@@ -47,7 +50,7 @@ class NseScannerOvernight(NseSectorOptions):
             'entry_hour': self.entry_hour, 'entry_minute': self.entry_minute,
             'exit_hour': self.exit_hour, 'exit_minute': self.exit_minute,
             'trading_days': self.trading_days, 'monitoring_interval': self.monitor_interval,
-            'run_immediately': self.run_immediately, 'dry_run': True,
+            'run_immediately': self.run_immediately, 'dry_run': self.dry_run,
         }
 
     # ------------------------------------------------------------------ lifecycle
@@ -57,14 +60,21 @@ class NseScannerOvernight(NseSectorOptions):
         self._api_key, self._api_secret = get_api_key(), get_api_secret()
         self._broker = getattr(_thread_local, 'broker', '')
         days = ','.join(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][d] for d in self.trading_days)
-        print(f"{TAG} Started [PAPER] | entry {self.entry_hour:02d}:{self.entry_minute:02d} IST -> exit next trading day "
+        print(f"{TAG} Started [{self._mode}] | entry {self.entry_hour:02d}:{self.entry_minute:02d} IST -> exit next trading day "
               f"{self.exit_hour:02d}:{self.exit_minute:02d} | days {days}")
         print(f"{TAG} Top setup of each BULLISH/BEARISH {self.sector_group.lower()} sector, max {self.max_trades} "
               f"(one per sector), F&O stocks only | {self.lots} lot ATM CE (LONG) / PE (SHORT) | expiry >= "
               f"{self.min_dte} days else next month | max premium Rs {self.max_premium:,.0f} | no SL / TP"
               + (" | RUN-NOW (test)" if self.run_immediately else ""))
         if self._broker != 'groww':
+            if not self.dry_run:
+                print(f"{TAG} ❌ LIVE mode needs a Groww profile (profile broker is '{self._broker}') — not starting")
+                self._running = False
+                return False
             print(f"{TAG} ⚠ Profile broker is '{self._broker}', not 'groww' — option prices need a Groww profile")
+        if not self.dry_run:
+            print(f"{TAG} 🔴 LIVE MODE — real Groww MARKET orders (NRML), {self.lots} lot per trade. A BUY that is not "
+                  f"confirmed filled is skipped; a failed SELL keeps the position open and is retried every cycle.")
         open_legs = self._open_legs()
         if open_legs:
             print(f"{TAG} Resumed with {len(open_legs)} overnight position(s): "
@@ -185,18 +195,29 @@ class NseScannerOvernight(NseSectorOptions):
                     continue                        # next stock of the SAME sector
                 picks.append((d, r, contract))
                 break                               # one pick per sector
+        entered = []
         for d, r, c in picks:
+            if not self.dry_run:
+                fill, oid, why = self._live_order(c['trading_symbol'], c['qty'], 'BUY', fallback=c['ltp'])
+                if fill is None:
+                    skipped.append(f"{r['symbol']} (LIVE buy failed: {why})")
+                    print(f"{TAG} ✗ LIVE BUY {c['trading_symbol']} x{c['qty']} failed: {why} — not recorded")
+                    continue
+                c = dict(c, ltp=fill, order_id=oid)
             self._enter(d, r, c, rank=len([l for l in self._open_legs() if l['opened_at'][:10] == today]) + 1)
+            entered.append(r['symbol'])
+            if not self.dry_run:
+                self._persist_state()             # a real position must survive a crash before the scan ends
         if skipped:
             print(f"{TAG}   passed over: {', '.join(skipped[-10:])}")
-        if picks or force or now >= self._entry_time(now) + timedelta(minutes=ENTRY_WINDOW_MIN - 1):
+        if entered or force or now >= self._entry_time(now) + timedelta(minutes=ENTRY_WINDOW_MIN - 1):
             self._entered_day = today
-            if not picks:
+            if not entered:
                 print(f"{TAG} No F&O setup in a bullish/bearish sector — no trade today")
         else:
             print(f"{TAG} No tradeable setup yet — rescanning until "
                   f"{self._entry_time(now) + timedelta(minutes=ENTRY_WINDOW_MIN):%H:%M}")
-        self._last_scan = {'time': now.isoformat(), 'day': today, 'picks': [p[1]['symbol'] for p in picks],
+        self._last_scan = {'time': now.isoformat(), 'day': today, 'picks': entered,
                            'sectors': [s['index'] for s in cands[:8]], 'skipped': skipped[-10:]}
         self._persist_state()
 
@@ -209,7 +230,7 @@ class NseScannerOvernight(NseSectorOptions):
             'entry_price': c['ltp'], 'current_mark': c['ltp'], 'current_pnl': 0.0,
             'stock_entry': round(c['spot'], 2), 'stock_mark': round(c['spot'], 2),
             'sector': sector['index'], 'sector_pchg': sector['pchange'], 'setup': row['setup'],
-            'rank': rank, 'opened_at': now.isoformat(), 'stopped': False,
+            'rank': rank, 'opened_at': now.isoformat(), 'stopped': False, 'order_id': c.get('order_id'),
         }
         with self._legs_lock:
             self.legs = [l for l in self.legs if not l.get('stopped')] + [leg]
@@ -221,8 +242,9 @@ class NseScannerOvernight(NseSectorOptions):
             'underlying': row['symbol'], 'qty': c['qty'], 'price': round(c['ltp'], 2),
             'stock_price': round(c['spot'], 2), 'sector': sector['index'],
             'reason': f"#{rank} {row['direction']} setup, {sector['index']} {sector['pchange']:+.2f}%",
+            'mode': self._mode, 'order_id': c.get('order_id'),
         })
-        print(f"{TAG} [PAPER] BUY #{rank} {c['trading_symbol']} x{c['qty']} ({self.lots} lot) @ Rs {c['ltp']:.2f} "
+        print(f"{TAG} [{self._mode}] BUY #{rank} {c['trading_symbol']} x{c['qty']} ({self.lots} lot) @ Rs {c['ltp']:.2f} "
               f"= Rs {c['ltp'] * c['qty']:,.0f} | {row['direction']} {row['symbol']} @ {c['spot']:.2f} | "
               f"{sector['index']} {sector['pchange']:+.2f}% | expiry {c['expiry']} | IV {c['iv']}")
 
@@ -254,32 +276,57 @@ class NseScannerOvernight(NseSectorOptions):
                 logger.warning("%s exit marks %s failed: %s", TAG, leg['symbol'], e)
             if spot:
                 leg['stock_mark'] = round(spot, 2)
-            if opt:
+            if opt or not self.dry_run:             # LIVE: a MARKET order needs no LTP — never wait
                 self._exit(leg, reason='next_day_0917', opt=opt)
             elif late:
                 self._exit(leg, reason='next_day_no_ltp', opt=leg.get('current_mark') or leg['entry_price'])
 
     def close_all(self):
-        """Manual stop: paper-sell every open option at the current LTP."""
+        """Manual stop: sell every open option (PAPER at the LTP; LIVE market orders, 3 attempts)."""
         self._running = False
+        self._apply_thread_context()          # may be called from a request thread
         for leg in self._open_legs():
-            self._exit(leg, reason='manual_stop')
+            for _ in range(1 if self.dry_run else 3):
+                if self._exit(leg, reason='manual_stop'):
+                    break
+                time.sleep(2)
+            else:
+                print(f"{TAG} 🚨 {leg['symbol']} x{leg['qty']} could NOT be closed — CLOSE IT MANUALLY in Groww")
         self._persist_state()
 
     def _exit(self, leg, reason, opt=None):
+        """Close one position. PAPER: at the option LTP. LIVE: SELL MARKET order; the position is only
+        marked closed once Groww confirms the fill, otherwise it stays open (exit_pending) and is retried.
+        Returns True when closed."""
         if opt is None:
             try:
                 _, opt = self._marks(leg)
             except Exception:                       # noqa: BLE001
                 opt = None
-        px = opt or leg.get('current_mark') or leg['entry_price']
+        fallback = opt or leg.get('current_mark') or leg['entry_price']
+        exit_oid = None
+        if not self.dry_run:
+            fill, exit_oid, why = self._live_order(leg['symbol'], leg['qty'], 'SELL', fallback=fallback)
+            if fill is None:
+                leg['exit_pending'] = reason
+                leg['exit_failures'] = leg.get('exit_failures', 0) + 1
+                n = leg['exit_failures']
+                if n in (1, 3) or n % 20 == 0:
+                    print(f"{TAG} 🚨 LIVE SELL {leg['symbol']} x{leg['qty']} ({reason}) failed #{n}: {why} — "
+                          f"position still OPEN, retrying"
+                          + (" — CHECK GROWW MANUALLY" if n >= 3 else ""))
+                self._persist_state()
+                return False
+            px = fill
+        else:
+            px = fallback
         gross = (px - leg['entry_price']) * leg['qty']
         fees = estimate_charges(leg['entry_price'] * leg['qty'], px * leg['qty'])
         net = gross - fees
         now = datetime.now(IST)
         with self._legs_lock:
             leg.update(stopped=True, exit_price=round(px, 2), current_mark=round(px, 2), current_pnl=0.0,
-                       exit_reason=reason)
+                       exit_reason=reason, exit_order_id=exit_oid, exit_pending=None)
             self.cumulative_pnl += net
             self.total_charges += fees
         side = 1 if leg['type'] == 'call' else -1
@@ -288,12 +335,13 @@ class NseScannerOvernight(NseSectorOptions):
             'ts': now.isoformat(), 'date': now.strftime('%Y-%m-%d'), 'action': 'SELL', 'symbol': leg['symbol'],
             'underlying': leg['underlying'], 'qty': leg['qty'], 'price': round(px, 2),
             'stock_price': leg.get('stock_mark'), 'gross': round(gross, 2), 'charges': fees, 'pnl': round(net, 2),
-            'reason': reason,
+            'reason': reason, 'mode': self._mode, 'order_id': exit_oid,
         })
-        print(f"{TAG} [PAPER] SELL {leg['symbol']} x{leg['qty']} @ Rs {px:.2f} | {reason} | stock {leg['underlying']} "
+        print(f"{TAG} [{self._mode}] SELL {leg['symbol']} x{leg['qty']} @ Rs {px:.2f} | {reason} | stock {leg['underlying']} "
               f"{leg.get('stock_mark')} ({move:+.2f}% our way) | gross Rs {gross:+,.0f} - charges Rs {fees:,.0f} = "
               f"Rs {net:+,.0f} | cumulative Rs {self.cumulative_pnl:+,.0f}")
         self._persist_state()
+        return True
 
     # ------------------------------------------------------------------ persistence / status
     def _persist_state(self):
@@ -336,6 +384,6 @@ class NseScannerOvernight(NseSectorOptions):
             'cumulative_pnl': round(self.cumulative_pnl, 2), 'total_pnl': round(self.pnl, 2),
             'total_charges': round(self.total_charges, 2), 'total_trades': self.total_trades,
             'days_traded': self.total_days_traded, 'trade_log': self.trade_log[-30:], 'legs': legs,
-            'last_scan': self._last_scan, 'entered_day': self._entered_day, 'next_action': nxt,
+            'last_scan': self._last_scan, 'entered_day': self._entered_day, 'next_action': nxt, 'mode': self._mode,
             'params': self._base_params,
         }

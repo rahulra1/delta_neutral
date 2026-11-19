@@ -5605,6 +5605,7 @@ def _build_sector_options(params, resume=False):
             exit_hour=int(params.get('exit_hour', 9)), exit_minute=int(params.get('exit_minute', 17)),
             trading_days=days, monitor_interval=int(params.get('monitoring_interval', 15)),
             run_immediately=False if resume else _as_bool(params.get('run_immediately', False)),
+            dry_run=_as_bool(params.get('dry_run', True)),   # saved in details: a resume keeps the mode
         )
     return NseSectorOptions(
         entry_hour=int(params.get('entry_hour', 9)), entry_minute=int(params.get('entry_minute', 50)),
@@ -5678,8 +5679,8 @@ def nse_sector_options_start():
     params = dict(request.json or {})
     profile_id = params.pop('profile_id', None)
     overnight = params.get('mode') == 'overnight'
-    # Scanner Overnight Options stays paper only; NSE Sector Options can run PAPER or LIVE
-    params['dry_run'] = True if overnight else _as_bool(params.get('dry_run', True))
+    # Both NSE Sector Options and Scanner Overnight Options run PAPER (default) or LIVE (Groww)
+    params['dry_run'] = _as_bool(params.get('dry_run', True))
     for k in ('day_tp', 'day_sl'):
         try:
             params[k] = max(0.0, float(params.get(k) or 0))
@@ -5698,7 +5699,7 @@ def nse_sector_options_start():
     nse_sector_options_strategies[sid] = entry
     if overnight:
         name = (f"Scanner Overnight Options (15:15 -> 09:17, top {params.get('max_trades', 5)} by sector, "
-                f"expiry >= {params.get('min_dte', 15)}d, {params.get('lots', 1)} lot, paper)")
+                f"expiry >= {params.get('min_dte', 15)}d, {params.get('lots', 1)} lot, {mode})")
     else:
         day_txt = ''
         if params['day_tp'] or params['day_sl']:
